@@ -5,7 +5,7 @@
 # until the maintainer approves publishing (ARCHITECTURE.md §8).
 id = "powah"
 name = "Powah"
-version = "0.2.6"
+version = "0.2.7"
 description = """A port of Powah! (Rearchitected) for Horizon, slice 1: the starter tier of the energy
 chain. The Furnator burns a furnace fuel into carbon and makes 20 FE/t into a 20,000 FE buffer
 (one coal is 48,000 FE); the Energy Cell is a 1,000,000 FE capacitor that takes and gives 1,000
@@ -27,8 +27,12 @@ tiers now craft.
 Slice 6 completes the furnator and cable ladders: six more furnators (80/200/800/2,000/8,000/40,000
 FE/t into their own 80k…40M buffers, each giving at its own per-side rate) and six more cables
 (2,000 up to 1,000,000 FE/t), a network joining only its own tier's cables.
-Not yet ported: the creative cell, the generators, reactors, item charging, side config, redstone
-modes and the GUIs."""
+Slice 7 adds the item-energy family: a machine's own item carries its buffer when the machine is
+broken (every furnator, cell and rod keeps its FE, and placing the item puts it back clamped to the
+tier), and a furnator charges the item in its charge slot while a cell charges two, each step
+exactly min(transfer, stored, room) out of the machine's own buffer.
+Not yet ported: the creative cell, the generators, reactors, side config, redstone modes and the
+GUIs."""
 authors = ["owmii", "Technici4n", "AdLf0208"]
 # A native mod: Rust in src/, compiled by the launcher against the game build [native] pins,
 # beside the carried assets/ and data/. The id is the resource namespace and the only identity.

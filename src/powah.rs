@@ -12,13 +12,15 @@
 //! so the buffer's numbers have one home, [`battery_of`], which the cable's
 //! relay also reads when it plans a move.
 use std::collections::{BTreeSet, HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use mod_api::{
-    self, BlockEntityPart, BlockEntityTickEvent, BlockEntityTickReply, BlockEntityTicksEvent,
-    BlockEntityTypeKey, BlockPart, Command, CommandArgumentValue, Compound, Direction, ENERGY,
-    Host, HostTransaction, Identifier, LevelRef, ModContainer, ModEnergyBuffer, Registrar,
-    ServerHost, Tag, move_energy,
+    self, BlockDropsEvent, BlockEntityPart, BlockEntityTickEvent, BlockEntityTickReply,
+    BlockEntityTicksEvent, BlockEntityTypeKey, BlockPart, Command, CommandArgumentValue, Component,
+    ComponentId, Compound, Direction, ENERGY, EnergyHandler, Flow, Host, HostTransaction,
+    Identifier, ItemComponentHandler, ItemKey, ItemPart, ItemPlace, LevelHost, LevelRef,
+    ModContainer, ModEnergyBuffer, OnBlockPlacedByEvent, Registrar, ServerHost, Tag, Transaction,
+    move_energy,
 };
 
 use crate::runtime::{
@@ -94,10 +96,195 @@ pub(crate) const CELLS: [(&str, &str); CELL_TIER_COUNT] = [
     ("powah:energy_cell_nitro", "energy_cell_nitro"),
 ];
 
-/// The furnator's fuel slot: upstream's slot 1 of 2 (the charging slot is a gap),
-/// so slice 1 keeps exactly one.
-const FUEL_SLOT: usize = 0;
-const SLOT_COUNT: usize = 1;
+/// The furnator's fuel slot: upstream's slot 1 of 2, and the charge slot is 0.
+const FUEL_SLOT: usize = 1;
+/// The charge slot: upstream's slot 0 of the furnator, and the first of a cell's two.
+pub(crate) const CHARGE_SLOT: usize = 0;
+/// A furnator's two slots (`FurnatorTile`: chargeables then fuel).
+const FURNATOR_SLOTS: usize = 2;
+/// A cell's two slot slots (`EnergyCellTile` charges `chargeItems(2)`).
+const CELL_SLOTS: usize = 2;
+
+/// What one of this mod's machine items holds, as upstream's `EnergyBlockItem`
+/// `Info` gives it: the machine tier's capacity, and the per-call insert and
+/// extract limits its `getTransferType` allows (a furnator only gives).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ItemBuffer {
+    /// The tier's capacity.
+    pub capacity: i32,
+    /// The most one insert moves; 0 for a machine that never receives.
+    pub max_insert: i32,
+    /// The most one extract moves.
+    pub max_extract: i32,
+}
+
+/// The item buffer of the machine `block` names, `None` for a block whose item
+/// holds none (the cable stores nothing and the orb is not an energy block).
+pub(crate) fn item_buffer(block: &str) -> Option<ItemBuffer> {
+    match Kind::of(block)? {
+        // `AbstractEnergyProvider.getTransferType` is `Transfer.EXTRACT`: a furnator's
+        // own item gives and never takes.
+        Kind::Furnator(tier) => Some(ItemBuffer {
+            capacity: tier.capacity,
+            max_insert: 0,
+            max_extract: tier.transfer,
+        }),
+        Kind::Cell(tier) => Some(ItemBuffer {
+            capacity: tier.capacity,
+            max_insert: tier.transfer,
+            max_extract: tier.transfer,
+        }),
+        Kind::Rod(tier) => Some(ItemBuffer {
+            capacity: tier.capacity,
+            max_insert: tier.transfer,
+            max_extract: tier.transfer,
+        }),
+        Kind::Orb | Kind::Cable(_) => None,
+    }
+}
+
+/// The item-charging slots a machine kind has: the furnator one
+/// (`FurnatorTile`'s `chargeItems(1)`), a cell two (`EnergyCellTile`'s
+/// `chargeItems(2)`), everything else none.
+pub(crate) fn kind_charge_slots(kind: Kind) -> usize {
+    match kind {
+        Kind::Furnator(_) => 1,
+        Kind::Cell(_) => CELL_SLOTS,
+        Kind::Orb | Kind::Cable(_) | Kind::Rod(_) => 0,
+    }
+}
+
+/// How many item-charging slots the machine `block` names has: the furnator one
+/// (`chargeItems(1)`), a cell two (`chargeItems(2)`), everything else none.
+pub(crate) fn charge_slots(block: &str) -> usize {
+    Kind::of(block).map_or(0, kind_charge_slots)
+}
+
+/// The buffer a machine's own item carries when the machine is broken
+/// (upstream's `keepEnergy`): its tier's capacity, `None` when the machine keeps
+/// nothing (the cable, the orb).
+pub(crate) fn keep_capacity(block: &str) -> Option<i32> {
+    match Kind::of(block)? {
+        Kind::Furnator(tier) => Some(tier.capacity),
+        Kind::Cell(tier) => Some(tier.capacity),
+        Kind::Rod(tier) => Some(tier.capacity),
+        Kind::Orb | Kind::Cable(_) => None,
+    }
+}
+
+/// A cell's container: upstream's two item slots (`EnergyCellTile`), every face
+/// reaching both, no menu (this port has no GUI).
+pub(crate) fn cell_container() -> ModContainer {
+    let slots: Vec<usize> = (0..CELL_SLOTS).collect();
+    ModContainer {
+        slots: CELL_SLOTS,
+        faces: std::array::from_fn(|_| slots.clone()),
+        inputs: slots.clone(),
+        outputs: slots,
+        menu: None,
+    }
+}
+
+/// The vanilla component that moves a block entity's saved data on its item
+/// (`BlockEntity.applyComponentsFromItemStack`), tagged with the type's id.
+pub(crate) const BLOCK_ENTITY_DATA: &str = "minecraft:block_entity_data";
+
+/// One charge slot as a readout shows it: the item's id, what it holds and its
+/// capacity.
+pub(crate) type ChargeReadout<'a> = Option<(&'a str, i32, i32)>;
+
+/// `minecraft:block_entity_data`, as a component a stack's patch is read from.
+struct BlockEntityData;
+
+impl Component for BlockEntityData {
+    type Value = Compound;
+
+    fn id(&self) -> &str {
+        BLOCK_ENTITY_DATA
+    }
+
+    fn decode(&self, value: &Tag) -> Option<Compound> {
+        match value {
+            Tag::Compound(data) => Some(data.clone()),
+            _ => None,
+        }
+    }
+
+    fn encode(&self, value: Compound) -> Tag {
+        Tag::Compound(value)
+    }
+}
+
+/// The `minecraft:block_entity_data` patch a broken machine's own item carries:
+/// the buffer, tagged with the block entity type's id (the engine loads a payload
+/// only when its `id` names the block entity it is placed as). `None` when the
+/// buffer is empty, which is upstream's "write the storable compound only when
+/// it is not empty".
+///
+/// **Only the buffer.** The engine spills a mod container's stacks as their own
+/// item entities when the block is removed, so a payload that also carried
+/// `Items` would put every stack in the world twice (HANDOVER §9m).
+#[must_use]
+pub(crate) fn carried_patch(energy: i32, capacity: i32, type_id: &str) -> Option<Compound> {
+    let energy = crate::runtime::carried_energy(energy, capacity)?;
+    let mut payload = Compound::new();
+    payload.insert("id".into(), Tag::String(type_id.into()));
+    payload.insert(KEY_ENERGY.into(), Tag::Int(energy));
+    let mut patch = Compound::new();
+    patch.insert(BLOCK_ENTITY_DATA.into(), Tag::Compound(payload));
+    Some(patch)
+}
+
+/// The buffer a stack's `minecraft:block_entity_data` payload asks a placed
+/// machine to hold, exactly as the payload states it (a `/give`d item may name
+/// any amount); `None` when the payload carries none at all.
+#[must_use]
+pub(crate) fn asked_energy(payload: Option<&Compound>) -> Option<i32> {
+    match payload?.get(&KEY_ENERGY.into()) {
+        Some(Tag::Int(energy)) => Some(*energy),
+        // A payload a player wrote may name a long; it is clamped where it is used.
+        Some(Tag::Long(energy)) => {
+            Some(i32::try_from(*energy).unwrap_or(if *energy < 0 { i32::MIN } else { i32::MAX }))
+        }
+        _ => None,
+    }
+}
+
+/// The `minecraft:block_entity_data` payload a stack carries, if it carries one.
+fn payload_of(stack: &mod_api::ItemStack) -> Option<Compound> {
+    stack.get(&BlockEntityData)
+}
+
+/// The FE `stack`'s payload says the machine it becomes holds: 0 when it carries
+/// no payload or one without a buffer.
+fn held_energy(stack: &mod_api::ItemStack) -> i32 {
+    asked_energy(payload_of(stack).as_ref()).unwrap_or(0)
+}
+
+/// `stack` rewritten as holding `energy` FE in its own
+/// `minecraft:block_entity_data` payload (so placing it gives that machine that
+/// FE), clamped into the item's own buffer. `None` when the stack is not one of
+/// this mod's machine items.
+///
+/// The payload is built fresh — the type id and the buffer, nothing else — so a
+/// doctored stack's other keys (`Items` above all) never travel on.
+fn with_payload_energy(
+    host: &dyn Host,
+    stack: &mod_api::ItemStack,
+    energy: i32,
+) -> Option<mod_api::ItemStack> {
+    let block = stack.item().id(host);
+    let buffer = item_buffer(&block)?;
+    let mut payload = Compound::new();
+    payload.insert("id".into(), Tag::String(block.as_str().into()));
+    payload.insert(
+        KEY_ENERGY.into(),
+        Tag::Int(crate::runtime::clamp_energy(energy, buffer.capacity)),
+    );
+    let mut stack = stack.clone();
+    stack.set(&BlockEntityData, payload).ok()?;
+    Some(stack)
+}
 
 /// Upstream's saved keys (`saveAdditional`).
 const KEY_ENERGY: &str = "energy";
@@ -176,14 +363,18 @@ pub(crate) fn declare(registrar: &mut dyn Registrar, name: &str) -> BlockEntityT
     registrar.block_entity_type(name).blocks(&[name]).build()
 }
 
-/// The furnator's container: one fuel slot every face reaches, no menu (slice 1
-/// has no GUI). Upstream has two slots — the charging slot is a gap.
+/// The furnator's container: the charge slot then the fuel slot, every face
+/// reaching both, no menu (this port has no GUI). Upstream's own `canInsert`
+/// gates the slots (fuel in 1, chargeables in 0); a container declaration cannot
+/// express a per-slot rule at this pin — a refusal on one slot cancels a click on
+/// another (HANDOVER §9l) — so the tick decides instead, as it already did for
+/// the fuel.
 pub(crate) fn container() -> ModContainer {
     ModContainer {
-        slots: SLOT_COUNT,
-        faces: std::array::from_fn(|_| vec![FUEL_SLOT]),
-        inputs: vec![FUEL_SLOT],
-        outputs: vec![FUEL_SLOT],
+        slots: FURNATOR_SLOTS,
+        faces: std::array::from_fn(|_| vec![CHARGE_SLOT, FUEL_SLOT]),
+        inputs: vec![CHARGE_SLOT, FUEL_SLOT],
+        outputs: vec![CHARGE_SLOT, FUEL_SLOT],
         menu: None,
     }
 }
@@ -498,13 +689,16 @@ fn in_range(rod: [i32; 3], orb: [i32; 3]) -> bool {
 }
 
 /// One machine's readout line, exactly as 0.1.0 printed it (the line the
-/// in-game check's assertions match, so it must not drift).
+/// in-game check's assertions match, so it must not drift). The charge slots a
+/// machine has are named after its fuel (a furnator's) or its comparator (a
+/// cell's), so every earlier assertion still matches its prefix.
 pub(crate) fn status_line(
     kind: Kind,
     pos: [i32; 3],
     energy: i32,
     carbon: i32,
     fuel: Option<(&str, u32)>,
+    charge: &[ChargeReadout<'_>],
     time: i64,
 ) -> String {
     let [x, y, z] = pos;
@@ -516,17 +710,20 @@ pub(crate) fn status_line(
             };
             format!(
                 "Furnator at {x},{y},{z}: {energy}/{} FE (comparator {}, \
-                 carbon {carbon}, burning {}, fuel {fuel}, {} FE/t a side, t={time})",
+                 carbon {carbon}, burning {}, fuel {fuel}, charge {}, {} FE/t a side, t={time})",
                 tier.capacity,
                 comparator_strength(energy, tier.capacity),
                 carbon > 0,
+                charge_text(charge),
                 tier.transfer,
             )
         }
         Kind::Cell(tier) => format!(
-            "Energy Cell at {x},{y},{z}: {energy}/{} FE (comparator {}, {} FE/t a side, t={time})",
+            "Energy Cell at {x},{y},{z}: {energy}/{} FE (comparator {}, charge {}, {} FE/t a \
+             side, t={time})",
             tier.capacity,
             comparator_strength(energy, tier.capacity),
+            charge_text(charge),
             tier.transfer,
         ),
         Kind::Cable(tier) => format!(
@@ -539,6 +736,22 @@ pub(crate) fn status_line(
         Kind::Orb => orb_line(pos, energy, None, 0, time),
         Kind::Rod(tier) => rod_line(pos, energy, tier, None, time),
     }
+}
+
+/// The charge slots of a readout, comma-separated: `<item> <held>/<capacity>`, or
+/// `empty` for a slot with nothing in it.
+fn charge_text(charge: &[ChargeReadout<'_>]) -> String {
+    if charge.is_empty() {
+        return "none".to_owned();
+    }
+    charge
+        .iter()
+        .map(|slot| match slot {
+            Some((item, held, capacity)) => format!("{item} {held}/{capacity}"),
+            None => "empty".to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// The energizing rod tier a block id names, with its numbers; `None` for any
@@ -664,13 +877,42 @@ pub(crate) fn block_at(host: &dyn Host, level: LevelRef, pos: [i32; 3]) -> Optio
     Some(level.block(host, pos)?.id(host))
 }
 
-/// The two usages `/powah` declares, both operator-only (level 2). They are
-/// administrative: `set` writes a machine's stored FE and `info` reads its fuel
-/// slot, at coordinates the caller chooses, so they are operator diagnostics
-/// rather than gameplay (review finding 2026-11-18).
+/// The two usages `/powah` declares, all operator-only (level 2). They are
+/// administrative: `set` writes a machine's stored FE, `item` writes the charge
+/// of the item in its charge slot, and `info` reads its slots, at coordinates the
+/// caller chooses, so they are operator diagnostics rather than gameplay (review
+/// finding 2026-11-18).
 pub(crate) fn declare_commands(commands: &mut Vec<Command>) {
     commands.push(Command::op("powah info <pos:block_pos>", 2));
     commands.push(Command::op("powah set <amount:integer> <pos:block_pos>", 2));
+    commands.push(Command::op(
+        "powah item <amount:integer> <pos:block_pos>",
+        2,
+    ));
+}
+
+/// A machine's charge slots as its readout shows them: each slot's item (with the
+/// buffer it carries) or an empty slot.
+fn charge_readout(
+    host: &mut dyn ServerHost,
+    entity: mod_api::BlockEntityRef,
+    slots: usize,
+) -> Vec<Option<(String, i32, i32)>> {
+    (0..slots)
+        .map(|slot| {
+            let stack = entity
+                .item_slot(&*host, u32::try_from(slot).unwrap_or(u32::MAX))
+                .ok()
+                .flatten()?;
+            let item = stack.item().id(&*host).to_owned();
+            let capacity = item_buffer(&item).map_or(0, |buffer| buffer.capacity);
+            Some((
+                item,
+                crate::runtime::clamp_energy(held_energy(&stack), capacity),
+                capacity,
+            ))
+        })
+        .collect()
 }
 
 /// A machine's readout, or `None` when no Powah machine stands there. The block id
@@ -678,9 +920,11 @@ pub(crate) fn declare_commands(commands: &mut Vec<Command>) {
 /// 0 FE.
 pub(crate) fn info_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> Option<String> {
     let level = level_now(host)?;
-    let kind = Kind::of(&block_at(&*host, level, pos)?)?;
+    let block = block_at(&*host, level, pos)?;
+    let kind = Kind::of(&block)?;
+    let slots = charge_slots(&block);
     let time = level.game_time(&*host).unwrap_or(0);
-    let (energy, carbon, fuel) = match kind {
+    let (energy, carbon, fuel, charge) = match kind {
         Kind::Furnator(tier) => {
             let entity = host.block_entity(level, pos)?;
             let state = read(&Tag::Compound(entity.data(&*host)?), tier);
@@ -689,18 +933,21 @@ pub(crate) fn info_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> Option<Stri
                 .ok()
                 .flatten()
                 .map(|stack| (stack.item().id(&*host), stack.count()));
-            (state.energy, state.carbon, fuel)
+            let charge = charge_readout(host, entity, slots);
+            (state.energy, state.carbon, fuel, charge)
         }
         Kind::Cell(tier) => {
             let entity = host.block_entity(level, pos)?;
             let saved = Tag::Compound(entity.data(&*host)?);
+            let charge = charge_readout(host, entity, slots);
             (
                 clamp_energy(int(&saved, KEY_ENERGY), tier.capacity),
                 0,
                 None,
+                charge,
             )
         }
-        Kind::Cable(_) => (0, 0, None),
+        Kind::Cable(_) => (0, 0, None, Vec::new()),
         Kind::Orb => {
             let orb = read_orb(host, level, pos)?;
             return Some(orb_line(
@@ -725,7 +972,14 @@ pub(crate) fn info_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> Option<Stri
         }
     };
     let fuel = fuel.as_ref().map(|(item, count)| (item.as_str(), *count));
-    Some(status_line(kind, pos, energy, carbon, fuel, time))
+    let charge: Vec<ChargeReadout<'_>> = charge
+        .iter()
+        .map(|slot| {
+            slot.as_ref()
+                .map(|(item, held, capacity)| (item.as_str(), *held, *capacity))
+        })
+        .collect();
+    Some(status_line(kind, pos, energy, carbon, fuel, &charge, time))
 }
 
 /// Set a furnator's, a cell's, the orb's or a rod's stored FE (`/powah set`): the
@@ -816,17 +1070,36 @@ impl FurnatorPart {
     }
 }
 
-/// The cell and the cable: a block entity that stores nothing of its own and only
-/// queues itself for the level tick's end, where the moves run. An energizing rod
-/// is the same shape: it queues itself, and its move into the orb is one of the
-/// level tick's jobs.
+/// What a stored machine's own tick does besides queue: clamp its buffer into its
+/// tier, and — for a cell — charge the items in its slots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct IdleRules {
+    /// The tier's capacity: a buffer above it is clamped back on its own tick, so a
+    /// doctored payload or a `/data merge block` cannot turn the machine into an
+    /// endless source.
+    pub capacity: i32,
+    /// The tier's per-side transfer, which is also the per-slot charge cap
+    /// (`ChargeUtil.chargeItemsInInventory`'s `maxPerSlot`).
+    pub transfer: i32,
+    /// The item slots it charges (`EnergyCellTile`'s two; a rod none).
+    pub slots: usize,
+}
+
+/// The cell, the cable and the rod: a block entity that only queues itself for the
+/// level tick's end, where the moves run (a rod's move into its orb is one of the
+/// level tick's jobs; a cell's charge of its two item slots is here, before the
+/// moves, as upstream's `postTick` charges before `extractFromSides`).
+///
+/// A cell and a rod also clamp their saved buffer on every tick when it is out of
+/// their tier; a cable has no buffer and passes [`None`].
 pub(crate) struct IdlePart {
     queue: Arc<Mutex<Queue>>,
+    rules: Option<IdleRules>,
 }
 
 impl IdlePart {
-    pub(crate) fn new(queue: Arc<Mutex<Queue>>) -> IdlePart {
-        IdlePart { queue }
+    pub(crate) fn new(queue: Arc<Mutex<Queue>>, rules: Option<IdleRules>) -> IdlePart {
+        IdlePart { queue, rules }
     }
 }
 
@@ -839,8 +1112,9 @@ impl BlockEntityPart for IdlePart {
         event.ticks = true;
     }
 
-    /// The cell stores its FE in its saved compound and the cable in nothing, so
-    /// neither has a rule of its own: both only queue the move phase.
+    /// The cell and the rod store their FE in their saved compound and the cable
+    /// stores nothing: their only job is the move phase, plus the cell's item
+    /// charge and the clamp of a buffer that is out of its tier.
     fn block_entity_tick(&self, host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
         if let Some(level) = level_now(host) {
             self.queue
@@ -848,7 +1122,31 @@ impl BlockEntityPart for IdlePart {
                 .expect("the powah queue lock is held for one insert")
                 .push(level, event.pos);
         }
-        *event.reply = BlockEntityTickReply::Unchanged;
+        let Some(rules) = self.rules else {
+            *event.reply = BlockEntityTickReply::Unchanged;
+            return;
+        };
+        let mut saved = Tag::Compound(std::mem::take(&mut event.entity.nbt));
+        let before = int(&saved, KEY_ENERGY);
+        let mut energy = crate::runtime::clamp_energy(before, rules.capacity);
+        let charged = charge_items(
+            &*host,
+            rules.slots,
+            energy,
+            rules.transfer,
+            &mut event.entity.items,
+        );
+        energy -= charged;
+        let changed = energy != before;
+        if changed {
+            write_int(&mut saved, KEY_ENERGY, energy);
+        }
+        if let Tag::Compound(nbt) = saved {
+            event.entity.nbt = nbt;
+        }
+        if !changed {
+            *event.reply = BlockEntityTickReply::Unchanged;
+        }
     }
 }
 
@@ -875,15 +1173,16 @@ impl BlockEntityPart for OrbPart {
 }
 
 /// The furnator's tick: `initBurn` (`AbstractGeneratorBlock`), one tick of
-/// production, and the state written back. Answers whether anything changed.
+/// production, the item charge (`postTick`'s `chargeItems(1)`) and the state
+/// written back. Answers whether anything changed.
 fn burn(
     host: &mut dyn ServerHost,
     event: &mut BlockEntityTickEvent<'_>,
     tier: FurnatorTier,
 ) -> bool {
-    let resized = event.entity.items.len() != SLOT_COUNT;
+    let resized = event.entity.items.len() != FURNATOR_SLOTS;
     if resized {
-        event.entity.items.resize(SLOT_COUNT, None);
+        event.entity.items.resize(FURNATOR_SLOTS, None);
     }
     let mut saved = Tag::Compound(std::mem::take(&mut event.entity.nbt));
     let before = read(&saved, tier);
@@ -901,11 +1200,338 @@ fn burn(
         }
     }
     let produced = state.tick(tier) > 0;
+    // `postTick` charges the charge slot after producing, so a tick's production can
+    // leave on the same tick; the buffer is debited by exactly what the item took.
+    let charged = charge_items(
+        &*host,
+        kind_charge_slots(Kind::Furnator(tier)),
+        state.energy,
+        tier.transfer,
+        &mut event.entity.items,
+    );
+    state.energy -= charged;
     write(&mut saved, &state);
     if let Tag::Compound(nbt) = saved {
         event.entity.nbt = nbt;
     }
-    resized || took || produced
+    resized || took || produced || charged > 0
+}
+
+/// The machine's item-charging slots, one step per slot as upstream's
+/// `ChargeUtil.transferSlotList` takes them: each item takes
+/// `min(the machine's transfer, what is left of its buffer, the item's own room)`,
+/// the buffer is debited by what the item took, and a slot whose item holds no
+/// buffer (a stone in a charge slot) is left alone. Answers the FE that left the
+/// buffer.
+fn charge_items(
+    host: &dyn Host,
+    slots: usize,
+    stored: i32,
+    transfer: i32,
+    items: &mut [Option<mod_api::ItemStack>],
+) -> i32 {
+    let mut budget = stored.max(0);
+    let mut charged = 0;
+    for slot in 0..slots.min(items.len()) {
+        if budget <= 0 {
+            break;
+        }
+        let Some(stack) = items[slot].as_ref() else {
+            continue;
+        };
+        let id = stack.item().id(host);
+        let Some(buffer) = item_buffer(&id) else {
+            continue;
+        };
+        let held = held_energy(stack);
+        let room = buffer.capacity.saturating_sub(held.max(0));
+        // The item's own capability caps one call too (`Info.maxInsert`).
+        let moved = crate::runtime::charge_step(budget, transfer.min(buffer.max_insert), room);
+        if moved <= 0 {
+            continue;
+        }
+        let Some(charged_stack) = with_payload_energy(host, stack, held.saturating_add(moved))
+        else {
+            continue;
+        };
+        items[slot] = Some(charged_stack);
+        budget -= moved;
+        charged += moved;
+    }
+    charged
+}
+
+/// The machine items, resolved once at registration: `block_drops` runs with a
+/// read-only level host, which cannot name an item, so the drop is matched by the
+/// keys remembered here.
+static ITEMS: OnceLock<RwLock<HashMap<&'static str, ItemKey>>> = OnceLock::new();
+
+/// The block keys' table, filled by [`remember_item`].
+fn items() -> &'static RwLock<HashMap<&'static str, ItemKey>> {
+    ITEMS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Remember the item a machine block's own drop resolves to (registration time).
+pub(crate) fn remember_item(block: &'static str, item: ItemKey) {
+    items()
+        .write()
+        .expect("the powah item table is written at registration only")
+        .insert(block, item);
+}
+
+/// The item key of the machine `block` names, once [`remember_item`] ran.
+fn item_of(block: &str) -> Option<ItemKey> {
+    items()
+        .read()
+        .expect("the powah item table is read for one lookup")
+        .get(block)
+        .copied()
+}
+
+/// `block_drops`: a broken machine's own item carries its buffer, so placing the
+/// item puts the FE back (upstream's `playerDestroy` → `storeToStack`, and
+/// `keepEnergy` for every furnator, cell and rod).
+///
+/// The block entity is out of the world by now; the engine holds its saved data
+/// for this event (`level.block_entity_data`). The payload is built from the
+/// buffer alone: the engine spills a container's stacks itself, so carrying
+/// `Items` would duplicate them.
+pub(crate) fn on_block_drops(level: &dyn LevelHost, event: &mut BlockDropsEvent<'_>) -> Flow {
+    let Some(block) = level.state_block(event.state) else {
+        return Flow::Continue;
+    };
+    let Some(capacity) = keep_capacity(block) else {
+        return Flow::Continue;
+    };
+    let Some(entity) = event.block_entity else {
+        return Flow::Continue;
+    };
+    let Some(saved) = level.block_entity_data(entity) else {
+        return Flow::Continue;
+    };
+    let energy = int(&Tag::Compound(saved), KEY_ENERGY);
+    let Some(patch) = carried_patch(energy, capacity, block) else {
+        return Flow::Continue;
+    };
+    let Some(item) = item_of(block) else {
+        return Flow::Continue;
+    };
+    for drop in event.drops.iter_mut() {
+        if drop.stack.item() == item {
+            let _ = drop.stack.apply_components(&patch);
+        }
+    }
+    Flow::Continue
+}
+
+/// The item half of every machine: a placed machine takes the buffer its item
+/// carried, clamped into the tier's capacity.
+///
+/// The engine has already applied the payload to the new block entity, so a
+/// doctored `/give` (2,000,000,000 FE on a 20,000 FE furnator) is clamped here;
+/// a machine placed by a dispenser reaches here with no placer, and every
+/// machine's own tick clamps again.
+pub(crate) struct MachineItem;
+
+#[mod_api::horizon_part]
+impl ItemPart for MachineItem {
+    fn on_block_placed_by(&self, host: &mut dyn ServerHost, event: &mut OnBlockPlacedByEvent<'_>) {
+        let Some(asked) = asked_energy(payload_of(event.stack).as_ref()) else {
+            return;
+        };
+        let Some(level) = level_now(host) else {
+            return;
+        };
+        let Some(block) = block_at(&*host, level, event.pos) else {
+            return;
+        };
+        let Some(capacity) = keep_capacity(&block) else {
+            return;
+        };
+        // A payload is stack-scoped: a stack of more than one (unreachable for this
+        // mod's unstackable machine items, reachable for a doctored `/give`) splits
+        // it instead of giving every item the whole buffer.
+        let count = i32::try_from(event.stack.count()).unwrap_or(1).max(1);
+        let wanted = crate::runtime::restored_energy(asked / count, capacity);
+        let Some(entity) = host.block_entity(level, event.pos) else {
+            return;
+        };
+        let current = entity
+            .data(&*host)
+            .map_or(0, |nbt| int(&Tag::Compound(nbt), KEY_ENERGY));
+        if current == wanted {
+            return;
+        }
+        let mut patch = Compound::new();
+        patch.insert(KEY_ENERGY.into(), Tag::Int(wanted));
+        let _ = entity.merge_data(host, patch);
+    }
+}
+
+/// One of this mod's machine items as `Capabilities.Energy.ITEM`: the buffer in
+/// the stack's own `minecraft:block_entity_data` payload, which is also what
+/// placement reads — one store, so a machine item charged in a slot gives the
+/// machine that charge (see `notes.md`, upstream defect fixed).
+pub(crate) struct MachineEnergy {
+    place: ItemPlace,
+    block: &'static str,
+    buffer: ItemBuffer,
+}
+
+impl MachineEnergy {
+    pub(crate) fn new(place: ItemPlace, block: &'static str, buffer: ItemBuffer) -> MachineEnergy {
+        MachineEnergy {
+            place,
+            block,
+            buffer,
+        }
+    }
+
+    /// What the item at the place holds, clamped into its buffer.
+    fn held(&self, host: &mut dyn ServerHost) -> i32 {
+        match self.handler().read(host) {
+            Some(Tag::Compound(payload)) => crate::runtime::clamp_energy(
+                asked_energy(Some(&payload)).unwrap_or(0),
+                self.buffer.capacity,
+            ),
+            _ => 0,
+        }
+    }
+
+    /// The component handler of the item at the place.
+    fn handler(&self) -> ItemComponentHandler {
+        ItemComponentHandler::new(
+            self.place.clone(),
+            ComponentId::new(BLOCK_ENTITY_DATA)
+                .expect("`minecraft:block_entity_data` is a namespaced component id"),
+        )
+    }
+
+    /// Rewrites the item as holding `energy`: `moved` when that went through.
+    fn rewrite(&self, host: &mut dyn ServerHost, tx: &Transaction, energy: i32, moved: i32) -> i32 {
+        let mut payload = Compound::new();
+        payload.insert("id".into(), Tag::String(self.block.into()));
+        payload.insert(KEY_ENERGY.into(), Tag::Int(energy));
+        if self.handler().write(host, tx, Some(Tag::Compound(payload))) {
+            moved
+        } else {
+            0
+        }
+    }
+}
+
+impl EnergyHandler for MachineEnergy {
+    /// What the item holds (`EnergyBlockItem`'s `Info` over the payload).
+    fn amount(&self, host: &mut dyn ServerHost) -> u32 {
+        u32::try_from(self.held(host)).unwrap_or(0)
+    }
+
+    fn capacity(&self, _: &mut dyn ServerHost) -> u32 {
+        u32::try_from(self.buffer.capacity).unwrap_or(0)
+    }
+
+    fn insert(&self, host: &mut dyn ServerHost, tx: &Transaction, amount: u32) -> u32 {
+        let held = self.held(host);
+        let room = self.buffer.capacity.saturating_sub(held);
+        let moved = crate::runtime::charge_step(
+            i32::try_from(amount).unwrap_or(i32::MAX),
+            self.buffer.max_insert,
+            room,
+        );
+        match moved {
+            0 => 0,
+            moved => u32::try_from(self.rewrite(host, tx, held.saturating_add(moved), moved))
+                .unwrap_or(0),
+        }
+    }
+
+    fn extract(&self, host: &mut dyn ServerHost, tx: &Transaction, amount: u32) -> u32 {
+        let held = self.held(host);
+        let moved = i32::try_from(amount)
+            .unwrap_or(i32::MAX)
+            .min(self.buffer.max_extract)
+            .min(held);
+        match moved {
+            0 => 0,
+            moved => u32::try_from(self.rewrite(host, tx, held.saturating_sub(moved), moved))
+                .unwrap_or(0),
+        }
+    }
+}
+
+/// What `/powah item` did, so the command can answer honestly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum SetItemOutcome {
+    /// The charge slot's item now holds this much.
+    Set(String, i32),
+    /// The machine has no charge slot (the cable, the orb, a rod).
+    NoSlot,
+    /// The charge slot holds no item, or one that carries no buffer.
+    NotChargeable,
+    /// No Powah machine stands there.
+    NoBlock,
+}
+
+/// Set the FE the item in a machine's charge slot carries (`/powah item`): the
+/// harness control the in-game check uses to leave an item an exact room. The
+/// item is rewritten through its own place's component handler, the write a
+/// charge takes, so a stack splits one off.
+pub(crate) fn set_item_energy(
+    host: &mut dyn ServerHost,
+    pos: [i32; 3],
+    amount: i32,
+) -> SetItemOutcome {
+    let Some(level) = level_now(host) else {
+        return SetItemOutcome::NoBlock;
+    };
+    let Some(block) = block_at(&*host, level, pos) else {
+        return SetItemOutcome::NoBlock;
+    };
+    if Kind::of(&block).is_none() {
+        return SetItemOutcome::NoBlock;
+    }
+    if charge_slots(&block) == 0 {
+        return SetItemOutcome::NoSlot;
+    }
+    let Some(entity) = host.block_entity(level, pos) else {
+        return SetItemOutcome::NoBlock;
+    };
+    let Ok(Some(stack)) = entity.item_slot(&*host, CHARGE_SLOT as u32) else {
+        return SetItemOutcome::NotChargeable;
+    };
+    let item = stack.item().id(&*host).to_owned();
+    let Some(buffer) = item_buffer(&item) else {
+        return SetItemOutcome::NotChargeable;
+    };
+    let energy = crate::runtime::clamp_energy(amount, buffer.capacity);
+    let mut payload = Compound::new();
+    payload.insert("id".into(), Tag::String(item.as_str().into()));
+    payload.insert(KEY_ENERGY.into(), Tag::Int(energy));
+    let place = ItemPlace::BlockEntity {
+        level,
+        pos,
+        side: None,
+        slot: CHARGE_SLOT,
+    };
+    let handler = ItemComponentHandler::new(
+        place,
+        ComponentId::new(BLOCK_ENTITY_DATA)
+            .expect("`minecraft:block_entity_data` is a namespaced component id"),
+    );
+    let written = host
+        .transaction(|host, tx| {
+            Ok::<bool, std::convert::Infallible>(handler.write(
+                host,
+                tx,
+                Some(Tag::Compound(payload)),
+            ))
+        })
+        .unwrap_or(false);
+    if written {
+        SetItemOutcome::Set(item, energy)
+    } else {
+        SetItemOutcome::NotChargeable
+    }
 }
 
 /// The fuel slot, as `AbstractGeneratorBlock.initBurn` reads it: the item's
@@ -918,7 +1544,7 @@ struct FuelSlot<'a, 'g> {
 impl FuelSlot<'_, '_> {
     /// The burn time the item in the fuel slot gives, 0 when there is none.
     fn peek(&self) -> u32 {
-        let Some(Some(stack)) = self.entity.items.first() else {
+        let Some(Some(stack)) = self.entity.items.get(FUEL_SLOT) else {
             return 0;
         };
         burn_time(self.host, stack)
@@ -927,7 +1553,7 @@ impl FuelSlot<'_, '_> {
     /// `ItemStack.shrink(1)` plus `getCraftingRemainingItem`: a lava bucket leaves
     /// its bucket.
     fn take(&mut self) {
-        let Some(Some(stack)) = self.entity.items.first() else {
+        let Some(Some(stack)) = self.entity.items.get(FUEL_SLOT) else {
             return;
         };
         let left = stack.clone().shrink(1);
@@ -1202,7 +1828,19 @@ mod tests {
     fn the_harness_commands_are_operator_only() {
         let mut commands = Vec::new();
         declare_commands(&mut commands);
-        assert_eq!(commands.len(), 2, "every usage is declared");
+        assert_eq!(
+            commands.len(),
+            3,
+            "every usage is declared: `info`, `set` and the item charge control"
+        );
+        let usages: Vec<&str> = commands
+            .iter()
+            .map(|command| command.usage.as_str())
+            .collect();
+        assert!(
+            usages.contains(&"powah item <amount:integer> <pos:block_pos>"),
+            "the item charge control is a usage of its own: {usages:?}"
+        );
         for command in &commands {
             assert!(
                 command.usage.starts_with("powah "),
@@ -1334,20 +1972,6 @@ mod tests {
         }
         assert_eq!(cable_of(FURNATOR), None, "a furnator is not a cable");
         assert_eq!(cable_of("minecraft:chest"), None);
-    }
-
-    #[test]
-    fn the_furnator_declares_one_fuel_slot_every_face_reaches() {
-        let container = container();
-        assert_eq!(container.slots, SLOT_COUNT, "the fuel slot only");
-        assert_eq!(container.inputs, vec![FUEL_SLOT]);
-        assert_eq!(container.outputs, vec![FUEL_SLOT]);
-        assert_eq!(
-            container.faces,
-            std::array::from_fn(|_| vec![FUEL_SLOT]),
-            "automation reaches the fuel slot from every face"
-        );
-        assert_eq!(container.menu, None, "slice 1 has no GUI");
     }
 
     #[test]
@@ -1525,9 +2149,9 @@ mod tests {
     fn the_info_lines_are_the_ones_the_e2e_asserts() {
         let starter_furnator = Kind::Furnator(furnator_tier(0).expect("the starter tier"));
         assert_eq!(
-            status_line(starter_furnator, [0, 100, 0], 0, 0, None, 150),
+            status_line(starter_furnator, [0, 100, 0], 0, 0, None, &[None], 150),
             "Furnator at 0,100,0: 0/20000 FE (comparator 0, carbon 0, burning false, fuel empty, \
-             80 FE/t a side, t=150)"
+             charge empty, 80 FE/t a side, t=150)"
         );
         assert_eq!(
             status_line(
@@ -1536,31 +2160,50 @@ mod tests {
                 320,
                 46_800,
                 Some(("minecraft:coal", 4)),
+                &[None],
                 282
             ),
             "Furnator at 0,100,0: 320/20000 FE (comparator 0, carbon 46800, burning true, fuel \
-             minecraft:coal x4, 80 FE/t a side, t=282)"
+             minecraft:coal x4, charge empty, 80 FE/t a side, t=282)"
         );
         let nitro_furnator = Kind::Furnator(furnator_tier(6).expect("the nitro tier"));
         assert_eq!(
-            status_line(nitro_furnator, [0, 100, 8], 40_000_000, 8_000, None, 500),
+            status_line(
+                nitro_furnator,
+                [0, 100, 8],
+                40_000_000,
+                8_000,
+                None,
+                &[None],
+                500
+            ),
             "Furnator at 0,100,8: 40000000/40000000 FE (comparator 15, carbon 8000, burning \
-             true, fuel empty, 160000 FE/t a side, t=500)"
+             true, fuel empty, charge empty, 160000 FE/t a side, t=500)"
         );
         let starter = Kind::Cell(cell_tier(0).expect("the starter tier"));
         assert_eq!(
-            status_line(starter, [2, 100, 0], 1_360, 0, None, 290),
-            "Energy Cell at 2,100,0: 1360/1000000 FE (comparator 0, 1000 FE/t a side, t=290)"
+            status_line(starter, [2, 100, 0], 1_360, 0, None, &[None, None], 290),
+            "Energy Cell at 2,100,0: 1360/1000000 FE (comparator 0, charge empty, empty, 1000 FE/t a \
+             side, t=290)"
         );
         assert_eq!(
-            status_line(starter, [2, 100, 0], 1_000_000, 0, None, 380),
-            "Energy Cell at 2,100,0: 1000000/1000000 FE (comparator 15, 1000 FE/t a side, t=380)"
+            status_line(starter, [2, 100, 0], 1_000_000, 0, None, &[None, None], 380),
+            "Energy Cell at 2,100,0: 1000000/1000000 FE (comparator 15, charge empty, empty, 1000 FE/t \
+             a side, t=380)"
         );
         let nitro = Kind::Cell(cell_tier(6).expect("the nitro tier"));
         assert_eq!(
-            status_line(nitro, [2, 100, 0], 2_000_000_000, 0, None, 380),
-            "Energy Cell at 2,100,0: 2000000000/2000000000 FE (comparator 15, 2000000 FE/t a \
-             side, t=380)"
+            status_line(
+                nitro,
+                [2, 100, 0],
+                2_000_000_000,
+                0,
+                None,
+                &[None, None],
+                380
+            ),
+            "Energy Cell at 2,100,0: 2000000000/2000000000 FE (comparator 15, charge empty, empty, \
+             2000000 FE/t a side, t=380)"
         );
         assert_eq!(
             status_line(
@@ -1569,6 +2212,7 @@ mod tests {
                 0,
                 0,
                 None,
+                &[],
                 188
             ),
             "Energy Cable at 1,100,0: no storage, moves up to 500 FE/t (t=188)"
@@ -1580,9 +2224,248 @@ mod tests {
                 0,
                 0,
                 None,
+                &[],
                 188
             ),
             "Energy Cable at 1,100,0: no storage, moves up to 2000 FE/t (t=188)"
         );
+    }
+
+    #[test]
+    fn every_furnator_container_is_the_charge_slot_then_the_fuel_slot() {
+        let container = container();
+        assert_eq!(
+            (CHARGE_SLOT, FUEL_SLOT),
+            (0, 1),
+            "upstream's `FurnatorTile`: 0 chargeables, 1 fuel"
+        );
+        assert_eq!(container.slots, 2, "`FurnatorTile` has two slots");
+        assert_eq!(container.inputs, vec![CHARGE_SLOT, FUEL_SLOT]);
+        assert_eq!(
+            container.outputs,
+            vec![CHARGE_SLOT, FUEL_SLOT],
+            "everything may be taken out (`canExtract` is true for both)"
+        );
+        assert_eq!(
+            container.faces,
+            std::array::from_fn(|_| vec![CHARGE_SLOT, FUEL_SLOT]),
+            "every face reaches both slots"
+        );
+        assert_eq!(container.menu, None, "this port has no GUI");
+    }
+
+    #[test]
+    fn every_cell_container_is_its_two_charge_slots() {
+        let container = cell_container();
+        assert_eq!(container.slots, 2, "`EnergyCellTile` charges two slots");
+        assert_eq!(container.inputs, vec![0, 1]);
+        assert_eq!(container.outputs, vec![0, 1]);
+        assert_eq!(container.faces, std::array::from_fn(|_| vec![0, 1]));
+        assert_eq!(container.menu, None, "this port has no GUI");
+    }
+
+    #[test]
+    fn a_machine_item_carries_its_tier_s_buffer() {
+        // upstream's `EnergyBlockItem.getEnergyInfo` over the block's config and
+        // its `getTransferType`.
+        assert_eq!(
+            item_buffer(FURNATOR),
+            Some(ItemBuffer {
+                capacity: 20_000,
+                max_insert: 0,
+                max_extract: 80,
+            }),
+            "a furnator gives and never receives (`Transfer.EXTRACT`)"
+        );
+        assert_eq!(
+            item_buffer(CELL),
+            Some(ItemBuffer {
+                capacity: 1_000_000,
+                max_insert: 1_000,
+                max_extract: 1_000,
+            }),
+            "a cell takes and gives its tier's transfer (`Transfer.ALL`)"
+        );
+        assert_eq!(
+            item_buffer("powah:energizing_rod_starter"),
+            Some(ItemBuffer {
+                capacity: 10_000,
+                max_insert: 100,
+                max_extract: 100,
+            }),
+            "a rod is an `AbstractEnergyStorage` like a cell"
+        );
+        assert_eq!(
+            item_buffer(ORB),
+            None,
+            "the orb is not an energy block item"
+        );
+        assert_eq!(item_buffer(CABLE), None, "a cable stores nothing");
+        assert_eq!(item_buffer("minecraft:stone"), None);
+    }
+
+    #[test]
+    fn a_charge_slot_exists_only_on_the_machines_that_charge_items() {
+        assert_eq!(charge_slots(FURNATOR), 1, "the furnator charges slot 0");
+        assert_eq!(charge_slots(CELL), 2, "a cell charges two slots");
+        assert_eq!(charge_slots("powah:energy_cell_nitro"), 2);
+        assert_eq!(charge_slots(CABLE), 0);
+        assert_eq!(
+            charge_slots(ORB),
+            0,
+            "the orb's seven slots are a recipe, not a charger"
+        );
+        assert_eq!(charge_slots("powah:energizing_rod_starter"), 0);
+    }
+
+    #[test]
+    fn a_keep_energy_machine_is_the_one_that_carries_its_buffer_on_its_item() {
+        for (index, (block, _)) in FURNATORS.into_iter().enumerate() {
+            let tier = furnator_tier(index).expect("the ladder's row");
+            assert_eq!(
+                keep_capacity(block),
+                Some(tier.capacity),
+                "a furnator keeps its buffer (`keepEnergy` is true)"
+            );
+        }
+        for (index, (block, _)) in CELLS.into_iter().enumerate() {
+            let tier = cell_tier(index).expect("the ladder's row");
+            assert_eq!(keep_capacity(block), Some(tier.capacity));
+        }
+        for (index, (block, _)) in RODS.into_iter().enumerate() {
+            let tier = rod_tier(index).expect("the ladder's row");
+            assert_eq!(keep_capacity(block), Some(tier.capacity));
+        }
+        assert_eq!(
+            keep_capacity(ORB),
+            None,
+            "the orb keeps nothing: upstream's default is false"
+        );
+        assert_eq!(keep_capacity(CABLE), None, "a cable has no buffer to keep");
+        assert_eq!(keep_capacity("minecraft:stone"), None);
+    }
+
+    #[test]
+    fn the_readout_names_every_charge_slot() {
+        let furnator = Kind::Furnator(furnator_tier(0).expect("the starter tier"));
+        let empty = status_line(furnator, [0, 100, 0], 0, 0, None, &[None], 150);
+        assert!(
+            empty.contains("fuel empty, charge empty, 80 FE/t a side"),
+            "an empty charge slot reads `empty`: {empty}"
+        );
+        let charged = status_line(
+            furnator,
+            [0, 100, 0],
+            40,
+            0,
+            Some(("minecraft:coal", 1)),
+            &[Some(("powah:energy_cell_starter", 40, 1_000_000))],
+            282,
+        );
+        assert!(
+            charged.contains("charge powah:energy_cell_starter 40/1000000, 80 FE/t a side"),
+            "the charge slot names its item and what it holds: {charged}"
+        );
+        let cell = Kind::Cell(cell_tier(0).expect("the starter tier"));
+        let two = status_line(
+            cell,
+            [2, 100, 0],
+            1_500,
+            0,
+            None,
+            &[
+                Some(("powah:energy_cell_starter", 1_000, 1_000_000)),
+                Some(("powah:energy_cell_starter", 500, 1_000_000)),
+            ],
+            300,
+        );
+        assert!(
+            two.contains(
+                "charge powah:energy_cell_starter 1000/1000000, \
+                 powah:energy_cell_starter 500/1000000, 1000 FE/t a side"
+            ),
+            "a cell names both of its charge slots: {two}"
+        );
+        let stone = status_line(
+            furnator,
+            [0, 100, 0],
+            0,
+            0,
+            None,
+            &[Some(("minecraft:stone", 0, 0))],
+            150,
+        );
+        assert!(
+            stone.contains("charge minecraft:stone 0/0"),
+            "an item without a buffer reads as one with none: {stone}"
+        );
+    }
+
+    #[test]
+    fn a_carried_payload_is_the_machine_s_block_entity_data_and_carries_no_items() {
+        let patch =
+            carried_patch(5_000, 20_000, FURNATOR).expect("a charged furnator carries its buffer");
+        let Some(Tag::Compound(payload)) = patch.get(&BLOCK_ENTITY_DATA.into()) else {
+            panic!("the payload is the block entity data component: {patch:?}");
+        };
+        assert_eq!(
+            payload.get(&"id".into()),
+            Some(&Tag::String(FURNATOR.into())),
+            "the engine loads a payload only when its id names the block entity it is placed as"
+        );
+        assert_eq!(payload.get(&KEY_ENERGY.into()), Some(&Tag::Int(5_000)));
+        assert_eq!(
+            payload.get(&"Items".into()),
+            None,
+            "the engine spills a container's stacks itself: a payload with Items would duplicate \
+             every stack (HANDOVER §9m)"
+        );
+        assert_eq!(
+            payload.len(),
+            2,
+            "the payload is the type id and the buffer, nothing else"
+        );
+        assert_eq!(
+            carried_patch(0, 20_000, FURNATOR),
+            None,
+            "an empty machine carries nothing: upstream writes the storable compound only when it \
+             is not empty"
+        );
+        assert_eq!(
+            carried_patch(2_000_000_000, 20_000, FURNATOR),
+            carried_patch(20_000, 20_000, FURNATOR),
+            "a buffer above the tier is carried clamped"
+        );
+    }
+
+    #[test]
+    fn a_payload_is_read_back_and_believed_only_within_the_tier() {
+        let patch = carried_patch(5_000, 1_000_000, CELL).expect("a charged cell");
+        let Some(Tag::Compound(payload)) = patch.get(&BLOCK_ENTITY_DATA.into()) else {
+            panic!("the payload is the block entity data component: {patch:?}");
+        };
+        assert_eq!(asked_energy(Some(payload)), Some(5_000));
+        let mut doctored = Compound::new();
+        doctored.insert("id".into(), Tag::String(CELL.into()));
+        doctored.insert(KEY_ENERGY.into(), Tag::Int(2_000_000_000));
+        assert_eq!(
+            asked_energy(Some(&doctored)),
+            Some(2_000_000_000),
+            "a payload is read exactly as it states it"
+        );
+        assert_eq!(
+            crate::runtime::restored_energy(2_000_000_000, 1_000_000),
+            1_000_000,
+            "and clamped into the tier of the machine it is placed as"
+        );
+        let mut as_long = Compound::new();
+        as_long.insert(KEY_ENERGY.into(), Tag::Long(5_000));
+        assert_eq!(
+            asked_energy(Some(&as_long)),
+            Some(5_000),
+            "a payload a player wrote as a long is read too"
+        );
+        assert_eq!(asked_energy(Some(&Compound::new())), None);
+        assert_eq!(asked_energy(None), None);
     }
 }

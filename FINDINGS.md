@@ -188,3 +188,32 @@ energy-carrying block items; side-config GUI and redstone modes (defaults only);
 the furnator GUI; particles/sound; the cable **network** (the port moves energy
 one cable hop, so a chain of cables does not relay); cable connection states
 beyond the content tag; comparator output; worldgen (uraninite, dry ice).
+
+## Slice 7 — the item-energy family (`keepEnergy`, `chargeItems`), read 2026-11-22
+
+Same clone, tag `v6.2.10` (commit `a5a8f25`). Files read:
+
+| Area | Files |
+|---|---|
+| the carried buffer | `lib/block/AbstractEnergyStorage.java` (`keepEnergy`, `writeStorable`/`readStorable`, `chargeItems`), `lib/block/AbstractTileEntity.java` (`storeToStack`, `onPlaced`, `onRemoved`, `keepStorable`, `keepInventory`), `lib/block/AbstractBlock.java` (`playerDestroy`, `getCloneItemStack`) |
+| the item's own energy | `lib/item/EnergyBlockItem.java`, `lib/item/IEnergyContainingItem.java`, `lib/item/EnergyItem.java`, `lib/logistics/energy/Energy.java` (`Energy.Item`, `chargeable`, `get`), `components/PowahComponents.java` (`ENERGY_STORED`, `STORED_BLOCK_ENTITY_STATE`) |
+| who keeps energy | `block/furnator/FurnatorTile.java`, `block/energycell/EnergyCellTile.java`, `block/energizing/EnergizingRodTile.java`, `block/*/…Tile.java` (`keepEnergy` overrides) |
+| the charge slots | `block/furnator/FurnatorTile.java` (`getSlotLimit`, `canInsert`, `canExtract`, `postTick`), `block/energycell/EnergyCellTile.java` (same), `util/ChargeUtil.java` |
+| the transfer types | `lib/block/AbstractEnergyBlock.java` (`isChargeable`, `getTransferType`), `lib/block/AbstractEnergyProvider.java`, `block/cable/CableBlock.java` |
+
+**Behaviour extracted.**
+
+- `keepEnergy()` is true for the furnator, the energy cell (`!isCreative`) and the energizing rod;
+  the orb's and the cable's are false. `writeStorable` writes the buffer **only** then, and
+  `storeToStack` attaches that compound to the block item as `STORED_BLOCK_ENTITY_STATE`;
+  `onPlaced` reads it back. The drop is `playerDestroy`'s `storeToStack(new ItemStack(this))`, not
+  the loot table, and `keepInventory()` is false for these machines, so `Items` never travels.
+- Every `EnergyBlockItem` is an energy item whose value lives in a **different** component,
+  `ENERGY_STORED` — and placement never reads that one, so a machine item charged in a slot gives the
+  machine it becomes nothing. The port keeps one store (`minecraft:block_entity_data`) and records
+  the fix.
+- The furnator has two slots (0 chargeables, 1 fuel) and charges one; a cell has two, all
+  chargeable, and charges both. `chargeItems` takes `min(transfer, budget left, the item's own room)`
+  per slot with one budget for the pass, and debits the buffer by exactly what the item took.
+- A furnator's transfer type is `EXTRACT` (its own item only gives, so `isChargeable` is false); a
+  cell's and a rod's are `ALL`.

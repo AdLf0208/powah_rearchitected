@@ -34,24 +34,45 @@ mod powah;
 use std::sync::{Arc, Mutex};
 
 use mod_api::{
-    self, Flow, Hooks, HostSide, LevelTickPostEvent, RegisterCommandsEvent, Registrar,
-    RegistrationContext, RunModCommandEvent, ServerHost, Text, WorldLifecycleEvent,
+    self, BlockDropsEvent, Flow, Hooks, HostSide, LevelHost, LevelTickPostEvent,
+    RegisterCommandsEvent, Registrar, RegistrationContext, RunModCommandEvent, ServerHost, Text,
+    WorldLifecycleEvent,
 };
 
 use crate::powah::{Queue, SetOutcome};
 
-/// Declare one idle block entity type (a cell or the cable) and attach the Part
-/// that only queues its position for the level tick's move phase.
+/// Declare one idle block entity type (a cell, a cable or a rod) and attach the
+/// Part that queues its position for the level tick's move phase and clamps a
+/// buffer that is out of its tier.
 fn declare_idle(
     registrar: &mut dyn Registrar,
     context: &RegistrationContext,
     queue: &Arc<Mutex<Queue>>,
     name: &str,
+    rules: Option<powah::IdleRules>,
 ) {
     let kind = powah::declare(registrar, name);
-    let part = powah::IdlePart::new(Arc::clone(queue));
+    let part = powah::IdlePart::new(Arc::clone(queue), rules);
     if let Err(error) = registrar.block_entity_part(&kind, part) {
         context.refuse(&error.to_string());
+    }
+}
+
+/// Declare a machine's own item: the Part that restores the buffer a placed item
+/// carried, and — when the item holds one — the `Capabilities.Energy.ITEM`
+/// handler a charger reads.
+fn declare_item(registrar: &mut dyn Registrar, block: &'static str) {
+    let item = registrar.item_key(block);
+    powah::remember_item(block, item);
+    registrar.item_part(item, powah::MachineItem);
+    if let Some(buffer) = powah::item_buffer(block) {
+        registrar.item_capability(&mod_api::ITEM_ENERGY, block, move |_, place| {
+            Some(Box::new(powah::MachineEnergy::new(
+                place.clone(),
+                block,
+                buffer,
+            )))
+        });
     }
 }
 
@@ -73,8 +94,8 @@ impl Hooks for Mod {
     /// nothing; upstream's capacity is 0) and still needs a type and a tick,
     /// because a cable is what queues its own position for the level's move phase.
     fn register(&self, registrar: &mut dyn Registrar, context: &RegistrationContext) {
-        // Every furnator tier: one fuel slot, one buffer with the tier's own
-        // generation capacity and per-side transfer (upstream's
+        // Every furnator tier: a charge slot then a fuel slot, one buffer with the
+        // tier's own generation capacity and per-side transfer (upstream's
         // `AbstractGeneratorBlock` over `GeneratorConfig`).
         for (index, (block, name)) in powah::FURNATORS.into_iter().enumerate() {
             let tier = runtime::furnator_tier(index).expect("every furnator id is on the ladder");
@@ -86,41 +107,72 @@ impl Hooks for Mod {
             if let Err(error) = registrar.block_entity_part(&kind, part) {
                 context.refuse(&error.to_string());
             }
+            declare_item(registrar, block);
         }
-        // Every energy cell tier: one buffer with the tier's own capacity and
-        // per-side transfer (upstream's `AbstractEnergyStorage` over `EnergyConfig`).
-        for (index, (block, _)) in powah::CELLS.into_iter().enumerate() {
+        // Every energy cell tier: two charge slots and one buffer with the tier's
+        // own capacity and per-side transfer (upstream's `AbstractEnergyStorage`
+        // over `EnergyConfig`).
+        for (index, (block, name)) in powah::CELLS.into_iter().enumerate() {
             let tier = runtime::cell_tier(index).expect("every cell id is on the tier ladder");
             let cell = registrar.block_key(block);
+            registrar.block_container(&cell, powah::cell_container());
             registrar.block_energy(&cell, powah::cell_battery(tier));
+            declare_idle(
+                registrar,
+                context,
+                &self.queue,
+                name,
+                Some(powah::IdleRules {
+                    capacity: tier.capacity,
+                    transfer: tier.transfer,
+                    slots: powah::kind_charge_slots(powah::Kind::Cell(tier)),
+                }),
+            );
+            declare_item(registrar, block);
         }
         // The energizing orb: the seven slots and the insert-only buffer a rod fills.
         let orb = registrar.block_key(powah::ORB);
         registrar.block_container(&orb, powah::orb_container());
         registrar.block_energy(&orb, powah::orb_battery());
         // Every rod tier: its own capacity and per-side transfer.
-        for (index, (block, _)) in powah::RODS.into_iter().enumerate() {
+        for (index, (block, name)) in powah::RODS.into_iter().enumerate() {
             let tier = runtime::rod_tier(index).expect("every rod id is on the tier ladder");
             let rod = registrar.block_key(block);
             registrar.block_energy(&rod, powah::rod_battery(tier));
+            declare_idle(
+                registrar,
+                context,
+                &self.queue,
+                name,
+                Some(powah::IdleRules {
+                    capacity: tier.capacity,
+                    transfer: tier.transfer,
+                    slots: powah::kind_charge_slots(powah::Kind::Rod(tier)),
+                }),
+            );
+            declare_item(registrar, block);
         }
 
-        // The orb fills and completes; a cell, a cable and a rod only queue their
-        // position for the move phase (the rod's move into its orb is one of its
-        // jobs). Every furnator tier was declared above, where its tier's buffer is.
+        // The orb fills and completes; a cable only queues its position for the
+        // move phase. Every furnator tier, cell tier and rod was declared above,
+        // where its buffer is.
         let orb_kind = powah::declare(registrar, powah::ORB_TYPE);
         if let Err(error) = registrar.block_entity_part(&orb_kind, powah::OrbPart) {
             context.refuse(&error.to_string());
         }
-        for (_, name) in powah::CELLS {
-            declare_idle(registrar, context, &self.queue, name);
+        for (block, name) in powah::CABLES {
+            declare_idle(registrar, context, &self.queue, name, None);
+            // A cable's item stores nothing, but it is still one of this mod's
+            // blocks: it has no payload to restore and the Part simply finds none.
+            declare_item(registrar, block);
         }
-        for (_, name) in powah::CABLES {
-            declare_idle(registrar, context, &self.queue, name);
-        }
-        for (_, name) in powah::RODS {
-            declare_idle(registrar, context, &self.queue, name);
-        }
+    }
+
+    /// A block broke: its own item carries its buffer when it is one of the
+    /// machines upstream's `keepEnergy` names (every furnator, cell and rod), so
+    /// placing the item puts the FE back.
+    fn block_drops(&self, level: &dyn LevelHost, event: &mut BlockDropsEvent<'_>) -> Flow {
+        powah::on_block_drops(level, event)
     }
 
     /// After the level's tick: run the queued moves, where every block entity is
@@ -185,6 +237,23 @@ impl Hooks for Mod {
                     SetOutcome::Set(after) => format!("Energy set to {after} FE."),
                     SetOutcome::Cable => "The energy cable stores no energy.".to_owned(),
                     SetOutcome::NoBlock => "No Powah block there.".to_owned(),
+                }
+            }
+            (["powah", "item"], Some(pos)) => {
+                let Some(amount) = amount else {
+                    return Flow::Continue;
+                };
+                match powah::set_item_energy(host, pos, amount) {
+                    powah::SetItemOutcome::Set(item, after) => {
+                        format!("Charge set to {after} FE on {item}.")
+                    }
+                    powah::SetItemOutcome::NoSlot => {
+                        "That machine has no item charge slot.".to_owned()
+                    }
+                    powah::SetItemOutcome::NotChargeable => {
+                        "The charge slot holds no item that carries FE.".to_owned()
+                    }
+                    powah::SetItemOutcome::NoBlock => "No Powah block there.".to_owned(),
                 }
             }
             _ => return Flow::Continue,

@@ -242,10 +242,16 @@ round trip in this environment is ~2 s, far longer than a tick).
    cell).
 4. **No item charging.** Upstream's furnator charges slot 0 and a cell charges
    two slots through `item_energy_buffer`; not ported, so the furnator has one
-   slot, not two, and the cell none.
+   slot, not two, and the cell none. — **closed by slice 7**
+   ([`## Slice 7`](#slice-7--the-item-energy-family-keepenergy-and-the-item-charge-slots-2026-11-22)):
+   the furnator has upstream's two slots (charge 0, fuel 1) and a cell its two, and the per-tick step
+   is `min(transfer, stored, room)` out of the machine's own buffer.
 5. **Breaking a machine loses its FE.** Upstream's `keepEnergy()` makes the
    block item carry the buffer; no energy component/item buffer is registered
-   here, and the loot tables drop the plain block.
+   here, and the loot tables drop the plain block. — **closed by slice 7**
+   ([`## Slice 7`](#slice-7--the-item-energy-family-keepenergy-and-the-item-charge-slots-2026-11-22)):
+   every furnator, cell and rod carries its buffer as `minecraft:block_entity_data` `{id, energy}` and
+   gives it back on placement, clamped to its tier.
 6. **No side config or redstone modes.** Upstream's six per-side transfer types
    and redstone IGNORE/ON/OFF default to `ALL`/`IGNORE`; this slice ships only
    those defaults.
@@ -1713,3 +1719,262 @@ Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven
 | `recipe:minecraft:crafting_shapeless` | tested | same leg, 8 cases; the paste's lava bucket leaves its bucket, and the material block and its 9-back recipe both work |
 | `tag:item` | tested | `powah:energizing_rods`, `powah:furnators` and `powah:energy_cables` name their seven members (the jar's own tags); the e2e gives, places, crafts and mines each of those ids, and `cargo horizon-mod check` validates the tags |
 | `tag:block` | tested | the cable's `powah:energy_cable_connects` is the visual-arms tag (the relay is the mechanic and the three-cable run plus the cross-tier control are asserted); the pickaxe/needs-iron tags are what makes the loot leg's drops real |
+
+## Slice 7 — the item-energy family: `keepEnergy` and the item charge slots (2026-11-22)
+
+### The slice, quoted from this port's own gaps
+
+`## Deviations and gaps (slice 1)`, items **4** and **5** — the two lines the 0.2.6 report named as the
+next slice:
+
+> **4. No item charging.** Upstream's furnator charges slot 0 and a cell charges
+> two slots through `item_energy_buffer`; not ported, so the furnator has one
+> slot, not two, and the cell none.
+
+> **5. Breaking a machine loses its FE.** Upstream's `keepEnergy()` makes the
+> block item carry the buffer; no energy component/item buffer is registered
+> here, and the loot tables drop the plain block.
+
+and the 0.2.6 `description` ("Not yet ported: … item charging …"), which this slice removes from the
+list.
+
+**Chosen:** the **item-energy family** — the buffer a machine's own item carries when the machine is
+broken (`keepEnergy`: every furnator, cell and rod) and the item-charging slots (`chargeItems`: the
+furnator's slot 0, a cell's two). It is the one family in the gap list that needs **no new content**
+(every item is already carried) and whose rule is one rule for 21 blocks: a machine's item is an
+energy item, and a machine's slots take FE out of its own buffer. **Why it fits `machines`:** it is
+the block entity's own state (its saved buffer, its declared container, its tick) plus the item
+capability this pin exposes; no renderer, no GUI, no entity and no worldgen.
+
+**Not chosen (and why):** the creative cell, the generators and the reactors remain out (uraninite has
+no source in a 26.3 world — `blocked(uraninite-worldgen)`; the generators need a mod fluid tank the
+pin cannot fill); side config, redstone modes and the GUIs stay slice 1's recorded gaps.
+
+### What upstream does (read from tag `v6.2.10`, commit `a5a8f25`)
+
+| Fact | Where |
+|---|---|
+| `keepEnergy()` is true for `FurnatorTile`, `EnergyCellTile` (`!isCreative`) and `EnergizingRodTile`; the orb's and the cable's are false | `block/*/*Tile.java` |
+| `writeStorable` writes the buffer **only** when `keepEnergy()`; `storeToStack` puts that compound on the block item as `PowahComponents.STORED_BLOCK_ENTITY_STATE`, and `onPlaced` reads it back | `lib/block/AbstractEnergyStorage.java:62,70`, `lib/block/AbstractTileEntity.java:157,174` |
+| the drop is the `playerDestroy` path — `storeToStack(new ItemStack(this))` popped instead of the loot table — and only `keepInventory()` stacks merge (false for these machines, so **no `Items`**) | `lib/block/AbstractBlock.java:113`, `lib/block/AbstractTileEntity.java:167,176` |
+| every `EnergyBlockItem` is an energy item (`IEnergyContainingItem`), its `Info` the tier's capacity and the `getTransferType()` limits; the value lives in a **different** component, `PowahComponents.ENERGY_STORED` (`Energy.Item`) | `lib/item/EnergyBlockItem.java`, `lib/logistics/energy/Energy.java:251-305`, `Powah.java:137` |
+| the furnator has two slots — 0 chargeables (`Energy.chargeable`), 1 fuel (burn time > 0) — and runs `chargeItems(1)`; a cell has two slots, limit 1, all chargeable, and runs `chargeItems(2)` | `block/furnator/FurnatorTile.java:96,105,114`, `block/energycell/EnergyCellTile.java:56,73` |
+| `chargeItems` = `ChargeUtil.chargeItemsInInventory(inv, 0, n, getEnergyTransfer(), energy.getStored())`: per slot `min(transfer, budget left)`, the item's own room applies, and the buffer is debited by exactly what the item took | `lib/block/AbstractEnergyStorage.java:103`, `util/ChargeUtil.java:60` |
+| a furnator's transfer type is `EXTRACT`, so its own item only gives; a cell's and a rod's are `ALL` | `lib/block/AbstractEnergyProvider.java`, `AbstractEnergyBlock.java:75` |
+
+### What it ships
+
+Rust only — no content change (every id was already carried):
+
+| File | Change |
+|---|---|
+| `src/runtime.rs` | `charge_step(stored, transfer, room)`, `carried_energy(energy, capacity) -> Option<i32>`, `restored_energy(asked, capacity)`; 3 tests |
+| `src/powah.rs` | `ItemBuffer` + `item_buffer`, `charge_slots`/`kind_charge_slots`, `keep_capacity`, `cell_container` (two slots), the `BlockEntityData` component + `carried_patch` + `asked_energy` + `with_payload_energy`, `charge_items` (the per-slot step), the `ITEM_ENERGY` handler `MachineEnergy`, `on_block_drops`, the `MachineItem` Part (`on_block_placed_by`), `IdleRules` (a cell's two charge slots and the tier clamp on its own tick), `/powah item`; the readout's `charge` field; 7 tests |
+| `src/lib.rs` | every machine item registered as an `ItemPart` and — where it holds a buffer — an `ITEM_ENERGY` provider, every cell's two-slot container, `Hooks::block_drops` |
+| `horizon-mod.toml`, `Cargo.toml` | version 0.2.7, the description's "item charging" moved from gaps to the slice list |
+
+### The readouts this slice adds
+
+```text
+Furnator at 32,100,34: 0/20000 FE (comparator 0, carbon 0, burning false, fuel empty, charge powah:energy_cell_starter 40/1000000, 80 FE/t a side, t=2590)
+Energy Cell at 36,100,34: 0/1000000 FE (comparator 0, charge powah:energy_cell_starter 1000/1000000, powah:energy_cell_starter 500/1000000, 1000 FE/t a side, t=…)
+```
+
+The `charge` field goes after the fuel (a furnator) or the comparator (a cell), so every earlier
+assertion keeps matching its prefix; `/powah item <amount> <pos>` is the operator-only (level 2)
+control that leaves an item an exact charge.
+
+### TDD: the red proof, quoted
+
+`charge_step`, `carried_energy` and `restored_energy` were declared with `todo!()`, and the tests were
+written against them before any glue
+(`ports/_shared/evidence/powah/slice7-test-red.log`):
+
+```text
+thread 'runtime::tests::a_charge_step_moves_the_transfer_the_balance_or_the_room' panicked at src/runtime.rs:159:5:
+not yet implemented: the item charge step
+thread 'runtime::tests::a_broken_machine_carries_its_buffer_only_when_it_holds_one' panicked at src/runtime.rs:168:5:
+not yet implemented: the carried buffer of a broken machine
+thread 'runtime::tests::a_placed_machine_takes_its_item_s_buffer_clamped_to_its_tier' panicked at src/runtime.rs:175:5:
+not yet implemented: the restored buffer of a placed machine
+thread 'powah::tests::a_carried_payload_is_the_machine_s_block_entity_data_and_carries_no_items' panicked at src/runtime.rs:168:5:
+not yet implemented: the carried buffer of a broken machine
+thread 'powah::tests::a_payload_is_read_back_and_believed_only_within_the_tier' panicked at src/runtime.rs:168:5:
+not yet implemented: the carried buffer of a broken machine
+thread 'powah::tests::the_harness_commands_are_operator_only' panicked at src/powah.rs:1809:9:
+... (the third usage, `/powah item`, is not declared yet)
+thread 'powah::tests::the_info_lines_are_the_ones_the_e2e_asserts' panicked at src/powah.rs:2118:9:
+... (the readout has no `charge` field yet)
+test result: FAILED. 51 passed; 7 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+```
+
+After the implementation: **58 passed, 0 failed** (`sdk-test.log`, the same 58 in `slice7-test-green.log`).
+
+### Ladder (0.2.7, pin `0a875da`)
+
+Every compile step ran in `ports/powah`, `CARGO_INCREMENTAL=0`, inside a
+`ports/tools/build-slot.sh run --job W1-powah --port ports/powah --step …` lease. Logs in
+`ports/_shared/evidence/powah/`.
+
+| Step | Command | Result |
+|---|---|---|
+| unit tests | `cargo test --offline` | **58 passed**, 0 failed (`sdk-test.log`) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`sdk-clippy.log`) |
+| formatting | `cargo fmt --all -- --check` | exit 0, empty (`sdk-fmt.log`) |
+| package, twice | `rm -f Cargo.lock; cargo horizon-mod build` ×2, `cmp` | **byte-identical, 305,679 B** (`sdk-build{,-second}.log`) |
+| registry check | `cargo horizon-mod check powah.hmod` | **exit 0**, `powah 0.2.7 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, `305679 bytes, SHA-256 8cf04f34e5135e4e07a66a516c42da11c2841e82f82458d63b3ae29a480269d3, unsigned` (`sdk-check.log`) |
+| fits the pin | `cargo horizon-mod fits powah.hmod --build 0a875da` | `0a875da  made for`, exit 0 (`sdk-fits.log`) |
+| fits **another** build | `cargo horizon-mod fits powah.hmod --build 0b14f8a` | `0b14f8a  fits`, exit 0 (`sdk-fits-nightly.log`) |
+| package gate | `python3 ports/tools/verify-sdk-package.py powah` | **1/1**, runtime byte-identical (`b5de81d0b618`), no packed `Cargo.lock`, **422 entries** |
+
+The in-game legs below ran the package as packed **before** this slice's `README.md` was given its
+slice-7 paragraph (305,399 B, sha256 `91cca602…`). The shipped artifact is 305,679 B
+`8cf04f34…`; compared entry by entry against the launcher's installed copy of the leg's package, the
+two are identical in all 422 entries except `README.md` (`src/`, `assets/`, `data/`, the manifest and
+the licences are byte-identical, and both pack `src/runtime.rs` `b5de81d0b618…`), so the legs prove
+the shipped code.
+| carried-data dialect | `python3 ports/tools/check_261_dialect.py powah.hmod` | exit 0: 132 recipe/loot files in the 26.3 dialect |
+
+### In-game legs
+
+Launcher build `native-0a875da-d4ab2c99bd07` (`Compiling powah (1 of 1)` in
+`evidence/powah-e2e/launcher-build-0.2.7.log`); logs in `ports/_shared/evidence/powah-e2e/`.
+
+| Leg | Command | Result |
+|---|---|---|
+| main | `launcher-game.sh build powah` + `build-slot.sh run --step e2e` | **PASS** + `EXIT:0` (`e2e-launcher-0.2.7.log`) |
+| control (whole scenario, no package) | `GAME=$CONTROL_GAME …` | `FAIL: expected powah:furnator_starter at 0,100,0, got 'minecraft:air'` + `EXIT:1` (`e2e-control-0.2.7.log`) |
+| selftest (slice 1's flip) | `SELFTEST=1 …` | `FAIL: SELFTEST flipped: the unfuelled furnator made no FE, as it should` + `EXIT:1` (`e2e-selftest-0.2.7.log`) |
+| selftest (this slice's drop) | `SELFTEST=keep …` | `FAIL: a furnator placed from its own drop read 5000/20000 FE, not the 0 it was broken with` + `EXIT:1` (`e2e-selftest-keep.log`) |
+| selftest (this slice's rate) | `SELFTEST=charge …` | `FAIL: the item gained 480 FE over 6 ticks; at 40 FE a tick that is not one charge step a tick (expected 240 +- 40)` + `EXIT:1` (`e2e-selftest-charge.log`) |
+| **the previous package** (0.2.6, the parity rule's red) | `GAME=…/powah-0.2.6/horizon-client FUEL_CONTAINER_SLOT=0 …` | `FAIL: the dropped furnator item carries no block entity data: … {count: 1, id: "powah:furnator_starter"}` + `EXIT:1` (`e2e-oldpackage-0.2.6.log`) |
+| log gate | `check-e2e-logs.py powah-e2e --strict` | `logs=20 ok=20`, exit 0 |
+
+Quoted from `e2e-launcher-0.2.7.log` (the family's own assertions):
+
+```text
+== slice 7: a broken machine's own item carries its buffer ==
+  scenario: {"block":"minecraft:air","drops":{"powah:furnator_starter":1},"picked_up":{"powah:furnator_starter":1}}
+  SelectedItem: … {components: {"minecraft:block_entity_data": {id: "powah:furnator_starter", energy: 5000}}, count: 1, id: "powah:furnator_starter"}
+  placed powah:furnator_starter at 32,100,36
+  placed again: Furnator at 32,100,36: 5000/20000 FE (comparator 3, carbon 0, burning false, fuel empty, charge empty, 80 FE/t a side, t=2073)
+  the block's own saved energy: 32, 100, 36 has the following block data: 5000
+== slice 7: the machine's slots spill, the payload carries none of them ==
+  scenario: {"block":"minecraft:air","drops":{"minecraft:stone":1,"powah:furnator_starter":1},"picked_up":{}}
+  placed again: Furnator at 32,100,36: 5000/20000 FE (… charge empty, …)
+== slice 7: a payload above the tier clamps on placement ==
+  doctored item: … {minecraft:block_entity_data": {id: "powah:furnator_starter", energy: 2000000000}} …
+  doctored: Furnator at 34,100,36: 20000/20000 FE (comparator 15, …)
+== slice 7: a plain item places an empty machine, and a cell keeps its own buffer ==
+  plain item: Furnator at 30,100,36: 0/20000 FE (comparator 0, …)
+  scenario: {"block":"minecraft:air","drops":{"powah:energy_cell_starter":1},"picked_up":{"powah:energy_cell_starter":1}}
+  cell placed again: Energy Cell at 38,100,36: 4000/1000000 FE (comparator 0, charge empty, empty, 1000 FE/t a side, t=…)
+== slice 7: what a level-side break carries (measured) ==
+  level-side break put 0 furnator item(s) in the inventory
+== slice 7: a chargeable item takes exactly the balance below the transfer ==
+  charged: Furnator at 32,100,34: 0/20000 FE (… charge powah:energy_cell_starter 40/1000000, 80 FE/t a side, t=2590)
+== slice 7: the charge rate is the tier's 80 FE a tick ==
+  rate: … 18960/20000 FE (… charge powah:energy_cell_starter 1080/1000000, … t=2608)
+  rate: … 18480/20000 FE (… charge powah:energy_cell_starter 1560/1000000, … t=2614)
+  dt=6 ticks, item +480 FE, machine -480 FE
+== slice 7: an item with no buffer is not charged ==
+  stone: Furnator at 32,100,34: 1000/20000 FE (… charge minecraft:stone 0/0, …)
+== slice 7: the item's own room caps the step, not the transfer ==
+  item(32,100,34) reply: Charge set to 999920 FE on powah:energy_cell_starter.
+  full item: … charge powah:energy_cell_starter 1000000/1000000 … 920/20000 FE …
+== slice 7: a cell charges two item slots within one budget ==
+  cell: Energy Cell at 36,100,34: 0/1000000 FE (comparator 0, charge powah:energy_cell_starter 1000/1000000, powah:energy_cell_starter 500/1000000, 1000 FE/t a side, t=…)
+```
+
+Each number is exact and its leg can fail: the 40 is the whole balance (a machine that kept it reads
+40, a machine that charged more than it had cannot), `+480` over `dt=6` is 80 a tick against the
+game's own clock (the `SELFTEST=charge` run expects 40 and fails), `1000000` with `920` left is the
+item's room capping one 80-FE step (a machine that kept charging a full item fails the second read),
+`1000`/`500` is one 1,000 FE budget spent in slot order (a per-slot budget would give 1000/1000 and a
+machine at 0 still), and `20000` from a 2,000,000,000 payload is the placement clamp.
+
+### Coverage (parity rule, the family this slice adds)
+
+| Family (from the jar) | Status |
+|---|---|
+| `keepEnergy` on the seven furnators | **tested** — a starter furnator at 5,000 FE broken in survival drops itself carrying `minecraft:block_entity_data {id, energy: 5000}`, placed back reads `5000/20000` and `/data get block … energy` reads 5000; its own charge slot's stone spilled as a separate item, and the placed machine reads `charge empty` |
+| `keepEnergy` on the seven cells | **tested** — a starter cell at 4,000 FE broken and placed again reads `4000/1000000` |
+| `keepEnergy` on the seven rods | **rule-tested** (`keep_capacity`, `carried_patch`) — the rod's payload and clamp are the cell's; no rod is broken in game this slice |
+| the placement clamp | **tested** — an item doctored to 2,000,000,000 FE places a `20000/20000` furnator, and a fresh item places `0/20000` |
+| the furnator's charge slot (`chargeItems(1)`, upstream's slot 0) | **tested** — 40 FE from a 40 FE balance, 80 FE a tick over `dt=6`, an item with 80 of room takes one step and leaves 920, a stone takes nothing |
+| a cell's two charge slots (`chargeItems(2)`) | **tested** — 1,500 FE split 1,000 / 500 in slot order, machine at 0 |
+| the fuel slot at upstream's index 1 | **tested** — the whole slice-1 and slice-6 fuel path runs on `container.1` |
+| the machine item as `Capabilities.Energy.ITEM` | **rule-tested** (`item_buffer`, `MachineEnergy` registered per item) — no other mod's charger exists in this leg to drive it |
+| reactors / generators / creative cell / side config / redstone / GUIs | `not ported` — slice 1's gaps; the reactors stay `blocked(uraninite-worldgen)` |
+
+### Deviations and upstream defects this slice records
+
+1. **Upstream defect fixed: two stores for one buffer.** Upstream's `EnergyBlockItem` keeps an item's
+   charge in `PowahComponents.ENERGY_STORED` (`Energy.Item`), while placement reads only
+   `STORED_BLOCK_ENTITY_STATE` — so a machine item charged in a slot (or by a battery) gives the
+   machine it becomes **nothing**. The port has one store, the item's
+   `minecraft:block_entity_data {id, energy}`: the drop writes it, the `ITEM_ENERGY` handler reads and
+   writes it, and placement restores it. A user notices that charging a cell item in a furnator and
+   placing it now works.
+2. **Upstream defect fixed: a payload is believed only within its tier, and split across a stack.** A
+   `/give`d item naming 2,000,000,000 FE on a 20,000 FE furnator places a full machine (upstream's
+   `readStorable` restores whatever the compound says), and a stack-scoped payload is divided by the
+   stack's count so placing a doctored stack cannot mint FE per item (upstream gives every placed item
+   the whole value). This port's machine items stack to 1, so only the doctored case is reachable.
+3. **The container declares no per-slot rule.** Upstream's `canInsert` gates slot 0 to chargeables and
+   slot 1 to fuel; a container declaration cannot express that at this pin, and a refusal on one slot
+   cancels a click on another (HANDOVER §9l, measured in `rftoolsstorage`). The tick decides instead,
+   as the fuel slot already did: a slot whose item holds no buffer is left alone (measured: a stone in
+   the charge slot takes nothing and the machine keeps its 1,000 FE).
+4. **Cells declare a container where they had none** (two slots, every face, no menu) — upstream's
+   `EnergyCellTile` has the same two slots.
+5. **The furnator's fuel moved from slot 0 to slot 1**, upstream's order; `notes.md`'s slice-1 record
+   and the harness's `put_fuel` say so. The harness keeps `FUEL_CONTAINER_SLOT` for the counterfactual
+   leg against the 0.2.6 package, whose furnator has one slot.
+6. **A cell and a rod clamp their saved buffer on their own tick.** A doctored payload, or a
+   `/data merge block`, would otherwise leave a 2,000,000,000 FE cell that the energy capability
+   reports raw; the tick writes it back clamped. The furnator already clamped on read.
+7. **`/powah item` is a harness control**, operator-only (level 2), like `/powah set`/`info`: it writes
+   the charge of the item in a machine's charge slot so a leg can leave an item an exact room.
+   Upstream has no such command.
+8. **A level-side break drops nothing at this pin.** `/setblock … destroy` on a `needs_iron_tool` block
+   gives no tool to the level path, so no item appears at all; the payload's differential is therefore
+   a freshly given item (no payload) placing an empty machine, which is the same statement.
+
+### Harness findings this slice measured (for the next machine port)
+
+1. **`ctl collect` walks, and a walk off the arena is a 35-block fall.** Two runs died there: the
+   player respawned at the world spawn (`y=64`) with an empty inventory, and every later assertion saw
+   `counts: {}`. Walk to the drop's own reported `pos` with `ctl tp` instead.
+2. **An item entity's reply carries `pos` (not `position`) and its stack under `item.item`** —
+   `ctl break`'s `on_ground` uses `pos` too.
+3. **A break's own drop is not reliably picked up**: it lands up to ~1.2 blocks off the block
+   (measured positions `32.68,100,35.87` and `-0.08,100,-0.04`), sometimes inside the player's reach
+   (`picked_up` set) and sometimes not. `pickup` reads `ctl entities 12 item`, tps onto the item's
+   `pos`, then selects its hotbar slot.
+4. **`/data get entity @s SelectedItem` is one selection stale**; read `ctl inventory`'s `.held` for
+   the held stack, and `/data get block <pos> energy` for the machine's own saved buffer (no mod code
+   in the path — the strongest read of the restored value).
+5. **`/item replace entity @s hotbar.1 from entity @s inventory.N` moves a stack between the player's
+   own slots**, the same stack and payload (a drop that lands in the main inventory is not reachable by
+   `ctl select` or `ctl place --item`).
+6. **An item inserted beside a charged machine charges on the very next tick**: a leg that wants an
+   exact item value must empty the machine first, insert, then set the buffer.
+7. **`/powah set` on a machine that charges an item cannot be polled for its own value** (the charge
+   starts the same tick); assert the command's reply and read the pair afterwards.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+
+### Coverage table in the checker's shape (`check-coverage.py`)
+
+| Family | Status | Evidence |
+|---|---|---|
+| `block` | tested | every block placed and read back, from the three slice-1 machines through the seven furnator/cell/cable tiers, the orb, the rods and the material block, and their loot |
+| `item` | tested | every item given and counted; every machine item placed; a machine item carries its buffer (`minecraft:block_entity_data`) and places it back |
+| `block_entity` | tested | each furnator tier burns at its own generation into its own capacity; a cell holds its tier's capacity and charges two item slots; each cable tier relays at its own rate and a network joins one tier; the orb holds seven slots and a recipe-gated buffer; a broken furnator/cell/rod carries its buffer on its item, clamped to the tier on placement |
+| `container` | tested | the furnator's charge slot (0) and fuel slot (1) and a cell's two slots, each asserted through the machine's own readout; a stone in the charge slot is not charged |
+| `loot_table` | tested | every machine, furnator tier, cell, cable tier, orb, rod and material block mined in survival in the loot leg and asserted to drop itself |
+| `recipe:minecraft:crafting_shaped` | tested | `craft_check.py` crafts each of the 43 shaped recipes in a real table: output id + count, ingredients consumed |
+| `recipe:minecraft:crafting_shapeless` | tested | same leg, 8 cases; the paste's lava bucket leaves its bucket |
+| `tag:item` | tested | `powah:energizing_rods`, `powah:furnators` and `powah:energy_cables` name their seven members |
+| `tag:block` | tested | the cable's `powah:energy_cable_connects` visual-arms tag; the pickaxe/needs-iron tags are what makes the loot leg's drops real |

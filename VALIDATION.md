@@ -1,5 +1,23 @@
 # Validation — Powah slices 1 to 6
 
+> **0.2.7 (slice 7, the item-energy family: `keepEnergy` and the item charge slots)** is recorded in
+> [`notes.md`](notes.md#slice-7--the-item-energy-family-keepenergy-and-the-item-charge-slots-2026-11-22):
+> the slice and its gap lines (items 4 and 5: "no item charging", "breaking a machine loses its FE"),
+> the red proof (three `todo!()` rules, 51 passed / 7 failed, quoted verbatim), the ladder at pin
+> `0a875da` (58 tests, clippy 0 warnings, `fmt --check` clean, two `cmp`-identical builds of
+> **305,679 B**, `check`, `fits` against the pin **and** against `0b14f8a`, gate 1/1 with **422
+> entries**, dialect 132/132) and the in-game legs (main `PASS`+`EXIT:0`; control, `SELFTEST=1`,
+> `SELFTEST=keep` and `SELFTEST=charge` at `EXIT:1`; the **0.2.6 package red** at the slice's own
+> payload assertion; `check-e2e-logs --strict` 20/20). Package: `powah.hmod`, 305,679 B, sha256
+> `8cf04f34e5135e4e07a66a516c42da11c2841e82f82458d63b3ae29a480269d3` (the legs ran the pack of
+the same sources whose only other difference is `README.md`, 305,399 B `91cca602…`). Launcher build:
+> `Compiling powah (1 of 1)`, `native-0a875da-d4ab2c99bd07`. What it proves: a 5,000 FE furnator and a
+> 4,000 FE cell broken in survival carry their buffer on their own item (`minecraft:block_entity_data`
+> `{id, energy}`, no `Items`), place back at exactly that value (`/data get block … energy` too), a
+> 2,000,000,000 FE payload clamps to the tier's 20,000, a furnator charges its charge slot at exactly
+> `min(transfer, stored, room)` out of its own buffer (measured against the game clock: `+480` over
+> `dt=6`), a cell splits one 1,000 FE budget over two slots, and a stone in the charge slot takes
+> nothing.
 > **0.2.6 (slice 6, the Furnator and Energy Cable ladders)** is recorded in
 > [`notes.md`](notes.md#slice-6--the-furnator-and-energy-cable-tier-ladders-2026-11-21): the
 > slice and its gap line (the package's own "not yet ported: the other six furnator and

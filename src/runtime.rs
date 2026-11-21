@@ -151,6 +151,31 @@ pub fn push_amount(stored: i32, transfer: i32) -> i32 {
     stored.max(0).min(transfer.max(0))
 }
 
+/// How much one charge step moves into an item (`ChargeUtil.transferSlotList`
+/// with `min(maxPerStack, maxTotal - charged)` and the item's own room):
+/// `min(transfer, stored, room)`, never negative.
+#[must_use]
+pub fn charge_step(stored: i32, transfer: i32, room: i32) -> i32 {
+    stored.max(0).min(transfer.max(0)).min(room.max(0))
+}
+
+/// What a broken machine's own item carries (upstream's `keepEnergy`):
+/// `Some(energy)` when the buffer holds something, clamped into the tier,
+/// `None` when it is empty — upstream writes the storable compound only when it
+/// is not empty.
+#[must_use]
+pub fn carried_energy(energy: i32, capacity: i32) -> Option<i32> {
+    let carried = clamp_energy(energy, capacity);
+    (carried > 0).then_some(carried)
+}
+
+/// The FE a placed machine takes from its item's payload, clamped into the
+/// tier's capacity so a doctored item cannot create FE.
+#[must_use]
+pub fn restored_energy(asked: i32, capacity: i32) -> i32 {
+    clamp_energy(asked, capacity)
+}
+
 /// The Furnator's saved state: the buffer and the carbon left to burn.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Furnator {
@@ -1257,6 +1282,79 @@ mod tests {
                 to: 3,
                 amount: 300
             }
+        );
+    }
+
+    #[test]
+    fn a_charge_step_moves_the_transfer_the_balance_or_the_room() {
+        assert_eq!(
+            charge_step(40, 80, 1_000_000),
+            40,
+            "the balance limits the step when it is below the transfer"
+        );
+        assert_eq!(
+            charge_step(1_000, 80, 1_000_000),
+            80,
+            "the machine's transfer limits the step"
+        );
+        assert_eq!(
+            charge_step(1_000, 80, 20),
+            20,
+            "the item's own room limits the step"
+        );
+        assert_eq!(
+            charge_step(0, 80, 1_000),
+            0,
+            "an empty machine moves nothing"
+        );
+        assert_eq!(
+            charge_step(-5, 80, 1_000),
+            0,
+            "a negative balance is an empty one"
+        );
+        assert_eq!(
+            charge_step(1_000, 0, 1_000),
+            0,
+            "a machine with no transfer moves nothing"
+        );
+        assert_eq!(charge_step(1_000, 80, -1), 0, "a full item has no room");
+    }
+
+    #[test]
+    fn a_broken_machine_carries_its_buffer_only_when_it_holds_one() {
+        assert_eq!(carried_energy(5_000, 20_000), Some(5_000));
+        assert_eq!(carried_energy(20_000, 20_000), Some(20_000));
+        assert_eq!(
+            carried_energy(0, 20_000),
+            None,
+            "an empty machine carries nothing: upstream writes the storable compound only when it is not empty"
+        );
+        assert_eq!(carried_energy(-1, 20_000), None, "an empty buffer is empty");
+        assert_eq!(
+            carried_energy(2_000_000_000, 20_000),
+            Some(20_000),
+            "the carried value is clamped into the tier"
+        );
+    }
+
+    #[test]
+    fn a_placed_machine_takes_its_item_s_buffer_clamped_to_its_tier() {
+        assert_eq!(restored_energy(5_000, 20_000), 5_000);
+        assert_eq!(
+            restored_energy(2_000_000_000, 20_000),
+            20_000,
+            "the counterfactual: an item doctored to 2,000,000,000 FE places a full 20,000 FE machine, not 2,000,000,000"
+        );
+        assert_eq!(
+            restored_energy(5_000, 1_000_000),
+            5_000,
+            "a bigger tier's buffer keeps what the item carried"
+        );
+        assert_eq!(restored_energy(-5, 20_000), 0, "nothing negative survives");
+        assert_eq!(
+            restored_energy(5_000, 0),
+            0,
+            "a buffer of capacity 0 holds nothing"
         );
     }
 }

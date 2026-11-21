@@ -1,4 +1,4 @@
-# Powah for Horizon — slices 1–6
+# Powah for Horizon — slices 1–7
 
 A clean-room Rust rewrite of **Powah! (Rearchitected) 6.2.10** (`Technici4n/Powah`,
 **LGPL-3.0-only**) for Horizon 26.3, as one flat SDK package (`api = "0.2"`): the
@@ -41,6 +41,15 @@ niotic, spirited and nitro furnators (80/200/800/2,000/8,000/40,000 FE/t into th
 six matching cables (2,000 up to 1,000,000 FE/t). A cable network joins only its own
 tier's cables, which is upstream's `CableNet` rule.
 
+Slice 7 is the **item-energy family**: a machine's own item carries its buffer when the
+machine is broken (upstream's `keepEnergy`, true for every furnator, cell and rod), as
+`minecraft:block_entity_data` `{id, energy}` — the engine spills a container's stacks
+itself, so the payload never carries `Items` — and placing the item restores the FE
+clamped to the tier (an item doctored to 2,000,000,000 FE places a full 20,000 FE
+furnator). A furnator's charge slot (upstream's slot 0; the fuel moved to slot 1) and a
+cell's two slots take `min(transfer, stored, room)` out of the machine's own buffer each
+tick, and a machine's item answers `Capabilities.Energy.ITEM` from that same payload.
+
 Every machine declares a real `Capabilities.Energy.BLOCK` buffer (the amount is the int
 `energy` in the block entity's saved compound), so other machines can fill and drain a
 furnator or a cell; a cable is a pure relay.
@@ -57,7 +66,7 @@ furnator or a cell; a cable is a pure relay.
 
 ```text
 powah.hmod            the delivered package (horizon-mod.toml + Cargo.toml + src/ + assets/ + data/)
-horizon-mod.toml      the only manifest and identity: id, version 0.2.6, api 0.2, [native] pins
+horizon-mod.toml      the only manifest and identity: id, version 0.2.7, api 0.2, [native] pins
 Cargo.toml            one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 src/lib.rs            the one `#[mod_api::horizon_mod] impl Hooks`
 src/powah.rs          the glue: the block entity Parts, the queue, the tier tables, the buffers, the cable network, the command
