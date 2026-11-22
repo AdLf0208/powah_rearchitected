@@ -1965,16 +1965,237 @@ machine at 0 still), and `20000` from a 2,000,000,000 payload is the placement c
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
 
+## Slice 8 — the Energy Discharger (2026-11-22)
+
+### The slice, quoted from this port's own gaps
+
+`## Deviations and gaps (slice 1)`, item 11 — the notes' own next-slice authority:
+
+> **11. The other 6 tiers, the creative cell and ~15 machines** are unported.
+
+and `FINDINGS.md` §"Slice 1 boundary", which names the machine:
+
+> Discharger/Hopper/Player Transmitter; item charging (`item_energy_buffer`) and
+> energy-carrying block items; side-config GUI and redstone modes (defaults only);
+
+The 0.2.7 report's next-slice line named it as the item-energy family's **mirror**: `EnergyDischargerTile`
+is `AbstractEnergyStorage` with `keepEnergy()` and `chargeItems`' inverse, and slice 7's `ITEM_ENERGY`
+handler had an `extract` side with no driver. That is this slice.
+
+**Why it fits `machines`:** a discharger is a storage block entity — a declared block energy buffer
+(extract-only), a seven-slot container and one tick (`dischargeItemsInInventory` → `extractFromSides`);
+no renderer, no GUI, no entity, no worldgen.
+
+**Not chosen (and why):** the creative cell, the generators and the reactors stay out (uraninite has no
+source in a 26.3 world — `blocked(uraninite-worldgen)`; the generators need a mod fluid tank the pin
+cannot fill); the Energy Hopper (`ChargingConfig`, a charging station over a container) is the other
+half of the same family and is left for the next slice; side config, redstone modes and the GUIs stay
+slice 1's recorded gaps.
+
+### What upstream does (read from tag `v6.2.10`, commit `a5a8f25`)
+
+| Fact | Where |
+|---|---|
+| capacity/transfer are `batteryCapacity()`/`batteryTransfer()` — the battery config: starter **1,000,000 FE / 1,000 FE a side**, nitro 2,000,000,000 / 2,000,000 | `config/v2/PowahConfig.java:95` (`devices.dischargers`), `DefaultEnergies` |
+| seven slots (`inv.add(7)`), slot limit **1**, insert only a dischargeable item, extract always | `block/discharger/EnergyDischargerTile.java:24,44,49` |
+| `postTick`: `dischargeItemsInInventory(inv, transfer, capacity - stored)`, then `energy.produce(extracted)`, then `extractFromSides` | `EnergyDischargerTile.java:29-37` |
+| `dischargeItemsInInventory` = one pass over the slots, each taking `min(transfer, budget left)` through the item's own `Capabilities.EnergyStorage.ITEM.extractEnergy`; the budget is the buffer's **room** | `util/ChargeUtil.java:66-78` |
+| `keepEnergy()` is true, so the block item carries the buffer | `EnergyDischargerTile.java:41` |
+| `getTransferType()` is `Transfer.EXTRACT` → the side config takes nothing on any face, and the block item only gives | `block/discharger/EnergyDischargerBlock.java:57` |
+
+### What it ships
+
+Content, carried by `tools/carry_slice8.py` (64 files, `--check` reproducible): seven block
+definitions (`minecraft:furnace`, horizontal `facing`, 2.0/20.0, metal, `occludes: false`, stack 1),
+seven blockstates (four facings × `lit`, the carry's `lollipop:block/empty` for `facing=up/down`
+replaced — the block is horizontal), the base model and seven tier models, seven item models and 26.3
+item definitions, the two textures, seven loot tables, seven recipes read from the jar in the pin's
+string form, their advancements, the `powah:energy_dischargers` block and item tags, the pickaxe and
+needs-iron tags, and the creative tab.
+
+Rust:
+
+| File | Change |
+|---|---|
+| `src/runtime.rs` | `DischargerTier` (`= CellTier`, the battery config), `DISCHARGER_TIER_COUNT`, `discharger_tier(index)`, `discharge_step(held, transfer, room)`; 2 tests |
+| `src/powah.rs` | `DISCHARGERS` (seven ids + type names), `Kind::Discharger`, `discharger_of`, `discharge_step`'s glue (`drain_items`), the extract-only battery, the seven-slot container, the item buffer (`max_insert` 0), `keep_capacity`, the readout line; `charge_slots`/`kind_charge_slots` renamed `item_slots`/`kind_item_slots` (a discharger's slots are not charge slots); 3 tests |
+| `src/lib.rs` | one container, one buffer, one idle type and one machine item per tier |
+| `horizon-mod.toml`, `Cargo.toml` | version 0.2.8, the description's slice list |
+
+**The drain goes through the item capability, not a payload rewrite.** At the level tick's end (where a
+block entity is back in the world) each of the seven slots is asked for its `ITEM_ENERGY` handler with
+`ItemPlace::BlockEntity{level, pos, side: None, slot}` and its `extract` runs inside a transaction: for
+this mod's machines that is slice 7's `MachineEnergy::extract`, so the handler's extract side has a real
+driver, and a foreign energy item answers for itself. The buffer is credited with exactly what moved.
+
+### The readouts this slice adds
+
+```text
+Energy Discharger at 30,100,40: 0/1000000 FE (comparator 0, charge empty, empty, empty, empty, empty, empty, empty, 1000 FE/t a side, t=2985)
+Energy Discharger at 30,100,40: 5000/1000000 FE (comparator 0, charge powah:energy_cell_starter 0/1000000, empty, empty, empty, empty, empty, empty, 1000 FE/t a side, t=3015)
+```
+
+The `charge` field names the seven slots in slot order, so `charge_of`/`charge_energy_of` read the
+first one exactly as they do on a furnator or a cell.
+
+### TDD: the red proof, quoted
+
+`discharger_tier`, `discharge_step`, the readout's arm and the discharger table were left unfinished
+(`todo!()`), and the two runtime tests and the three glue tests were written against them before any
+glue (`ports/_shared/evidence/powah/slice8-test-red.log`):
+
+```text
+thread 'runtime::tests::a_discharge_step_takes_the_item_s_charge_the_transfer_or_the_room' panicked at src/runtime.rs:184:5:
+not yet implemented: the item discharge step
+thread 'runtime::tests::the_discharger_ladder_is_the_battery_config' panicked at src/runtime.rs:144:5:
+not yet implemented: the discharger ladder
+thread 'powah::tests::every_discharger_tier_is_one_of_the_ladder_with_an_extract_only_buffer' panicked at src/runtime.rs:144:5:
+not yet implemented: the discharger ladder
+thread 'powah::tests::the_discharger_readout_names_its_buffer_and_its_seven_slots' panicked at src/powah.rs:811:35:
+not yet implemented: the discharger readout
+test result: FAILED. 59 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+```
+
+(The fifth new test, the container's seven slots, passes on the first run because `discharger_container`
+was already written; the four above are the rules.) After the implementation: **63 passed, 0 failed**
+(`slice8-test-green.log`; 58 slice-1…7 tests plus the five).
+
+### Ladder (0.2.8, pin `0a875da`)
+
+Every compile step ran in `ports/powah`, `CARGO_INCREMENTAL=0`, inside a
+`ports/tools/build-slot.sh run --job W1-powah --port ports/powah --step …` lease. Logs in
+`ports/_shared/evidence/powah/`.
+
+| Step | Command | Result |
+|---|---|---|
+| unit tests | `cargo test --offline` | **63 passed**, 0 failed (`slice8-test-green.log`) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`slice8-clippy-fmt.log`) |
+| formatting | `cargo fmt --check` | exit 0, empty (`slice8-clippy-fmt.log`) |
+| package, twice | `rm -f Cargo.lock; cargo horizon-mod build` ×2, `cmp` | **byte-identical, 330,025 B**, sha256 `d152d396ff809f291b8bee6043f78ac1f1a23771a1b44dcfb6fb00c6f3b43950` (`slice8-build-twice.log`); `src/runtime.rs` packs as `733ae14c45a1…` |
+| registry check | `cargo horizon-mod check powah.hmod` | **exit 0**, `powah 0.2.8 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, `330025 bytes, SHA-256 d152d396…f3b43950, unsigned` (`slice8-check-fits.log`) |
+| fits the pin | `cargo horizon-mod fits powah.hmod --build 0a875da` | `0a875da  made for`, exit 0 (`slice8-check-fits.log`) |
+| fits **another** build | `cargo horizon-mod fits powah.hmod --build 0b14f8a` | `0b14f8a  fits`, exit 0 (`slice8-check-fits.log`) |
+| dialect | `python3 ports/tools/check_261_dialect.py powah.hmod` | exit 0: **153** recipe/loot files in the 26.3 dialect (`slice8-check-fits.log`) |
+| carried content | `python3 tools/carry_slice8.py --check` | 64 files match |
+| package gate | `python3 ports/tools/verify-sdk-package.py powah` | **1/1**, runtime byte-identical, no packed `Cargo.lock`, **483 entries** |
+
+### In-game legs
+
+Launcher build `Compiling powah (1 of 1)` (`evidence/powah-e2e/launcher-build-0.2.8.log`, instance
+`powah-e2e`); logs in `ports/_shared/evidence/powah-e2e/`.
+
+| Leg | Command | Result |
+|---|---|---|
+| main | `launcher-game.sh build powah` + `build-slot.sh run --step e2e` | **PASS** + `EXIT:0` (`e2e-launcher-0.2.8.log`) |
+| control (whole scenario, no package) | `GAME=$CONTROL_GAME …` | `FAIL: expected powah:furnator_starter at 0,100,0, got 'minecraft:air'` + `EXIT:1` (`e2e-control-0.2.8.log`) |
+| selftest (this slice's flip) | `SELFTEST=drain …` | `FAIL: the discharger must have taken the item's 5,000 (left: 5000), got 'powah:energy_cell_starter 0/1000000'` + `EXIT:1` (`e2e-selftest-drain.log`) |
+| **the previous package** (0.2.7, the parity rule's red) | the 0.2.7 game + the same scenario | `FAIL: expected powah:energy_discharger_starter at 30,100,40, got 'minecraft:air'` + `EXIT:1`, after every slice 1–7 phase passed (`e2e-oldpackage-0.2.7.log`) |
+| log gate | `check-e2e-logs.py powah-e2e --strict` | `logs=24 ok=24 missing-exit=0 bad-exit=0`, exit 0 |
+
+The legs above ran the package as packed **before** this slice's `README.md` paragraphs
+(329,812 B, sha256 `99bc3239…`). The shipped artifact is 330,025 B `d152d396…`; compared entry by
+entry against the launcher's installed copy of the leg's package, all 483 entries are identical
+except `README.md` (`uses.json` is generated at build time and is not installed), and `src/`,
+`assets/`, `data/`, the manifest and the licences are byte-identical — so the legs prove the shipped
+code.
+
+Quoted from `e2e-launcher-0.2.8.log` (the family's own assertions):
+
+```text
+== slice 8: a discharger drains the item in its slot into its buffer ==
+  discharger: Energy Discharger at 30,100,40: 0/1000000 FE (comparator 0, charge empty, empty, empty, empty, empty, empty, empty, 1000 FE/t a side, t=2985)
+  item(30,100,40) reply: Charge set to 5000 FE on powah:energy_cell_starter.
+  drained: Energy Discharger at 30,100,40: 5000/1000000 FE (comparator 0, charge powah:energy_cell_starter 0/1000000, empty, empty, empty, empty, empty, empty, 1000 FE/t a side, t=3015)
+== slice 8: the buffer's room caps one step, not the transfer ==
+  room: Energy Discharger at 30,100,40: 1000000/1000000 FE (comparator 15, charge powah:energy_cell_starter 4980/1000000, empty, empty, empty, empty, empty, empty, 1000 FE/t a side, t=3041)
+  room: Energy Discharger at 30,100,40: 1000000/1000000 FE (comparator 15, charge powah:energy_cell_starter 4980/1000000, empty, empty, empty, empty, empty, empty, 1000 FE/t a side, t=3069)
+== slice 8: the drain rate is the tier's 1,000 FE a tick ==
+  rate: Energy Discharger at 30,100,40: 14000/1000000 FE (comparator 0, charge powah:energy_cell_starter 986000/1000000, …)
+  rate: Energy Discharger at 30,100,40: 21000/1000000 FE (comparator 0, charge powah:energy_cell_starter 979000/1000000, …)
+  dt=7 ticks, buffer +7000 FE, item -7000 FE
+== slice 8: an item with no buffer is not drained ==
+  stone: Energy Discharger at 30,100,40: 0/1000000 FE (comparator 0, charge minecraft:stone 0/0, …)
+== slice 8: the discharger ladder, its tags and its kept buffer ==
+  set(34,100,40) = Energy Discharger at 34,100,40: 2000000000/2000000000 FE (comparator 15, … 2000000 FE/t a side, t=3166)
+  tag(30,100,40) = {"chat":["Test passed"],"ok":true}
+  tag(0,99,3)    = {"chat":["Test failed"],"ok":true}
+  discharger placed again: Energy Discharger at 36,100,40: 7000/1000000 FE (comparator 0, charge empty, …)
+== slice 8: a discharger takes no FE through any face ==
+  discharger: Energy Discharger at 40,100,40: 0/1000000 FE (…)
+  cell:       Energy Cell at 41,100,40: 50000/1000000 FE (…)
+```
+
+Every number is exact and its leg can fail: `5000` in the buffer with `0` on the item is what
+`dischargeItemsInInventory` does with a 5,000 FE item under a 1,000 FE transfer (the `SELFTEST=drain`
+run expects the item to keep its 5,000 and fails), `4980` from `5,000` is the **20 of room** capping one
+step (a drain that ignored the room would leave 4,000), `+7000` over `dt=7` is 1,000 a tick against the
+game's own clock, the stone's `0/0` is the item-capability gate, `2,000,000,000` with `2,000,000 FE/t`
+is the nitro tier, `7000` back from a break is `keepEnergy`, and the cell beside a discharger keeping
+its 50,000 is `Transfer.EXTRACT` (the cell's mirror).
+
+### Coverage (parity rule, the family this slice adds)
+
+| Family (from the jar) | Status |
+|---|---|
+| the seven `energy_discharger_*` blocks and items | **tested** — every tier's item crafted, the starter and nitro placed, `/powah set` clamped at each tier's own capacity, the readout's capacity and transfer read back, the block in `powah:energy_dischargers`, and the 0.2.7 package red at the starter's own id |
+| `dischargeItemsInInventory` (item → buffer) | **tested** — a cell item charged to 5,000 ends fully in the buffer and reads 0; the buffer's 20 of room takes exactly 20 of a 5,000 item; 1,000 FE a tick measured against the game clock; a stone gives nothing |
+| `keepEnergy` on a discharger | **tested** — 7,000 FE broken in survival and placed again reads 7,000/1,000,000 |
+| `Transfer.EXTRACT` (no face takes FE) | **tested** — a charged cell beside it keeps its 50,000 while the discharger stays 0 |
+| the seven recipes + advancements | **tested** — `craft_check.py` crafts all seven (output id + count, ingredients consumed) |
+| the `powah:energy_dischargers` block/item tags | **tested in game** — `execute if block … #powah:energy_dischargers` passes on a discharger and fails on the arena floor; the item tag is the same list, validated by `check` |
+| loot | **tested** — the loot leg mines the starter and the nitro discharger in survival and asserts each drops itself |
+| the discharger GUI, its side-config/redstone modes, the Energy Hopper | `not ported` — slice 1's GUI/side-config gaps and the next slice (see `## Next slice` in the report) |
+
+### Deviations and upstream defects this slice records
+
+1. **No per-slot insert gate on the container.** Upstream's `canInsert` takes only a dischargeable item;
+   a container declaration cannot express that at this pin (a refusal on one slot cancels a click on
+   another, HANDOVER §9l — measured in `rftoolsstorage`), so the drain decides instead: an item whose
+   `ITEM_ENERGY` handler answers nothing is left alone (measured: a stone gives 0 and the buffer stays
+   0). The same shape slice 7 recorded for the charge slots.
+2. **The drain runs at the level tick's end, not inside the block entity's own tick.** A block entity is
+   out of the world during its tick, so an item capability there answers nothing; the position is
+   queued by its tick and the pass runs at `level_tick_post`, which is also where `extractFromSides`
+   already runs. The order upstream has (drain, then push) is kept.
+3. **The item's own room/transfer caps are the handler's.** The pass caps one step at the machine's
+   transfer and the buffer's room (`discharge_step`); the item's own `extractEnergy` caps whatever it
+   holds. A foreign energy item therefore works without this mod knowing its numbers, as upstream's
+   capability path does.
+4. **A discharger clamps its saved buffer on its own tick** (the shared `IdleRules` clamp), so a
+   doctored `/data merge block` cannot leave a buffer above the tier.
+5. **No upstream defect fixed.** Everything the artefact states was expressible at the pin; the one
+   mismatch found was in the brief, not the mod (the brief's `5000/10000` buffer line is the starter
+   **rod**'s capacity: the starter discharger is `batteryCapacity` = 1,000,000 FE, the cell's tier-0
+   number, as `PowahConfig.EnergyDevices.dischargers` says; the artefact wins and the measured line is
+   `5000/1000000`).
+
+### Harness findings this slice measured (for the next machine port)
+
+1. **`item replace block … container.N` reaches a seven-slot declaration** exactly as it does a two-slot
+   one, and `/powah item` writes slot 0 of a discharger (its first discharge slot).
+2. **An item inserted beside a buffer with room drains on the very next tick**, so a leg that wants an
+   exact *buffer* value must empty the slot first, set the buffer, then write the item's charge (a
+   `set_energy 0` poll cannot settle while an item with charge sits in a slot).
+3. **`execute if block <pos> #tag` is a reliable block-tag assertion at this pin** (`"Test passed"` /
+   `"Test failed"` in the command's chat reply) — cheaper than a recipe that accepts the tag.
+4. **A full scenario on a loaded box can lose a phase to timing, not to code.** Three attempts were
+   needed: one failed at slice 1's discharge poll (the source read 1,000 while the sink already had 500,
+   so the transfer itself was fine), two at slice 7's pickup (`held` empty right after `ctl select`);
+   the same log then passed with every phase. The `pickup` helper now re-reads the hotbar and retries
+   the selection (`tools/e2e.sh`), and a failing pickup dumps `{counts, hotbar, held}`.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+
 ### Coverage table in the checker's shape (`check-coverage.py`)
 
 | Family | Status | Evidence |
 |---|---|---|
-| `block` | tested | every block placed and read back, from the three slice-1 machines through the seven furnator/cell/cable tiers, the orb, the rods and the material block, and their loot |
+| `block` | tested | every block placed and read back, from the three slice-1 machines through the seven furnator/cell/cable/discharger tiers, the orb, the rods and the material block, and their loot |
 | `item` | tested | every item given and counted; every machine item placed; a machine item carries its buffer (`minecraft:block_entity_data`) and places it back |
-| `block_entity` | tested | each furnator tier burns at its own generation into its own capacity; a cell holds its tier's capacity and charges two item slots; each cable tier relays at its own rate and a network joins one tier; the orb holds seven slots and a recipe-gated buffer; a broken furnator/cell/rod carries its buffer on its item, clamped to the tier on placement |
-| `container` | tested | the furnator's charge slot (0) and fuel slot (1) and a cell's two slots, each asserted through the machine's own readout; a stone in the charge slot is not charged |
-| `loot_table` | tested | every machine, furnator tier, cell, cable tier, orb, rod and material block mined in survival in the loot leg and asserted to drop itself |
-| `recipe:minecraft:crafting_shaped` | tested | `craft_check.py` crafts each of the 43 shaped recipes in a real table: output id + count, ingredients consumed |
+| `block_entity` | tested | each furnator tier burns at its own generation into its own capacity; a cell holds its tier's capacity and charges two item slots; each discharger tier holds its own capacity and drains its seven slots into it, clamped to the tier; each cable tier relays at its own rate and a network joins one tier; the orb holds seven slots and a recipe-gated buffer; a broken furnator/cell/rod/discharger carries its buffer on its item, clamped to the tier on placement |
+| `container` | tested | the furnator's charge slot (0) and fuel slot (1), a cell's two slots and a discharger's seven, each asserted through the machine's own readout; a stone in a charge or discharge slot is left alone |
+| `loot_table` | tested | every machine, furnator tier, cell, cable tier, discharger tier, orb, rod and material block mined in survival in the loot leg and asserted to drop itself |
+| `recipe:minecraft:crafting_shaped` | tested | `craft_check.py` crafts each of the 50 shaped recipes in a real table: output id + count, ingredients consumed |
 | `recipe:minecraft:crafting_shapeless` | tested | same leg, 8 cases; the paste's lava bucket leaves its bucket |
-| `tag:item` | tested | `powah:energizing_rods`, `powah:furnators` and `powah:energy_cables` name their seven members |
-| `tag:block` | tested | the cable's `powah:energy_cable_connects` visual-arms tag; the pickaxe/needs-iron tags are what makes the loot leg's drops real |
+| `tag:item` | tested | `powah:energizing_rods`, `powah:furnators`, `powah:energy_cables` and `powah:energy_dischargers` name their seven members |
+| `tag:block` | tested | the cable's `powah:energy_cable_connects` visual-arms tag and `powah:energy_dischargers` (read by `execute if block` in game); the pickaxe/needs-iron tags are what makes the loot leg's drops real |

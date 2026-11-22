@@ -31,6 +31,11 @@ pub const CELL_TIER_COUNT: usize = 7;
 /// hardened, blazing, niotic, spirited, nitro.
 pub const FURNATOR_TIER_COUNT: usize = 7;
 
+/// The tiers an energy discharger has, in `Tier.getNormalVariants` order: starter, basic,
+/// hardened, blazing, niotic, spirited, nitro (upstream's `Tier.getNormalVariants`, which
+/// `Blcks.ENERGY_DISCHARGER` uses).
+pub const DISCHARGER_TIER_COUNT: usize = 7;
+
 /// One furnator tier's numbers: `activeProduction` (its generation while
 /// burning), `generatorCapacity` and `generatorTransfer` at that tier
 /// (`config/v2/DefaultEnergies`, derived from `baseScaling`).
@@ -128,6 +133,20 @@ pub fn cell_tier(index: usize) -> Option<CellTier> {
     })
 }
 
+/// One energy discharger tier's storage numbers: upstream's `devices.dischargers` config is the
+/// battery config (`PowahConfig.EnergyDevices`), so a tier's numbers are its energy cell's —
+/// `batteryCapacity` and `batteryTransfer` at that tier.
+pub type DischargerTier = CellTier;
+
+/// The energy discharger tier at `index` (0 = starter … 6 = nitro), `None` past the ladder.
+#[must_use]
+pub fn discharger_tier(index: usize) -> Option<DischargerTier> {
+    if index >= DISCHARGER_TIER_COUNT {
+        return None;
+    }
+    cell_tier(index)
+}
+
 /// Energy clamped into a buffer.
 #[must_use]
 pub fn clamp_energy(energy: i32, capacity: i32) -> i32 {
@@ -157,6 +176,15 @@ pub fn push_amount(stored: i32, transfer: i32) -> i32 {
 #[must_use]
 pub fn charge_step(stored: i32, transfer: i32, room: i32) -> i32 {
     stored.max(0).min(transfer.max(0)).min(room.max(0))
+}
+
+/// How much one discharge step takes out of an item (`ChargeUtil.transferSlotList` with
+/// `min(maxPerStack, maxTotal - charged)`, calling the item's `extractEnergy`):
+/// `min(the item's own charge, the tier's transfer, the buffer's room)`, never negative. It is
+/// [`charge_step`]'s mirror — the item is the source and the machine's buffer takes.
+#[must_use]
+pub fn discharge_step(held: i32, transfer: i32, room: i32) -> i32 {
+    held.max(0).min(transfer.max(0)).min(room.max(0))
 }
 
 /// What a broken machine's own item carries (upstream's `keepEnergy`):
@@ -1318,6 +1346,83 @@ mod tests {
             "a machine with no transfer moves nothing"
         );
         assert_eq!(charge_step(1_000, 80, -1), 0, "a full item has no room");
+    }
+
+    #[test]
+    fn a_discharge_step_takes_the_item_s_charge_the_transfer_or_the_room() {
+        // `EnergyDischargerTile.postTick`: `dischargeItemsInInventory(inv, transfer,
+        // capacity - stored)` → per slot `min(transfer, room left)`, and the item's own
+        // `extractEnergy` caps it at what the item holds. The mirror of `charge_step`.
+        assert_eq!(
+            discharge_step(5_000, 1_000, 1_000_000),
+            1_000,
+            "a charged item gives one transfer a tick"
+        );
+        assert_eq!(
+            discharge_step(300, 1_000, 1_000_000),
+            300,
+            "the item's own charge limits the step when it holds less than the transfer"
+        );
+        assert_eq!(
+            discharge_step(5_000, 1_000, 20),
+            20,
+            "the buffer's room limits the step: 20 of room takes 20, not 1,000"
+        );
+        assert_eq!(
+            discharge_step(0, 1_000, 1_000_000),
+            0,
+            "an empty item gives nothing"
+        );
+        assert_eq!(
+            discharge_step(-5, 1_000, 1_000_000),
+            0,
+            "a negative charge is an empty one"
+        );
+        assert_eq!(
+            discharge_step(5_000, 0, 1_000_000),
+            0,
+            "a discharger with no transfer takes nothing"
+        );
+        assert_eq!(
+            discharge_step(5_000, 1_000, 0),
+            0,
+            "a full buffer has no room"
+        );
+    }
+
+    #[test]
+    fn the_discharger_ladder_is_the_battery_config() {
+        // `PowahConfig.EnergyDevices`: `dischargers = new EnergyConfig(batteryCapacity(),
+        // batteryTransfer())` — the battery numbers, so the discharger ladder is the cell
+        // ladder: 1M/1k at starter, 2G/2M at nitro.
+        let expected = [
+            (1_000_000, 1_000),
+            (4_000_000, 4_000),
+            (10_000_000, 10_000),
+            (40_000_000, 40_000),
+            (100_000_000, 100_000),
+            (400_000_000, 400_000),
+            (2_000_000_000, 2_000_000),
+        ];
+        for (index, (capacity, transfer)) in expected.into_iter().enumerate() {
+            let tier =
+                discharger_tier(index).unwrap_or_else(|| panic!("tier {index} is on the ladder"));
+            assert_eq!(
+                (tier.capacity, tier.transfer),
+                (capacity, transfer),
+                "discharger tier {index}'s numbers"
+            );
+            assert_eq!(
+                discharger_tier(index),
+                cell_tier(index),
+                "tier {index} is the battery config, which is the cell's row"
+            );
+        }
+        assert_eq!(
+            discharger_tier(CELL_TIER_COUNT),
+            None,
+            "there is no eighth discharger tier"
+        );
     }
 
     #[test]

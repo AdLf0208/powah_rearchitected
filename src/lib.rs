@@ -125,7 +125,32 @@ impl Hooks for Mod {
                 Some(powah::IdleRules {
                     capacity: tier.capacity,
                     transfer: tier.transfer,
-                    slots: powah::kind_charge_slots(powah::Kind::Cell(tier)),
+                    slots: powah::kind_item_slots(powah::Kind::Cell(tier)),
+                }),
+            );
+            declare_item(registrar, block);
+        }
+        // Every energy discharger tier: seven slots whose items it drains, and one
+        // extract-only buffer (upstream's `devices.dischargers` — the battery config —
+        // over `AbstractEnergyBlock` with `getTransferType()` = `Transfer.EXTRACT`).
+        for (index, (block, name)) in powah::DISCHARGERS.into_iter().enumerate() {
+            let tier =
+                runtime::discharger_tier(index).expect("every discharger id is on the ladder");
+            let discharger = registrar.block_key(block);
+            registrar.block_container(&discharger, powah::discharger_container());
+            registrar.block_energy(&discharger, powah::discharger_battery(tier));
+            declare_idle(
+                registrar,
+                context,
+                &self.queue,
+                name,
+                Some(powah::IdleRules {
+                    capacity: tier.capacity,
+                    transfer: tier.transfer,
+                    // The drain runs at the level tick's end (`drain_items`): a block
+                    // entity is out of the world during its own tick, so an item
+                    // capability there answers nothing.
+                    slots: 0,
                 }),
             );
             declare_item(registrar, block);
@@ -147,7 +172,7 @@ impl Hooks for Mod {
                 Some(powah::IdleRules {
                     capacity: tier.capacity,
                     transfer: tier.transfer,
-                    slots: powah::kind_charge_slots(powah::Kind::Rod(tier)),
+                    slots: powah::kind_item_slots(powah::Kind::Rod(tier)),
                 }),
             );
             declare_item(registrar, block);

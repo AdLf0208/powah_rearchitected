@@ -24,10 +24,10 @@ use mod_api::{
 };
 
 use crate::runtime::{
-    CABLE_TIER_COUNT, CELL_TIER_COUNT, CableTier, CellTier, EnergizingRecipe, FURNATOR_TIER_COUNT,
-    Furnator, FurnatorTier, Neighbour, ORB_MAX_ENERGY, ORB_OUTPUT_SLOT, ORB_SLOTS, ROD_TIER_COUNT,
-    RodTier, cable_tier, cell_tier, clamp_energy, comparator_strength, furnator_tier,
-    network_moves, push_amount, rod_tier,
+    CABLE_TIER_COUNT, CELL_TIER_COUNT, CableTier, CellTier, DISCHARGER_TIER_COUNT, DischargerTier,
+    EnergizingRecipe, FURNATOR_TIER_COUNT, Furnator, FurnatorTier, Neighbour, ORB_MAX_ENERGY,
+    ORB_OUTPUT_SLOT, ORB_SLOTS, ROD_TIER_COUNT, RodTier, cable_tier, cell_tier, clamp_energy,
+    comparator_strength, discharger_tier, furnator_tier, network_moves, push_amount, rod_tier,
 };
 
 /// The energizing orb block and its item.
@@ -96,6 +96,30 @@ pub(crate) const CELLS: [(&str, &str); CELL_TIER_COUNT] = [
     ("powah:energy_cell_nitro", "energy_cell_nitro"),
 ];
 
+/// Every energy discharger tier's block id and block entity type name, in the
+/// ladder's order (the index [`discharger_tier`] takes).
+pub(crate) const DISCHARGERS: [(&str, &str); DISCHARGER_TIER_COUNT] = [
+    (
+        "powah:energy_discharger_starter",
+        "energy_discharger_starter",
+    ),
+    ("powah:energy_discharger_basic", "energy_discharger_basic"),
+    (
+        "powah:energy_discharger_hardened",
+        "energy_discharger_hardened",
+    ),
+    (
+        "powah:energy_discharger_blazing",
+        "energy_discharger_blazing",
+    ),
+    ("powah:energy_discharger_niotic", "energy_discharger_niotic"),
+    (
+        "powah:energy_discharger_spirited",
+        "energy_discharger_spirited",
+    ),
+    ("powah:energy_discharger_nitro", "energy_discharger_nitro"),
+];
+
 /// The furnator's fuel slot: upstream's slot 1 of 2, and the charge slot is 0.
 const FUEL_SLOT: usize = 1;
 /// The charge slot: upstream's slot 0 of the furnator, and the first of a cell's two.
@@ -104,6 +128,9 @@ pub(crate) const CHARGE_SLOT: usize = 0;
 const FURNATOR_SLOTS: usize = 2;
 /// A cell's two slot slots (`EnergyCellTile` charges `chargeItems(2)`).
 const CELL_SLOTS: usize = 2;
+/// A discharger's seven slots (`EnergyDischargerTile`'s `inv.add(7)`, slot limit 1,
+/// dischargeable items only).
+const DISCHARGER_SLOTS: usize = 7;
 
 /// What one of this mod's machine items holds, as upstream's `EnergyBlockItem`
 /// `Info` gives it: the machine tier's capacity, and the per-call insert and
@@ -129,6 +156,13 @@ pub(crate) fn item_buffer(block: &str) -> Option<ItemBuffer> {
             max_insert: 0,
             max_extract: tier.transfer,
         }),
+        // `EnergyDischargerBlock.getTransferType` is `Transfer.EXTRACT` too: a
+        // discharger item only gives.
+        Kind::Discharger(tier) => Some(ItemBuffer {
+            capacity: tier.capacity,
+            max_insert: 0,
+            max_extract: tier.transfer,
+        }),
         Kind::Cell(tier) => Some(ItemBuffer {
             capacity: tier.capacity,
             max_insert: tier.transfer,
@@ -143,21 +177,23 @@ pub(crate) fn item_buffer(block: &str) -> Option<ItemBuffer> {
     }
 }
 
-/// The item-charging slots a machine kind has: the furnator one
-/// (`FurnatorTile`'s `chargeItems(1)`), a cell two (`EnergyCellTile`'s
-/// `chargeItems(2)`), everything else none.
-pub(crate) fn kind_charge_slots(kind: Kind) -> usize {
+/// The item slots a machine kind holds energy items in: the furnator's one charge slot
+/// (`FurnatorTile`'s `chargeItems(1)`), a cell's two (`EnergyCellTile`'s `chargeItems(2)`),
+/// a discharger's seven (`EnergyDischargerTile`'s `inv.add(7)`, which its
+/// `dischargeItemsInInventory` drains), everything else none.
+pub(crate) fn kind_item_slots(kind: Kind) -> usize {
     match kind {
         Kind::Furnator(_) => 1,
         Kind::Cell(_) => CELL_SLOTS,
+        Kind::Discharger(_) => DISCHARGER_SLOTS,
         Kind::Orb | Kind::Cable(_) | Kind::Rod(_) => 0,
     }
 }
 
-/// How many item-charging slots the machine `block` names has: the furnator one
-/// (`chargeItems(1)`), a cell two (`chargeItems(2)`), everything else none.
-pub(crate) fn charge_slots(block: &str) -> usize {
-    Kind::of(block).map_or(0, kind_charge_slots)
+/// How many item slots the machine `block` names holds energy items in: a furnator one, a
+/// cell two, a discharger seven, everything else none.
+pub(crate) fn item_slots(block: &str) -> usize {
+    Kind::of(block).map_or(0, kind_item_slots)
 }
 
 /// The buffer a machine's own item carries when the machine is broken
@@ -166,7 +202,7 @@ pub(crate) fn charge_slots(block: &str) -> usize {
 pub(crate) fn keep_capacity(block: &str) -> Option<i32> {
     match Kind::of(block)? {
         Kind::Furnator(tier) => Some(tier.capacity),
-        Kind::Cell(tier) => Some(tier.capacity),
+        Kind::Cell(tier) | Kind::Discharger(tier) => Some(tier.capacity),
         Kind::Rod(tier) => Some(tier.capacity),
         Kind::Orb | Kind::Cable(_) => None,
     }
@@ -178,6 +214,21 @@ pub(crate) fn cell_container() -> ModContainer {
     let slots: Vec<usize> = (0..CELL_SLOTS).collect();
     ModContainer {
         slots: CELL_SLOTS,
+        faces: std::array::from_fn(|_| slots.clone()),
+        inputs: slots.clone(),
+        outputs: slots,
+        menu: None,
+    }
+}
+
+/// A discharger's container: upstream's seven slots (`EnergyDischargerTile`'s
+/// `inv.add(7)`, slot limit 1), every face reaching all seven, no menu. Upstream's
+/// `canInsert` takes only dischargeable items there; a container declaration cannot
+/// express that at this pin, so the tick leaves an item with no buffer alone.
+pub(crate) fn discharger_container() -> ModContainer {
+    let slots: Vec<usize> = (0..DISCHARGER_SLOTS).collect();
+    ModContainer {
+        slots: DISCHARGER_SLOTS,
         faces: std::array::from_fn(|_| slots.clone()),
         inputs: slots.clone(),
         outputs: slots,
@@ -305,6 +356,8 @@ pub(crate) enum Kind {
     Cell(CellTier),
     /// An energy cable, carrying its tier's rate.
     Cable(CableTier),
+    /// An energy discharger, carrying its tier's capacity and transfer.
+    Discharger(DischargerTier),
     /// The energizing orb: a recipe-gated buffer over seven slots.
     Orb,
     /// An energizing rod, carrying its tier's capacity and transfer.
@@ -320,7 +373,8 @@ impl Kind {
                 .map(Kind::Furnator)
                 .or_else(|| cell_of(block).map(Kind::Cell))
                 .or_else(|| cable_of(block).map(Kind::Cable))
-                .or_else(|| rod_of(block).map(Kind::Rod)),
+                .or_else(|| rod_of(block).map(Kind::Rod))
+                .or_else(|| discharger_of(block).map(Kind::Discharger)),
         }
     }
 }
@@ -344,6 +398,13 @@ pub(crate) fn cable_of(block: &str) -> Option<CableTier> {
 pub(crate) fn cell_of(block: &str) -> Option<CellTier> {
     let index = CELLS.iter().position(|(id, _)| *id == block)?;
     cell_tier(index)
+}
+
+/// The energy discharger a block id names, with its tier's numbers; `None` for any other
+/// block. The ids are the content's own (`data/powah/horizon/block/energy_discharger_*`).
+pub(crate) fn discharger_of(block: &str) -> Option<DischargerTier> {
+    let index = DISCHARGERS.iter().position(|(id, _)| *id == block)?;
+    discharger_tier(index)
 }
 
 /// What `/powah set` did, so the command can answer honestly.
@@ -403,12 +464,27 @@ pub(crate) fn cell_battery(tier: CellTier) -> ModEnergyBuffer {
     }
 }
 
+/// A discharger's buffer (`EnergyDischargerBlock` over `AbstractEnergyStorage` with
+/// `getTransferType()` = `Transfer.EXTRACT`): the tier's capacity, giving its transfer
+/// a side and taking nothing through any face — its FE comes from the items in its
+/// slots, never from a neighbour.
+pub(crate) fn discharger_battery(tier: DischargerTier) -> ModEnergyBuffer {
+    ModEnergyBuffer {
+        capacity: tier.capacity,
+        max_insert: 0,
+        max_extract: tier.transfer,
+        insert_faces: [false; 6],
+        extract_faces: [true; 6],
+    }
+}
+
 /// The buffer a block declares; the cable stores nothing (upstream's capacity is
 /// 0), so it declares none and is only ever a relay.
 pub(crate) fn battery_of(block: &str) -> Option<ModEnergyBuffer> {
     match Kind::of(block) {
         Some(Kind::Furnator(tier)) => Some(furnator_battery(tier)),
         Some(Kind::Cell(tier)) => Some(cell_battery(tier)),
+        Some(Kind::Discharger(tier)) => Some(discharger_battery(tier)),
         Some(Kind::Orb) => Some(orb_battery()),
         Some(Kind::Rod(tier)) => Some(rod_battery(tier)),
         _ => None,
@@ -726,6 +802,16 @@ pub(crate) fn status_line(
             charge_text(charge),
             tier.transfer,
         ),
+        // A discharger is the cell's mirror: the same buffer, and its seven slots are
+        // the ones it drains, so the readout names them in the same `charge` field.
+        Kind::Discharger(tier) => format!(
+            "Energy Discharger at {x},{y},{z}: {energy}/{} FE (comparator {}, charge {}, {} FE/t \
+             a side, t={time})",
+            tier.capacity,
+            comparator_strength(energy, tier.capacity),
+            charge_text(charge),
+            tier.transfer,
+        ),
         Kind::Cable(tier) => format!(
             "Energy Cable at {x},{y},{z}: no storage, moves up to {} FE/t (t={time})",
             tier.transfer
@@ -922,7 +1008,7 @@ pub(crate) fn info_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> Option<Stri
     let level = level_now(host)?;
     let block = block_at(&*host, level, pos)?;
     let kind = Kind::of(&block)?;
-    let slots = charge_slots(&block);
+    let slots = item_slots(&block);
     let time = level.game_time(&*host).unwrap_or(0);
     let (energy, carbon, fuel, charge) = match kind {
         Kind::Furnator(tier) => {
@@ -936,7 +1022,7 @@ pub(crate) fn info_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> Option<Stri
             let charge = charge_readout(host, entity, slots);
             (state.energy, state.carbon, fuel, charge)
         }
-        Kind::Cell(tier) => {
+        Kind::Cell(tier) | Kind::Discharger(tier) => {
             let entity = host.block_entity(level, pos)?;
             let saved = Tag::Compound(entity.data(&*host)?);
             let charge = charge_readout(host, entity, slots);
@@ -996,6 +1082,7 @@ pub(crate) fn set_energy(host: &mut dyn ServerHost, pos: [i32; 3], amount: i32) 
     let capacity = match Kind::of(&block) {
         Some(Kind::Furnator(tier)) => tier.capacity,
         Some(Kind::Cell(tier)) => tier.capacity,
+        Some(Kind::Discharger(tier)) => tier.capacity,
         Some(Kind::Rod(tier)) => tier.capacity,
         // The orb's buffer is the recipe's own energy: with no recipe it stores
         // nothing, exactly as upstream's `onSlotChanged` leaves it.
@@ -1204,7 +1291,7 @@ fn burn(
     // leave on the same tick; the buffer is debited by exactly what the item took.
     let charged = charge_items(
         &*host,
-        kind_charge_slots(Kind::Furnator(tier)),
+        kind_item_slots(Kind::Furnator(tier)),
         state.energy,
         tier.transfer,
         &mut event.entity.items,
@@ -1490,7 +1577,7 @@ pub(crate) fn set_item_energy(
     if Kind::of(&block).is_none() {
         return SetItemOutcome::NoBlock;
     }
-    if charge_slots(&block) == 0 {
+    if item_slots(&block) == 0 {
         return SetItemOutcome::NoSlot;
     }
     let Some(entity) = host.block_entity(level, pos) else {
@@ -1589,6 +1676,12 @@ pub(crate) fn on_level_tick_post(
         match kind {
             Kind::Furnator(tier) => push_out(host, level, pos, tier.transfer),
             Kind::Cell(tier) => push_out(host, level, pos, tier.transfer),
+            // A discharger fills from its own slots first, then pushes: upstream's
+            // `postTick` discharges and then runs `extractFromSides`.
+            Kind::Discharger(tier) => {
+                drain_items(host, level, pos, tier);
+                push_out(host, level, pos, tier.transfer);
+            }
             // A rod gives to its orb in the same phase; the orb itself moves
             // nothing (it has no neighbours to give to).
             Kind::Rod(tier) => {
@@ -1651,6 +1744,63 @@ fn push_out(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3], transfer:
             move_energy(host, &own, &target, want, tx).map_err(|_| ())
         });
     }
+}
+
+/// A discharger's item pass, in the level's move phase where every block entity is back in
+/// the world: `EnergyDischargerTile.postTick` runs
+/// `dischargeItemsInInventory(inv, transfer, capacity - stored)` before `extractFromSides`,
+/// so one pass spends the machine's transfer out of each slot against one room budget.
+///
+/// Each slot's FE comes out of the item's own `Capabilities.Energy.ITEM` handler in a
+/// transaction — for this mod's machines that is [`MachineEnergy::extract`], so a machine
+/// item dropped in a discharger gives the buffer its charge, and a foreign energy item
+/// answers for itself. An item with no handler (a stone) is left alone, and the buffer is
+/// credited by exactly what moved.
+fn drain_items(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3], tier: DischargerTier) {
+    let Some(entity) = host.block_entity(level, pos) else {
+        return;
+    };
+    let Some(saved) = entity.data(&*host) else {
+        return;
+    };
+    let stored = clamp_energy(int(&Tag::Compound(saved), KEY_ENERGY), tier.capacity);
+    let mut room = tier.capacity - stored;
+    let mut taken = 0;
+    for slot in 0..DISCHARGER_SLOTS {
+        if room <= 0 {
+            break;
+        }
+        let place = ItemPlace::BlockEntity {
+            level,
+            pos,
+            side: None,
+            slot,
+        };
+        let Some(item) = place.capability(host, &mod_api::ITEM_ENERGY) else {
+            continue;
+        };
+        let held = i32::try_from(item.amount(host)).unwrap_or(i32::MAX);
+        let want = crate::runtime::discharge_step(held, tier.transfer, room);
+        let want = u32::try_from(want).unwrap_or(0);
+        if want == 0 {
+            continue;
+        }
+        let moved = host
+            .transaction(|host, tx| -> Result<u32, ()> { Ok(item.extract(host, tx, want)) })
+            .unwrap_or(0);
+        let moved = i32::try_from(moved.min(want)).unwrap_or(0);
+        if moved == 0 {
+            continue;
+        }
+        room -= moved;
+        taken += moved;
+    }
+    if taken == 0 {
+        return;
+    }
+    let mut patch = Compound::new();
+    patch.insert(KEY_ENERGY.into(), Tag::Int(stored + taken));
+    let _ = entity.merge_data(host, patch);
 }
 
 /// The largest cable network one tick walks. Upstream's `CableNet` is unbounded;
@@ -2255,7 +2405,7 @@ mod tests {
     }
 
     #[test]
-    fn every_cell_container_is_its_two_charge_slots() {
+    fn every_cell_container_is_its_two_item_slots() {
         let container = cell_container();
         assert_eq!(container.slots, 2, "`EnergyCellTile` charges two slots");
         assert_eq!(container.inputs, vec![0, 1]);
@@ -2306,16 +2456,16 @@ mod tests {
 
     #[test]
     fn a_charge_slot_exists_only_on_the_machines_that_charge_items() {
-        assert_eq!(charge_slots(FURNATOR), 1, "the furnator charges slot 0");
-        assert_eq!(charge_slots(CELL), 2, "a cell charges two slots");
-        assert_eq!(charge_slots("powah:energy_cell_nitro"), 2);
-        assert_eq!(charge_slots(CABLE), 0);
+        assert_eq!(item_slots(FURNATOR), 1, "the furnator charges slot 0");
+        assert_eq!(item_slots(CELL), 2, "a cell charges two slots");
+        assert_eq!(item_slots("powah:energy_cell_nitro"), 2);
+        assert_eq!(item_slots(CABLE), 0);
         assert_eq!(
-            charge_slots(ORB),
+            item_slots(ORB),
             0,
             "the orb's seven slots are a recipe, not a charger"
         );
-        assert_eq!(charge_slots("powah:energizing_rod_starter"), 0);
+        assert_eq!(item_slots("powah:energizing_rod_starter"), 0);
     }
 
     #[test]
@@ -2398,6 +2548,127 @@ mod tests {
         assert!(
             stone.contains("charge minecraft:stone 0/0"),
             "an item without a buffer reads as one with none: {stone}"
+        );
+    }
+
+    #[test]
+    fn every_discharger_tier_is_one_of_the_ladder_with_an_extract_only_buffer() {
+        // `PowahConfig.EnergyDevices`: `dischargers = new EnergyConfig(batteryCapacity(),
+        // batteryTransfer())`, and `EnergyDischargerBlock.getTransferType()` is EXTRACT.
+        let expected = [
+            ("powah:energy_discharger_starter", 1_000_000, 1_000),
+            ("powah:energy_discharger_basic", 4_000_000, 4_000),
+            ("powah:energy_discharger_hardened", 10_000_000, 10_000),
+            ("powah:energy_discharger_blazing", 40_000_000, 40_000),
+            ("powah:energy_discharger_niotic", 100_000_000, 100_000),
+            ("powah:energy_discharger_spirited", 400_000_000, 400_000),
+            ("powah:energy_discharger_nitro", 2_000_000_000, 2_000_000),
+        ];
+        for (index, (id, capacity, transfer)) in expected.into_iter().enumerate() {
+            let tier = discharger_of(id).unwrap_or_else(|| panic!("{id} is an energy discharger"));
+            assert_eq!(
+                (tier.capacity, tier.transfer),
+                (capacity, transfer),
+                "{id} is the ladder's tier {index}"
+            );
+            assert_eq!(
+                Kind::of(id),
+                Some(Kind::Discharger(
+                    crate::runtime::discharger_tier(index)
+                        .expect("the same tier in the rule's table")
+                )),
+                "{id} maps to its tier"
+            );
+            let buffer = battery_of(id).unwrap_or_else(|| panic!("{id} declares a buffer"));
+            assert_eq!(buffer.capacity, capacity, "{id}'s capacity");
+            assert_eq!(
+                buffer.max_insert, 0,
+                "{id} takes no FE through any face: `Transfer.EXTRACT`"
+            );
+            assert_eq!(buffer.max_extract, transfer, "{id}'s extract cap");
+            assert_eq!(
+                buffer.insert_faces, [false; 6],
+                "{id} fills from its items, never from a neighbour"
+            );
+            assert_eq!(
+                buffer.extract_faces, [true; 6],
+                "{id} gives FE on every face"
+            );
+            assert_eq!(
+                item_buffer(id),
+                Some(ItemBuffer {
+                    capacity,
+                    max_insert: 0,
+                    max_extract: transfer,
+                }),
+                "{id}'s own item only gives, as the block does"
+            );
+            assert_eq!(
+                keep_capacity(id),
+                Some(capacity),
+                "{id} keeps its buffer (`keepEnergy` is true)"
+            );
+            assert_eq!(
+                item_slots(id),
+                DISCHARGER_SLOTS,
+                "{id} holds its seven discharge slots"
+            );
+        }
+        assert_eq!(discharger_of(CELL), None, "a cell is not a discharger");
+        assert_eq!(discharger_of("powah:energy_discharger_creative"), None);
+        assert_eq!(discharger_of("minecraft:chest"), None);
+    }
+
+    #[test]
+    fn the_discharger_container_is_its_seven_discharge_slots() {
+        let container = discharger_container();
+        assert_eq!(
+            container.slots, DISCHARGER_SLOTS,
+            "`EnergyDischargerTile`: `inv.add(7)`, slot limit 1"
+        );
+        let all: Vec<usize> = (0..DISCHARGER_SLOTS).collect();
+        assert_eq!(container.inputs, all, "automation fills any slot");
+        assert_eq!(
+            container.outputs, all,
+            "everything may be taken out (`canExtract` is true)"
+        );
+        assert_eq!(
+            container.faces,
+            std::array::from_fn(|_| all.clone()),
+            "every face reaches all seven slots"
+        );
+        assert_eq!(container.menu, None, "this port has no GUI");
+    }
+
+    #[test]
+    fn the_discharger_readout_names_its_buffer_and_its_seven_slots() {
+        let starter = Kind::Discharger(cell_tier(0).expect("the starter tier"));
+        let empty = [None; DISCHARGER_SLOTS];
+        assert_eq!(
+            status_line(starter, [20, 100, 34], 0, 0, None, &empty, 2600),
+            "Energy Discharger at 20,100,34: 0/1000000 FE (comparator 0, charge empty, empty, \
+             empty, empty, empty, empty, empty, 1000 FE/t a side, t=2600)"
+        );
+        let mut charged = empty;
+        charged[0] = Some(("powah:energy_cell_starter", 5_000, 1_000_000));
+        assert_eq!(
+            status_line(starter, [20, 100, 34], 5_000, 0, None, &charged, 2612),
+            "Energy Discharger at 20,100,34: 5000/1000000 FE (comparator 0, charge \
+             powah:energy_cell_starter 5000/1000000, empty, empty, empty, empty, empty, empty, \
+             1000 FE/t a side, t=2612)"
+        );
+        let stone = status_line(
+            starter,
+            [20, 100, 34],
+            0,
+            0,
+            None,
+            &[Some(("minecraft:stone", 0, 0)); DISCHARGER_SLOTS],
+            2620,
+        );
+        assert!(
+            stone.contains("charge minecraft:stone 0/0, minecraft:stone 0/0"),
+            "an item with no buffer names none: {stone}"
         );
     }
 

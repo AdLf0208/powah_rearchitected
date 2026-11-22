@@ -130,6 +130,14 @@ def cable(capacitor_id, middle):
             capacitor_id: [104]}
 
 
+def discharger(capacitor_id):
+    """`pcp/pdp/pcp`: six dielectric paste, the tier's capacitor above and below
+    the casing (the jar's `energy_discharger_<tier>` shape)."""
+    return {"powah:dielectric_paste": [100, 102, 103, 105, 106, 108],
+            capacitor_id: [101, 107],
+            "powah:dielectric_casing": [104]}
+
+
 def shaped(label, pattern, out, out_count):
     """One shaped case: the pattern's slots, one item each, and the output."""
     return {"label": label, "place": pattern, "want": (out, out_count),
@@ -303,6 +311,28 @@ CASES = [
     shaped("6 rods + nitro crystal + nitro capacitor -> 12 nitro cables",
            cable("powah:capacitor_nitro", "powah:crystal_nitro"),
            "powah:energy_cable_nitro", 12),
+    # --- slice 8: the discharger ladder --------------------------------------
+    shaped("6 paste + 2 tiny capacitors + casing -> a starter discharger",
+           discharger("powah:capacitor_basic_tiny"),
+           "powah:energy_discharger_starter", 1),
+    shaped("6 paste + 2 basic capacitors + casing -> a basic discharger",
+           discharger("powah:capacitor_basic"),
+           "powah:energy_discharger_basic", 1),
+    shaped("6 paste + 2 hardened capacitors + casing -> a hardened discharger",
+           discharger("powah:capacitor_hardened"),
+           "powah:energy_discharger_hardened", 1),
+    shaped("6 paste + 2 blazing capacitors + casing -> a blazing discharger",
+           discharger("powah:capacitor_blazing"),
+           "powah:energy_discharger_blazing", 1),
+    shaped("6 paste + 2 niotic capacitors + casing -> a niotic discharger",
+           discharger("powah:capacitor_niotic"),
+           "powah:energy_discharger_niotic", 1),
+    shaped("6 paste + 2 spirited capacitors + casing -> a spirited discharger",
+           discharger("powah:capacitor_spirited"),
+           "powah:energy_discharger_spirited", 1),
+    shaped("6 paste + 2 nitro capacitors + casing -> a nitro discharger",
+           discharger("powah:capacitor_nitro"),
+           "powah:energy_discharger_nitro", 1),
 ]
 
 

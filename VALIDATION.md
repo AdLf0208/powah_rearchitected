@@ -1,5 +1,25 @@
-# Validation — Powah slices 1 to 6
+# Validation — Powah slices 1 to 8
 
+> **0.2.8 (slice 8, the Energy Discharger)** is recorded in
+> [`notes.md`](notes.md#slice-8--the-energy-discharger-2026-11-22): the slice and the gap lines it comes
+> from (item 11's unported machines and `FINDINGS.md`'s "Discharger", named as the item-energy family's
+> mirror by the 0.2.7 report), the upstream facts it is built on (`devices.dischargers` =
+> `batteryCapacity`/`batteryTransfer`, seven slots, `postTick` = drain then push, `Transfer.EXTRACT`), the
+> red proof (four `todo!()` rules, 59 passed / 4 failed, quoted verbatim), the ladder at pin `0a875da`
+> (63 tests, clippy 0 warnings, `fmt --check` clean, two `cmp`-identical builds of **330,025 B**, `check`,
+> `fits` against the pin **and** against `0b14f8a`, gate 1/1 with **483 entries**, dialect 153/153) and the
+> in-game legs (main `PASS`+`EXIT:0`; control and `SELFTEST=drain` at `EXIT:1`; the **0.2.7 package red**
+> at the slice's own block id after every earlier phase passed; `check-e2e-logs --strict` 24/24).
+> Package: `powah.hmod`, 330,025 B, sha256
+> `d152d396ff809f291b8bee6043f78ac1f1a23771a1b44dcfb6fb00c6f3b43950`. Launcher build:
+> `Compiling powah (1 of 1)`, instance `powah-e2e`. What it proves: a cell item charged to 5,000 in a
+> starter discharger ends fully in the 1,000,000 FE buffer and reads 0; 20 of room takes exactly 20 of a
+> 5,000 item (not the 1,000 transfer) and a full buffer stops it; the drain is 1,000 FE a tick measured
+> against the game clock; a stone gives nothing; a nitro discharger clamps at 2,000,000,000 FE and names
+> 2,000,000 FE a side; `powah:energy_dischargers` matches in game; a broken 7,000 FE discharger carries
+> its buffer back; and a charged cell beside one keeps its 50,000 (`Transfer.EXTRACT`).
+> The legs ran the pack of the same sources whose only other difference is `README.md` (329,812 B,
+> `99bc3239…`); all 483 entries are otherwise byte-identical to the installed copy the legs used.
 > **0.2.7 (slice 7, the item-energy family: `keepEnergy` and the item charge slots)** is recorded in
 > [`notes.md`](notes.md#slice-7--the-item-energy-family-keepenergy-and-the-item-charge-slots-2026-11-22):
 > the slice and its gap lines (items 4 and 5: "no item charging", "breaking a machine loses its FE"),

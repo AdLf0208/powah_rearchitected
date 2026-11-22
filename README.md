@@ -1,4 +1,4 @@
-# Powah for Horizon — slices 1–7
+# Powah for Horizon — slices 1–8
 
 A clean-room Rust rewrite of **Powah! (Rearchitected) 6.2.10** (`Technici4n/Powah`,
 **LGPL-3.0-only**) for Horizon 26.3, as one flat SDK package (`api = "0.2"`): the
@@ -50,9 +50,16 @@ furnator). A furnator's charge slot (upstream's slot 0; the fuel moved to slot 1
 cell's two slots take `min(transfer, stored, room)` out of the machine's own buffer each
 tick, and a machine's item answers `Capabilities.Energy.ITEM` from that same payload.
 
+Slice 8 is the **Energy Discharger**, the cell's mirror: seven tiers (1,000,000 FE /
+1,000 FE a side up to 2,000,000,000 / 2,000,000) whose buffer takes nothing through any
+face (`Transfer.EXTRACT`) and fills from the energy items in its seven slots — each step
+`min(the item's charge, the tier's transfer, the buffer's room)`, read through the item's
+own `Capabilities.Energy.ITEM` handler, so a cell item placed there gives up its charge
+and a stone gives nothing. It keeps its buffer on its item like the other machines.
+
 Every machine declares a real `Capabilities.Energy.BLOCK` buffer (the amount is the int
 `energy` in the block entity's saved compound), so other machines can fill and drain a
-furnator or a cell; a cable is a pure relay.
+furnator, a cell or a discharger; a cable is a pure relay.
 
 - Scope, behaviour table, the hook table, deviations and the gap list:
   [`notes.md`](notes.md); upstream analysis: [`FINDINGS.md`](FINDINGS.md);
@@ -66,14 +73,14 @@ furnator or a cell; a cable is a pure relay.
 
 ```text
 powah.hmod            the delivered package (horizon-mod.toml + Cargo.toml + src/ + assets/ + data/)
-horizon-mod.toml      the only manifest and identity: id, version 0.2.7, api 0.2, [native] pins
+horizon-mod.toml      the only manifest and identity: id, version 0.2.8, api 0.2, [native] pins
 Cargo.toml            one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 src/lib.rs            the one `#[mod_api::horizon_mod] impl Hooks`
 src/powah.rs          the glue: the block entity Parts, the queue, the tier tables, the buffers, the cable network, the command
 src/runtime.rs        the pure machine rules and their tests (no mod_api types)
 assets/powah/         the carried blockstates, models, items, textures and lang
 data/powah/           the carried blocks, items, loot, recipes, tags, the creative tab
-tools/craft_check.py  the recipe leg: every material and machine recipe in a real crafting table
+tools/craft_check.py  the recipe leg: every material, machine and discharger recipe in a real table
 tools/e2e.sh          the in-game scenario (needs a launcher-built game, see below)
 ```
 
@@ -119,6 +126,7 @@ SELFTEST=network GAME=<that game> tools/e2e.sh                     # the cable n
 SELFTEST=orb GAME=<that game> tools/e2e.sh                         # the rod's exact fall
 SELFTEST=furnator GAME=<that game> tools/e2e.sh                    # the furnator tier clamp
 SELFTEST=furnator-rate GAME=<that game> tools/e2e.sh               # the nitro furnator's exact tick
+SELFTEST=drain GAME=<that game> tools/e2e.sh                       # the discharger's drain
 ```
 
 Give the port **its own launcher instance** (e.g. `--instance powah-e2e`, and the

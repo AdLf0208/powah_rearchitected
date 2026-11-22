@@ -1,11 +1,11 @@
-# Slices 1-4 of the Powah port, as one flat SDK package: the carried blocks, items, models,
+# Slices 1-8 of the Powah port, as one flat SDK package: the carried blocks, items, models,
 # textures, recipes, loot, tags and lang are the `assets/` and `data/` beside `src/`, and the
 # behaviour is the one `impl Hooks` there. Licence: LGPL-3.0-only (Technici4n/Powah); the full
 # text and its provenance are in LICENSE and LICENSE-NOTICE.md inside this package. Local-only
 # until the maintainer approves publishing (ARCHITECTURE.md §8).
 id = "powah"
 name = "Powah"
-version = "0.2.7"
+version = "0.2.8"
 description = """A port of Powah! (Rearchitected) for Horizon, slice 1: the starter tier of the energy
 chain. The Furnator burns a furnace fuel into carbon and makes 20 FE/t into a 20,000 FE buffer
 (one coal is 48,000 FE); the Energy Cell is a 1,000,000 FE capacitor that takes and gives 1,000
@@ -31,6 +31,10 @@ Slice 7 adds the item-energy family: a machine's own item carries its buffer whe
 broken (every furnator, cell and rod keeps its FE, and placing the item puts it back clamped to the
 tier), and a furnator charges the item in its charge slot while a cell charges two, each step
 exactly min(transfer, stored, room) out of the machine's own buffer.
+Slice 8 adds the energy discharger, the cell's mirror: seven tiers (1M/1,000 up to 2G/2,000,000 FE),
+a buffer that takes nothing through any face, and seven slots whose energy items it drains into that
+buffer at min(the item's charge, the tier's transfer, the buffer's room) a tick — read through each
+item's own energy capability, so a cell item placed there gives up its charge.
 Not yet ported: the creative cell, the generators, reactors, side config, redstone modes and the
 GUIs."""
 authors = ["owmii", "Technici4n", "AdLf0208"]

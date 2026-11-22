@@ -144,6 +144,28 @@ the jar's own recipes for each tier.
 patches are the ones every slice applies: the horizon block definition is the package's own
 starter shape, and a recipe's ingredients are the pin's bare-string form.
 
+## Slice 8 — the energy discharger ladder (2026-11-22)
+
+The cell's mirror, seven tiers of it, with the jar's own recipes.
+
+| Family | Files |
+|---|---|
+| blocks (7) | `data/powah/horizon/block/energy_discharger_<tier>.json` — the package's `minecraft:furnace` shape (horizontal `facing`, 2.0/20.0 metal, `occludes: false`, stack 1), as upstream's `Facing.HORIZONTAL` and `Properties.metalNoSolid(2.0, 20.0)` say |
+| blockstates (7) | `assets/powah/blockstates/energy_discharger_<tier>.json` — **written**, not carried: the carry names `lollipop:block/empty` for `facing=up/down` and has no `lit` variant; four horizontal facings × `lit`, exactly as the furnator's is |
+| block models (8) | `assets/powah/models/block/energy_discharger.json` (the jar's Blockbench base, parent `block/block`) and the seven tiers' `<tier>_ov` overlays |
+| item models (7) + item definitions (7) | `assets/powah/models/item/…`, `assets/powah/items/…` |
+| textures (2) | `energy_discharger_side.png`, `energy_discharger_comps.png` (the seven `<tier>_ov.png` were already carried) |
+| loot tables (7) | `data/powah/loot_table/blocks/energy_discharger_<tier>.json` |
+| recipes (7) + advancements (7) | `data/powah/recipe/crafting/energy_discharger_<tier>.json` — `pcp/pdp/pcp` (six paste, two capacitors of the tier, one casing); read from the jar in the pin's string form |
+| tags | the jar's `powah:energy_dischargers` block and item tags; the seven join `minecraft:mineable/pickaxe` and `minecraft:needs_iron_tool` |
+| creative tab | the seven join `data/powah/horizon/creative_tab/machines.json`, after the cable row |
+| lang | unchanged: the carry's `en_us.json` already has `block.powah.energy_discharger_<tier>` |
+
+`tools/carry_slice8.py` reproduces the slice's 64 files from the raw carry and the jar and
+`--check` verifies the tree still matches; **no asset or model is invented**. Every tier's
+recipe is craftable from carried items (the capacitor tiers come from slice 5's materials), so
+all seven are carried and all seven are crafted in the recipe leg.
+
 ## Where this content lives now (0.2.0)
 
 Since the SDK migration the carried tree **is the package root**: `assets/powah/` and

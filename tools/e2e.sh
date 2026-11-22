@@ -91,6 +91,22 @@
 # SELFTEST=keep expects the placed machine to read 0 FE (it must FAIL), proving
 # each exact assertion can fail.
 #
+# Slice 8 (the discharger, the item-energy family's other half) adds:
+#  - a starter discharger (1,000,000 FE, 1,000 FE/t a side) with a cell item
+#    charged to 5,000 in slot 0: the buffer reads 5,000 and the item 0;
+#  - with 20 of room the item must lose exactly 20, not the 1,000 transfer, and a
+#    full buffer must stop the drain;
+#  - the drain rate measured against the game's clock: the buffer gains exactly
+#    1,000 FE a tick and the item loses the same;
+#  - a stone in the slot gives nothing, a nitro discharger clamps at
+#    2,000,000,000 FE and names its 2,000,000 FE a side, the block is in
+#    `powah:energy_dischargers`, a broken 7,000 FE discharger's item carries the
+#    buffer back, and a charged cell beside a discharger keeps its 50,000 (no side
+#    of a discharger takes FE in: `Transfer.EXTRACT`);
+#  - and every discharger tier mined in survival drops itself.
+# SELFTEST=drain expects the item to keep its 5,000 (it must FAIL), proving the
+# drain assertion can fail.
+#
 # Slice 5 (the five cell recipes' `blocked(energizing-orb)` gate) adds the
 # Energizing Orb, its seven rods and the five materials they make:
 #  - a starter rod beside an orb holding iron and gold fills it to exactly its
@@ -252,10 +268,25 @@ pickup() { # pickup ITEM X Y Z
         done
     fi
     [ -n "$slot" ] || fail "could not move $1 into the hotbar: $(ctl inventory | jq -c '{counts, hotbar}' | head -c 400)"
-    ctl select $((slot + 1)) >/dev/null
-    ctl wait 6
+    # The hold check re-reads the hotbar: a selection made from a snapshot taken just
+    # after a pickup can answer `null` for a slot that is filled a tick later (measured
+    # twice on a loaded box, where four other e2e games shared the machine). Each
+    # attempt still requires the item in hand.
+    tries=0
+    while [ "$tries" -lt 3 ]; do
+        slot=$(ctl inventory | jq -r --arg i "$1" '[.hotbar[] | select(.item == $i) | .slot] | .[0] // ""')
+        if [ -z "$slot" ]; then
+            break
+        fi
+        ctl select $((slot + 1)) >/dev/null
+        ctl wait 6
+        if [ "$(ctl inventory | jq -r '.held.item // ""')" = "$1" ]; then
+            break
+        fi
+        tries=$((tries + 1))
+    done
     [ "$(ctl inventory | jq -r '.held.item // ""')" = "$1" ] ||
-        fail "$1 is not in hand after selecting slot $slot: $(ctl inventory | jq -c '.held' | head -c 300)"
+        fail "$1 is not in hand after selecting slot $slot: $(ctl inventory | jq -c '{counts, hotbar, held}' | head -c 500)"
     # stand beside the block again, not in it: the caller places the item back here
     ctl tp "$2.5" 100 "$(($3 + 1)).5" >/dev/null
     ctl wait 4
@@ -576,6 +607,19 @@ control_leg() {
     case "$tier_cable" in
         *"Unknown block"*|*"unknown block"*|*"error"*) ;;
         *) fail "the control game knew powah:energy_cable_nitro, so the content did not come from this package" ;;
+    esac
+    # Slice 8: the discharger and its item are the package's as well.
+    discharger=$(ctl command "setblock 6 100 2 powah:energy_discharger_starter")
+    echo "  discharger setblock reply: $discharger"
+    case "$discharger" in
+        *"Unknown block"*|*"unknown block"*|*"error"*) ;;
+        *) fail "the control game knew powah:energy_discharger_starter, so the content did not come from this package" ;;
+    esac
+    discharger_item=$(ctl command "give @s powah:energy_discharger_nitro 1")
+    echo "  discharger give reply: $discharger_item"
+    case "$discharger_item" in
+        *"Unknown item"*|*"unknown item"*|*"error"*|*"not found"*) ;;
+        *) fail "the control game knew powah:energy_discharger_nitro, so the content did not come from this package" ;;
     esac
     name=$(ctl block 4 100 0 | jq -r '.name // .block // "unknown"')
     [ "$name" = "minecraft:air" ] || fail "the control game holds $name, so the block id was known"
@@ -1298,6 +1342,165 @@ case "$cell_charge" in
     *) fail "a cell must charge slot 0 its full 1,000 and slot 1 the remaining 500, got '$cell_charge'" ;;
 esac
 
+echo "== slice 8: a discharger drains the item in its slot into its buffer =="
+# `EnergyDischargerTile.postTick` is `chargeItems`' mirror:
+# `dischargeItemsInInventory(inv, transfer, capacity - stored)` and then
+# `extractFromSides`. A starter discharger holds 1,000,000 FE (`devices.dischargers` is
+# the battery config), takes nothing through any face (`Transfer.EXTRACT`), and drains
+# 1,000 FE a tick out of each of its seven slots. A cell item charged to 5,000 must end
+# fully in the buffer and read 0 on the item.
+place 30 100 40 powah:energy_discharger_starter
+dis_line=$(info 30 100 40)
+echo "  discharger: $dis_line"
+case "$dis_line" in
+    *"Energy Discharger at 30,100,40: 0/1000000 FE (comparator 0, charge empty, empty, empty, empty, empty, empty, empty,"*)
+        ;;
+    *) fail "a fresh discharger must read an empty 1,000,000 FE buffer and seven empty slots, got '$dis_line'" ;;
+esac
+set_clamped 30 100 40 0 0
+put_charge 30 100 40 powah:energy_cell_starter
+item_energy 30 100 40 5000 powah:energy_cell_starter
+# The drain starts the tick the item is written, so poll until the item is empty (a
+# chat round trip is ~40 ticks and the transfer is 1,000 a tick).
+drain_line=$dis_line
+for _ in $(seq 1 20); do
+    drain_line=$(info 30 100 40)
+    [ "$(charge_energy_of "$drain_line")" = 0 ] && break
+    ctl wait 5
+done
+echo "  drained: $drain_line"
+drain_left=0
+if [ "$SELFTEST" = drain ]; then
+    drain_left=5000
+    echo "  SELFTEST: expecting the item to keep its 5,000 (this must fail)"
+fi
+[ "$(energy_of "$drain_line")" = 5000 ] ||
+    fail "the 5,000 FE of the item must be in the discharger's buffer, got $(energy_of "$drain_line"): $drain_line"
+[ "$(charge_energy_of "$drain_line")" = "$drain_left" ] ||
+    fail "the discharger must have taken the item's 5,000 (left: $drain_left), got '$(charge_of "$drain_line")': $drain_line"
+
+echo "== slice 8: the buffer's room caps one step, not the transfer =="
+# `dischargeItemsInInventory(inv, transfer, capacity - stored)`: with 20 of room the
+# per-slot cap is `min(transfer 1,000, room 20)` = 20, so the item loses exactly 20 of
+# its 5,000 and keeps 4,980 — a drain that ignored the room would take 1,000.
+set_clamped 30 100 40 999980 999980
+item_energy 30 100 40 5000 powah:energy_cell_starter
+room_line=$(info 30 100 40)
+ctl wait 20
+room_again=$(info 30 100 40)
+echo "  room: $room_line"
+echo "  room: $room_again"
+[ "$(energy_of "$room_line")" = 1000000 ] ||
+    fail "the discharger's 20 of room must be filled to its 1,000,000 cap: $room_line"
+[ "$(charge_energy_of "$room_line")" = 4980 ] ||
+    fail "an item in a buffer with 20 of room must lose exactly 20 of its 5,000, not the 1,000 transfer: $room_line"
+[ "$(charge_energy_of "$room_again")" = 4980 ] ||
+    fail "a full buffer must stop the drain: $room_again"
+
+echo "== slice 8: the drain rate is the tier's 1,000 FE a tick =="
+# Measured against the game's own clock, as the charge rate is: between two readouts
+# `dt` ticks apart the buffer must gain exactly `1,000 * dt` FE and the item must lose
+# the same. A per-slot budget of the whole buffer, or a 6,000-a-tick drain, fails.
+# The slot is emptied first: an item beside a buffer with room drains on the very next
+# tick, so the buffer cannot be zeroed (and polled for) while one sits there.
+ctl command "item replace block 30 100 40 container.0 with minecraft:air" >/dev/null
+ctl wait 3
+set_clamped 30 100 40 0 0
+ctl command "item replace block 30 100 40 container.0 with powah:energy_cell_starter 1" >/dev/null
+ctl wait 3
+item_energy 30 100 40 1000000 powah:energy_cell_starter
+rate_first=$(info 30 100 40)
+rate_second=$(info 30 100 40)
+echo "  rate: $rate_first"
+echo "  rate: $rate_second"
+t1=$(time_of "$rate_first")
+t2=$(time_of "$rate_second")
+b1=$(energy_of "$rate_first")
+b2=$(energy_of "$rate_second")
+c1=$(charge_energy_of "$rate_first")
+c2=$(charge_energy_of "$rate_second")
+dt=$((t2 - t1))
+db=$((b2 - b1))
+dc=$((c1 - c2))
+echo "  dt=$dt ticks, buffer +$db FE, item -$dc FE"
+[ "$dt" -ge 2 ] || fail "the two readouts were $dt ticks apart, too close to measure a rate"
+[ "$db" = "$dc" ] ||
+    fail "the buffer gained $db FE but the item lost $dc: a drain must be exactly what left the item"
+[ $((db % 1000)) = 0 ] ||
+    fail "the buffer gained $db FE, not a whole number of 1,000 FE drain steps"
+steps=$((db / 1000))
+[ "$steps" -ge $((dt - 1)) ] && [ "$steps" -le $((dt + 1)) ] ||
+    fail "the buffer gained $db FE over $dt ticks; at 1,000 FE a tick that is not one drain step a tick (expected $((dt * 1000)) +- 1000)"
+
+echo "== slice 8: an item with no buffer is not drained =="
+# The counterfactual for the two phases above: a stone has no energy capability, so it
+# gives nothing and the machine keeps its buffer (an item with no handler must not be
+# treated as an empty battery).
+ctl command "item replace block 30 100 40 container.0 with minecraft:stone 1" >/dev/null
+ctl wait 3
+set_clamped 30 100 40 0 0
+ctl wait 20
+stone_line=$(info 30 100 40)
+echo "  stone: $stone_line"
+[ "$(energy_of "$stone_line")" = 0 ] ||
+    fail "a stone in the discharger's slot filled its buffer: $stone_line"
+[ "$(charge_of "$stone_line")" = "minecraft:stone 0/0" ] ||
+    fail "a stone carries no buffer, so the slot must read 'minecraft:stone 0/0': $stone_line"
+
+echo "== slice 8: the discharger ladder, its tags and its kept buffer =="
+# The tier's own numbers: a nitro discharger clamps `/powah set` at 2,000,000,000 FE and
+# names its 2,000,000 FE a side. The block tag is read by the game's own tag matcher.
+place 34 100 40 powah:energy_discharger_nitro
+set_clamped 34 100 40 2000000000 2000000000
+expect_info 34 100 40 "2000000000/2000000000 FE"
+expect_info 34 100 40 "2000000 FE/t a side"
+tag_hit=$(ctl command "execute if block 30 100 40 #powah:energy_dischargers")
+tag_miss=$(ctl command "execute if block 0 99 3 #powah:energy_dischargers")
+echo "  tag(30,100,40) = $tag_hit"
+echo "  tag(0,99,3)    = $tag_miss"
+case "$tag_hit" in
+    *"passed"*) ;;
+    *) fail "a discharger is not in powah:energy_dischargers: $tag_hit" ;;
+esac
+case "$tag_miss" in
+    *"failed"*) ;;
+    *) fail "the arena floor matched powah:energy_dischargers: $tag_miss" ;;
+esac
+# `keepEnergy()` is true for a discharger too: 7,000 FE broken in survival and placed
+# again reads 7,000 (the shared payload code, proved on this family).
+place 36 100 40 powah:energy_discharger_starter
+set_clamped 36 100 40 7000 7000
+ctl command "tp @s 36.5 100 39.5" >/dev/null
+tool_up
+ctl look-at-block 36 100 40 >/dev/null || true
+dis_broken=$(ctl break 36 100 40) || fail "cannot break the discharger at 36,100,40"
+echo "$dis_broken" | jq -c '{scenario:"discharger-keep-energy", block, drops, picked_up}'
+pickup powah:energy_discharger_starter 36 100 40
+place_item 36 100 40 powah:energy_discharger_starter
+dis_kept=$(info 36 100 40)
+echo "  discharger placed again: $dis_kept"
+[ "$(energy_of "$dis_kept")" = 7000 ] ||
+    fail "a discharger placed from its own drop read $(energy_of "$dis_kept")/1000000 FE, not the 7000 it was broken with: $dis_kept"
+ctl command "gamemode creative @s" >/dev/null
+ctl command "clear @s" >/dev/null
+ctl wait 4
+
+echo "== slice 8: a discharger takes no FE through any face =="
+# `EnergyDischargerBlock.getTransferType()` is `Transfer.EXTRACT`, so the mirror of the
+# cell: a charged cell beside it keeps its 50,000 and the discharger's buffer stays 0.
+place 40 100 40 powah:energy_discharger_starter
+place 41 100 40 powah:energy_cell_starter
+set_clamped 41 100 40 50000 50000
+ctl wait 40
+feed_line=$(info 40 100 40)
+feed_source=$(info 41 100 40)
+echo "  discharger: $feed_line"
+echo "  cell:       $feed_source"
+[ "$(energy_of "$feed_line")" = 0 ] ||
+    fail "a discharger took FE through a face: $feed_line"
+[ "$(energy_of "$feed_source")" = 50000 ] ||
+    fail "the cell beside the discharger lost FE: $feed_source"
+
 echo "== slice 2: the six dielectric/capacitor items are real items =="
 for item in powah:dielectric_paste powah:dielectric_rod powah:dielectric_rod_horizontal \
             powah:dielectric_casing powah:capacitor_basic powah:capacitor_basic_tiny \
@@ -1396,8 +1599,19 @@ for tier in basic hardened blazing niotic spirited nitro; do
         [ "$got" -ge 1 ] || fail "breaking $block dropped $got of itself, not the block"
     done
 done
+# Slice 8: every discharger tier drops itself.
+for tier in starter basic hardened blazing niotic spirited nitro; do
+    block="powah:energy_discharger_$tier"
+    place 6 100 0 "$block"
+    ctl look-at-block 6 100 0 >/dev/null || true
+    broken=$(ctl break 6 100 0) || fail "cannot break $block at 6,100,0"
+    echo "$broken" | jq -c '{scenario:"loot", block, drops}'
+    [ "$(echo "$broken" | jq -r '.block')" = "minecraft:air" ] || fail "$block did not break"
+    got=$(echo "$broken" | jq -r --arg id "$block" '.drops[$id] // 0')
+    [ "$got" -ge 1 ] || fail "breaking $block dropped $got of itself, not the block"
+done
 ctl command "gamemode creative @s" >/dev/null
 ctl command "clear @s" >/dev/null
 ctl wait 3
 
-echo "PASS: a fuelled furnator made FE, the cable carried it into the cell, an unfuelled furnator made nothing, a cell without a cable stayed empty, a full cell stayed full, a charged cell drained through a cable into an empty one, a three-cable network carried a charge across its run with the two cells' sum unchanged and a cell off the network empty, the six material items exist, every material and machine recipe crafted its declared output and consumed its ingredients, each machine dropped itself, every energy cell tier clamped 2,000,000,000 FE at its own capacity and carried its own transfer, two adjacent cells swapped within their own transfer cap without creating FE, every cell tier dropped itself, a starter rod filled the orb to exactly its recipe's 10,000 FE and stood at 0, an orb with no rod and an orb with no recipe produced nothing while its rod kept its charge, a nitro rod made a blazing crystal at exactly 120,000 FE and kept the other 80,000, the blaze-rod blazing recipe, the niotic, spirited and nitro crystals all energised, every new block and item exists, every carried recipe including the five previously blocked cells crafts its declared output and consumes its ingredients, every furnator tier clamped 2,000,000,000 FE at its own generation capacity, a nitro furnator made exactly 40,000 FE in one tick of a coal and a starter furnator kept energy + carbon at 48,000 while filling slowly, every cable tier read back its own rate, a basic network refused to relay through a starter cable and delivered once that cable was basic, every new furnator and cable tier dropped itself, a starter furnator charged the item in its charge slot at exactly min(transfer, stored, room) with the FE coming out of its own buffer and left an item with no buffer alone, a cell charged two slots out of one budget, a 5,000 FE furnator and a 4,000 FE cell broken in survival carried their buffers on their own items and gave them back on placement while their spilled stacks did not, an item doctored to 2,000,000,000 FE clamped to its tier's 20,000 on placement and a fresh item placed an empty machine, and every guessed id is unknown without the package"
+echo "PASS: a fuelled furnator made FE, the cable carried it into the cell, an unfuelled furnator made nothing, a cell without a cable stayed empty, a full cell stayed full, a charged cell drained through a cable into an empty one, a three-cable network carried a charge across its run with the two cells' sum unchanged and a cell off the network empty, the six material items exist, every material and machine recipe crafted its declared output and consumed its ingredients, each machine dropped itself, every energy cell tier clamped 2,000,000,000 FE at its own capacity and carried its own transfer, two adjacent cells swapped within their own transfer cap without creating FE, every cell tier dropped itself, a starter rod filled the orb to exactly its recipe's 10,000 FE and stood at 0, an orb with no rod and an orb with no recipe produced nothing while its rod kept its charge, a nitro rod made a blazing crystal at exactly 120,000 FE and kept the other 80,000, the blaze-rod blazing recipe, the niotic, spirited and nitro crystals all energised, every new block and item exists, every carried recipe including the five previously blocked cells crafts its declared output and consumes its ingredients, every furnator tier clamped 2,000,000,000 FE at its own generation capacity, a nitro furnator made exactly 40,000 FE in one tick of a coal and a starter furnator kept energy + carbon at 48,000 while filling slowly, every cable tier read back its own rate, a basic network refused to relay through a starter cable and delivered once that cable was basic, every new furnator, cable and discharger tier dropped itself, a starter furnator charged the item in its charge slot at exactly min(transfer, stored, room) with the FE coming out of its own buffer and left an item with no buffer alone, a cell charged two slots out of one budget, a 5,000 FE furnator and a 4,000 FE cell broken in survival carried their buffers on their own items and gave them back on placement while their spilled stacks did not, an item doctored to 2,000,000,000 FE clamped to its tier's 20,000 on placement and a fresh item placed an empty machine, and every guessed id is unknown without the package"
