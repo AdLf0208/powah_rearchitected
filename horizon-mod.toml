@@ -1,11 +1,11 @@
-# Slices 1-11 of the Powah port, as one flat SDK package: the carried blocks, items, models,
+# Slices 1-13 of the Powah port, as one flat SDK package: the carried blocks, items, models,
 # textures, recipes, loot, tags and lang are the `assets/` and `data/` beside `src/`, and the
 # behaviour is the one `impl Hooks` there. Licence: LGPL-3.0-only (Technici4n/Powah); the full
 # text and its provenance are in LICENSE and LICENSE-NOTICE.md inside this package. Local-only
 # until the maintainer approves publishing (ARCHITECTURE.md §8).
 id = "powah"
 name = "Powah"
-version = "0.2.12"
+version = "0.2.13"
 description = """A port of Powah! (Rearchitected) for Horizon, slice 1: the starter tier of the energy
 chain. The Furnator burns a furnace fuel into carbon and makes 20 FE/t into a 20,000 FE buffer
 (one coal is 48,000 FE); the Energy Cell is a 1,000,000 FE capacitor that takes and gives 1,000
@@ -55,8 +55,12 @@ the player a binding card is bound to, at 500…1,000,000 FE a tick, out of its 
 item through its own energy handler, so an energy cell carried by that player takes the charge. The
 binding card is the item that names the player (`powah:bound_player`, bound by using it), with the
 blank card, the aerial pearl and the player aerial pearl its recipes are built from.
+Slice 13 adds the redstone mode upstream's GUI button sets: every machine that offers the button
+reads it in its own tick (IGNORE always runs, ON only while a neighbour powers the block, OFF only
+while none does), saved as `redstone_mode` in the block entity's own data, and
+`/powah redstone <ignore|on|off> <pos>` is the button's replacement.
 Not yet ported: the creative cell, the magmator and thermo generators, the reactors, the Lens of
-Ender, the dimensional binding card, side config, redstone modes and the GUIs."""
+Ender, the dimensional binding card, side config and the GUIs."""
 authors = ["owmii", "Technici4n", "AdLf0208"]
 # A native mod: Rust in src/, compiled by the launcher against the game build [native] pins,
 # beside the carried assets/ and data/. The id is the resource namespace and the only identity.

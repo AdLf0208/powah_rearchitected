@@ -30,10 +30,10 @@ use crate::runtime::{
     CABLE_TIER_COUNT, CELL_TIER_COUNT, CableTier, CellTier, Channel, DISCHARGER_TIER_COUNT,
     DischargerTier, ENDER_TIER_COUNT, EnderTier, EnergizingRecipe, FURNATOR_TIER_COUNT, Furnator,
     FurnatorTier, HOPPER_TIER_COUNT, HopperTier, MAX_CHANNELS, Neighbour, ORB_MAX_ENERGY,
-    ORB_OUTPUT_SLOT, ORB_SLOTS, ROD_TIER_COUNT, RodTier, SOLAR_TIER_COUNT, Sky, SolarTier,
-    TRANSMITTER_TIER_COUNT, cable_tier, cell_tier, clamp_energy, comparator_strength,
-    discharger_tier, ender_cell_tier, ender_gate_tier, furnator_tier, network_moves, push_amount,
-    rod_tier,
+    ORB_OUTPUT_SLOT, ORB_SLOTS, ROD_TIER_COUNT, RedstoneMode, RodTier, SOLAR_TIER_COUNT, Sky,
+    SolarTier, TRANSMITTER_TIER_COUNT, cable_tier, cell_tier, check_redstone, clamp_energy,
+    comparator_strength, discharger_tier, ender_cell_tier, ender_gate_tier, furnator_tier,
+    network_moves, push_amount, rod_tier,
 };
 
 /// The energizing orb block and its item.
@@ -515,6 +515,10 @@ const KEY_COOLDOWN: &str = "cool_down";
 /// An ender block's channel index and owner (`AbstractEnderTile`'s `channel` and `owner_id`).
 const KEY_CHANNEL: &str = "channel";
 const KEY_OWNER: &str = "owner";
+/// The mode a machine's redstone gate runs from (`AbstractTileEntity.writeSync`'s
+/// `redstone_mode`, an int ordinal) — the sync compound's key, so a broken machine's item
+/// carries its buffer but never its mode, as upstream's `writeStorable` leaves it out too.
+const KEY_REDSTONE_MODE: &str = "redstone_mode";
 
 /// The three machines, as a readout has to tell them apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -624,6 +628,150 @@ pub(crate) fn ender_gate_of(block: &str) -> Option<EnderTier> {
 pub(crate) fn transmitter_of(block: &str) -> Option<crate::runtime::TransmitterTier> {
     let index = TRANSMITTERS.iter().position(|(id, _)| *id == block)?;
     crate::runtime::transmitter_tier(index)
+}
+
+// ---------------------------------------------------------------------------
+// The redstone gate: `AbstractTileEntity.checkRedstone`
+// ---------------------------------------------------------------------------
+
+/// Whether the machine `block` names has a redstone mode at all: every machine whose upstream
+/// screen offers the button (`AbstractEnergyScreen.init` → `addRedstoneButton`) — and that is
+/// exactly the set that calls `checkRedstone()`. The energizing orb and the rods have neither.
+pub(crate) fn has_redstone_mode(block: &str) -> bool {
+    matches!(
+        Kind::of(block),
+        Some(
+            Kind::Furnator(_)
+                | Kind::Cell(_)
+                | Kind::Cable(_)
+                | Kind::Discharger(_)
+                | Kind::Hopper(_)
+                | Kind::Solar(_)
+                | Kind::EnderCell(_)
+                | Kind::EnderGate(_)
+                | Kind::Transmitter(_)
+        )
+    )
+}
+
+/// What `/powah redstone` finds at a position. Upstream's `NextRedstoneModePacket` acts only on an
+/// `AbstractTileEntity`, so a foreign block is "no block at all"; this mod's orb and rods are the
+/// only case of a machine that has no mode to set (`AbstractTileScreen` has no button).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RedstoneTarget {
+    /// A machine whose gate can be set.
+    Machine,
+    /// One of this mod's blocks with no redstone mode (the energizing orb, a rod).
+    NoMode,
+    /// No Powah block stands there.
+    NoBlock,
+}
+
+/// The target `/powah redstone <mode> <pos>` finds in the block `block` names.
+pub(crate) fn redstone_target(block: &str) -> RedstoneTarget {
+    match Kind::of(block) {
+        None => RedstoneTarget::NoBlock,
+        Some(_) if !has_redstone_mode(block) => RedstoneTarget::NoMode,
+        Some(_) => RedstoneTarget::Machine,
+    }
+}
+
+/// The mode a machine's saved compound holds (`redstone_mode`), `IGNORE` when it carries none —
+/// upstream's default, which is what `Redstone.values()[nbt.getInt("redstone_mode")]` reads on a
+/// fresh block entity.
+pub(crate) fn saved_mode(nbt: &Compound) -> RedstoneMode {
+    match nbt.get(&KEY_REDSTONE_MODE.into()) {
+        Some(Tag::Int(value)) => RedstoneMode::from_ordinal(*value),
+        _ => RedstoneMode::Ignore,
+    }
+}
+
+/// Whether any of the six neighbours powers `pos` (`Level.getBestNeighborSignal(pos) > 0`, the
+/// read upstream's `checkRedstone` makes), through the level's own signal getter.
+fn powered(host: &dyn Host, level: LevelRef, pos: [i32; 3]) -> bool {
+    level.best_neighbor_signal(host, pos).unwrap_or(0) > 0
+}
+
+/// Upstream's `checkRedstone()` for the machine at `pos`, whose saved compound is at hand: its mode
+/// against the neighbours' power.
+pub(crate) fn gate_open(host: &dyn Host, level: LevelRef, pos: [i32; 3], saved: &Compound) -> bool {
+    let mode = saved_mode(saved);
+    // Upstream returns before it reads the signal on the default ("avoid checking redstone if mode
+    // is IGNORE: `getBestNeighborSignal` is relatively expensive"), so a machine left alone pays
+    // nothing for a gate nobody set — which is every machine this port placed until now.
+    mode == RedstoneMode::Ignore || check_redstone(mode, powered(host, level, pos))
+}
+
+/// [`gate_open`] for a position whose compound is not at hand (the level-tick phase runs after the
+/// machine's own tick): reads it from the block entity. A position with no readable block entity
+/// answers open, so a missing read never stops a machine.
+pub(crate) fn gate_open_at(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> bool {
+    let Some(saved) = host
+        .block_entity(level, pos)
+        .and_then(|entity| entity.data(&*host))
+    else {
+        return true;
+    };
+    gate_open(&*host, level, pos, &saved)
+}
+
+/// Whether the machine at `pos` still answers energy on its faces. Upstream overrides
+/// `canExtractEnergy`/`canReceiveEnergy` with `checkRedstone() && super…` in exactly three places —
+/// `EnergyCellTile`, and `AbstractEnderTile` (the cell and the gate) — and nowhere else: a furnator,
+/// a discharger or a solar panel keeps giving while its own tick is gated, which is what their
+/// `postTick` does by running `extractFromSides` after the gate. A foreign block always answers.
+pub(crate) fn faces_open(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> bool {
+    match block_at(&*host, level, pos).as_deref().and_then(Kind::of) {
+        Some(Kind::Cell(_) | Kind::EnderCell(_) | Kind::EnderGate(_)) => {
+            gate_open_at(host, level, pos)
+        }
+        _ => true,
+    }
+}
+
+/// A machine's readout field for its redstone gate: `, redstone off (powered)` when the mode is not
+/// the default, and nothing at all on `IGNORE` — the default a machine is placed with, which keeps
+/// every untouched machine's line the one the earlier slices printed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RedstoneField {
+    /// The mode the machine saves.
+    pub mode: RedstoneMode,
+    /// Whether a neighbour powers it now.
+    pub powered: bool,
+}
+
+impl RedstoneField {
+    /// The field as a readout spells it, with its leading `, ` (or nothing on the default).
+    #[must_use]
+    pub(crate) fn text(self) -> String {
+        if self.mode == RedstoneMode::Ignore {
+            return String::new();
+        }
+        let powered = if self.powered { " (powered)" } else { "" };
+        format!(", redstone {}{powered}", self.mode.name())
+    }
+}
+
+/// The gate's readout field for the machine at `pos`, or nothing for a kind with no mode.
+pub(crate) fn redstone_field(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> String {
+    if !block_at(&*host, level, pos).is_some_and(|block| has_redstone_mode(&block)) {
+        return String::new();
+    }
+    let Some(saved) = host
+        .block_entity(level, pos)
+        .and_then(|entity| entity.data(&*host))
+    else {
+        return String::new();
+    };
+    let mode = saved_mode(&saved);
+    if mode == RedstoneMode::Ignore {
+        return String::new();
+    }
+    RedstoneField {
+        mode,
+        powered: powered(&*host, level, pos),
+    }
+    .text()
 }
 
 /// What `/powah set` did, so the command can answer honestly.
@@ -1085,7 +1233,12 @@ impl EnergyHandler for EnderEnergy {
     }
 
     /// `AbstractEnergyStorage.receiveEnergy`: at most the room, the tier's transfer and the offer.
+    /// `AbstractEnderTile.canReceiveEnergy` is `checkRedstone() && super…`, so a shut gate refuses
+    /// the fill — for a foreign mover too, which is why the gate is here and not only in the tick.
     fn insert(&self, host: &mut dyn ServerHost, _tx: &Transaction, amount: u32) -> u32 {
+        if !gate_open_at(host, self.level, self.pos) {
+            return 0;
+        }
         let Some(key) = ender_key_at(host, self.level, self.pos) else {
             return 0;
         };
@@ -1105,7 +1258,11 @@ impl EnergyHandler for EnderEnergy {
     }
 
     /// `AbstractEnergyStorage.extractEnergy`: at most what the channel holds and the transfer.
+    /// `AbstractEnderTile.canExtractEnergy` gates it the same way `canReceiveEnergy` gates a fill.
     fn extract(&self, host: &mut dyn ServerHost, _tx: &Transaction, amount: u32) -> u32 {
+        if !gate_open_at(host, self.level, self.pos) {
+            return 0;
+        }
         let Some(key) = ender_key_at(host, self.level, self.pos) else {
             return 0;
         };
@@ -1611,6 +1768,11 @@ fn in_range(rod: [i32; 3], orb: [i32; 3]) -> bool {
 /// in-game check's assertions match, so it must not drift). The charge slots a
 /// machine has are named after its fuel (a furnator's) or its comparator (a
 /// cell's), so every earlier assertion still matches its prefix.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a format builder with one parameter per field the line prints; grouping them into a \
+              struct that mirrors the format would add a type without removing a decision"
+)]
 pub(crate) fn status_line(
     kind: Kind,
     pos: [i32; 3],
@@ -1618,6 +1780,7 @@ pub(crate) fn status_line(
     carbon: i32,
     fuel: Option<(&str, u32)>,
     charge: &[ChargeReadout<'_>],
+    redstone: &str,
     time: i64,
 ) -> String {
     let [x, y, z] = pos;
@@ -1629,7 +1792,8 @@ pub(crate) fn status_line(
             };
             format!(
                 "Furnator at {x},{y},{z}: {energy}/{} FE (comparator {}, \
-                 carbon {carbon}, burning {}, fuel {fuel}, charge {}, {} FE/t a side, t={time})",
+                 carbon {carbon}, burning {}, fuel {fuel}, charge {}, {} FE/t a side{redstone}, \
+                 t={time})",
                 tier.capacity,
                 comparator_strength(energy, tier.capacity),
                 carbon > 0,
@@ -1639,7 +1803,7 @@ pub(crate) fn status_line(
         }
         Kind::Cell(tier) => format!(
             "Energy Cell at {x},{y},{z}: {energy}/{} FE (comparator {}, charge {}, {} FE/t a \
-             side, t={time})",
+             side{redstone}, t={time})",
             tier.capacity,
             comparator_strength(energy, tier.capacity),
             charge_text(charge),
@@ -1649,32 +1813,41 @@ pub(crate) fn status_line(
         // the ones it drains, so the readout names them in the same `charge` field.
         Kind::Discharger(tier) => format!(
             "Energy Discharger at {x},{y},{z}: {energy}/{} FE (comparator {}, charge {}, {} FE/t \
-             a side, t={time})",
+             a side{redstone}, t={time})",
             tier.capacity,
             comparator_strength(energy, tier.capacity),
             charge_text(charge),
             tier.transfer,
         ),
         Kind::Cable(tier) => format!(
-            "Energy Cable at {x},{y},{z}: no storage, moves up to {} FE/t (t={time})",
+            "Energy Cable at {x},{y},{z}: no storage, moves up to {} FE/t{redstone} (t={time})",
             tier.transfer
         ),
         // The hopper's readout names the face it charges through, which only [`info_line`] can
         // read from the block state; this arm is the type's exhaustiveness.
-        Kind::Hopper(tier) => hopper_line(pos, energy, tier, None, time),
+        Kind::Hopper(tier) => hopper_line(pos, energy, tier, None, redstone, time),
         // A solar panel's readout names the sky it reads, which only [`info_line`] can ask the
         // level; this arm is the type's exhaustiveness.
-        Kind::Solar(tier) => solar_line(pos, energy, tier, None, charge, time),
+        Kind::Solar(tier) => solar_line(pos, energy, tier, None, charge, redstone, time),
         // An ender block's readout names the channel and the face a gate reaches, which only
         // [`info_line`] can read; this arm is the type's exhaustiveness.
-        Kind::EnderCell(_) | Kind::EnderGate(_) => {
-            ender_line(kind, pos, Channel::default(), 0, None, charge, time)
-        }
+        Kind::EnderCell(_) | Kind::EnderGate(_) => ender_line(
+            kind,
+            pos,
+            Channel::default(),
+            0,
+            None,
+            charge,
+            redstone,
+            time,
+        ),
         Kind::Orb => orb_line(pos, energy, None, 0, time),
         Kind::Rod(tier) => rod_line(pos, energy, tier, None, time),
         // A transmitter's readout names the card and the player it is bound to, which only
         // [`info_line`] can read from the slot; this arm is the type's exhaustiveness.
-        Kind::Transmitter(tier) => transmitter_line(pos, energy, tier, CardReadout::Unknown, time),
+        Kind::Transmitter(tier) => {
+            transmitter_line(pos, energy, tier, CardReadout::Unknown, redstone, time)
+        }
     }
 }
 
@@ -1700,6 +1873,7 @@ pub(crate) fn transmitter_line(
     energy: i32,
     tier: crate::runtime::TransmitterTier,
     card: CardReadout<'_>,
+    redstone: &str,
     time: i64,
 ) -> String {
     let [x, y, z] = pos;
@@ -1711,7 +1885,7 @@ pub(crate) fn transmitter_line(
     };
     format!(
         "Player Transmitter at {x},{y},{z}: {energy}/{} FE (comparator {}, bound {bound}, \
-         charging {} FE/t, {} FE/t a side, t={time})",
+         charging {} FE/t, {} FE/t a side{redstone}, t={time})",
         tier.capacity,
         comparator_strength(energy, tier.capacity),
         tier.charging_rate,
@@ -1727,13 +1901,14 @@ pub(crate) fn hopper_line(
     energy: i32,
     tier: HopperTier,
     facing: Option<Direction>,
+    redstone: &str,
     time: i64,
 ) -> String {
     let [x, y, z] = pos;
     let facing = facing.map_or("unknown", facing_name);
     format!(
         "Energy Hopper at {x},{y},{z}: {energy}/{} FE (comparator {}, facing {facing}, charging \
-         {} FE/t, {} FE/t a side, t={time})",
+         {} FE/t, {} FE/t a side{redstone}, t={time})",
         tier.capacity,
         comparator_strength(energy, tier.capacity),
         tier.charging_rate,
@@ -1750,6 +1925,7 @@ pub(crate) fn solar_line(
     tier: SolarTier,
     sky: Option<Sky>,
     charge: &[ChargeReadout<'_>],
+    redstone: &str,
     time: i64,
 ) -> String {
     let [x, y, z] = pos;
@@ -1762,7 +1938,7 @@ pub(crate) fn solar_line(
     };
     format!(
         "Solar Panel at {x},{y},{z}: {energy}/{} FE (comparator {}, sky {sky}, day {day}, \
-         generating {} FE/t, {} FE/t a side, charge {}, t={time})",
+         generating {} FE/t, {} FE/t a side, charge {}{redstone}, t={time})",
         tier.capacity,
         comparator_strength(energy, tier.capacity),
         tier.generation,
@@ -1776,6 +1952,10 @@ pub(crate) fn solar_line(
 /// it reaches energy on. `channel` is the shared store's entry, which is what makes two blocks on
 /// one channel read the same number; `facing` is [`None`] only in [`status_line`]'s exhaustiveness
 /// arm, which has no block state to read.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a format builder with one parameter per field the line prints (the cell and the gate               share it); grouping them would add a type without removing a decision"
+)]
 pub(crate) fn ender_line(
     kind: Kind,
     pos: [i32; 3],
@@ -1783,6 +1963,7 @@ pub(crate) fn ender_line(
     index: i32,
     facing: Option<Direction>,
     charge: &[ChargeReadout<'_>],
+    redstone: &str,
     time: i64,
 ) -> String {
     let [x, y, z] = pos;
@@ -1806,7 +1987,7 @@ pub(crate) fn ender_line(
     };
     format!(
         "{name} at {x},{y},{z}: {}/{} FE (comparator {}, channel {index}/{}{face}, {} FE/t a \
-         side, charge {}, t={time})",
+         side, charge {}{redstone}, t={time})",
         channel.stored,
         channel.capacity,
         comparator_strength(channel.stored, channel.capacity),
@@ -2002,13 +2183,12 @@ pub(crate) fn sky_at(host: &dyn Host, level: LevelRef, pos: [i32; 3]) -> Sky {
     }
 }
 
-/// The two usages `/powah` declares, all operator-only (level 2). They are
-/// administrative: `set` writes a machine's stored FE, `item` writes the charge
-/// of the item in its charge slot, and `info` reads its slots, at coordinates the
-/// caller chooses, so they are operator diagnostics rather than gameplay (review
-/// finding 2026-11-18). `channel` is the same kind of control: upstream's channel is
-/// chosen in the block's GUI, which this port does not have, so the packet's effect
-/// (`SetChannelPacket`) is a command here.
+/// The `/powah` usages, all operator-only (level 2). They are administrative: `set` writes a
+/// machine's stored FE, `item` writes the charge of the item in its charge slot, and `info` reads
+/// its slots, at coordinates the caller chooses, so they are operator diagnostics rather than
+/// gameplay (review finding 2026-11-18). `channel` and `redstone` are the same kind of control:
+/// upstream chooses them in the block's GUI, which this port does not have, so each packet's
+/// effect (`SetChannelPacket`, `NextRedstoneModePacket`) is a command here.
 pub(crate) fn declare_commands(commands: &mut Vec<Command>) {
     commands.push(Command::op("powah info <pos:block_pos>", 2));
     commands.push(Command::op("powah set <amount:integer> <pos:block_pos>", 2));
@@ -2020,6 +2200,14 @@ pub(crate) fn declare_commands(commands: &mut Vec<Command>) {
         "powah channel <channel:integer> <pos:block_pos>",
         2,
     ));
+    // The mode is a literal, one usage per mode, so the dispatcher refuses a word that names no
+    // mode (as `/powah channel` has the dispatcher refuse a non-integer).
+    for mode in crate::runtime::RedstoneMode::ALL {
+        commands.push(Command::op(
+            &format!("powah redstone {} <pos:block_pos>", mode.command_word()),
+            2,
+        ));
+    }
 }
 
 /// What `/powah channel` did, so the command can answer honestly.
@@ -2057,6 +2245,47 @@ pub(crate) fn set_channel_index(
     match entity.merge_data(host, patch) {
         Ok(_) => ChannelOutcome::Set(set, tier.channels),
         Err(_) => ChannelOutcome::NoBlock,
+    }
+}
+
+/// What `/powah redstone` did, so the command can answer honestly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RedstoneOutcome {
+    /// The machine saves this mode now.
+    Set(RedstoneMode),
+    /// The block is this mod's, but has no redstone mode (the energizing orb, a rod).
+    NoMode,
+    /// No Powah machine stands there.
+    NoBlock,
+}
+
+/// Set a machine's redstone mode — the effect of the packet upstream's GUI button sends
+/// (`NextRedstoneModePacket`: `tile.nextRedstoneMode(); tile.sync()`). The GUI is not ported, so
+/// this command is its replacement, as `/powah channel` is the ender GUI's.
+pub(crate) fn set_redstone_mode(
+    host: &mut dyn ServerHost,
+    pos: [i32; 3],
+    mode: RedstoneMode,
+) -> RedstoneOutcome {
+    let Some(level) = level_now(host) else {
+        return RedstoneOutcome::NoBlock;
+    };
+    let Some(block) = block_at(&*host, level, pos) else {
+        return RedstoneOutcome::NoBlock;
+    };
+    match redstone_target(&block) {
+        RedstoneTarget::NoBlock => return RedstoneOutcome::NoBlock,
+        RedstoneTarget::NoMode => return RedstoneOutcome::NoMode,
+        RedstoneTarget::Machine => {}
+    }
+    let Some(entity) = host.block_entity(level, pos) else {
+        return RedstoneOutcome::NoBlock;
+    };
+    let mut patch = Compound::new();
+    patch.insert(KEY_REDSTONE_MODE.into(), Tag::Int(mode.ordinal()));
+    match entity.merge_data(host, patch) {
+        Ok(_) => RedstoneOutcome::Set(mode),
+        Err(_) => RedstoneOutcome::NoBlock,
     }
 }
 
@@ -2104,6 +2333,8 @@ pub(crate) fn info_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> Option<Stri
     let kind = Kind::of(&block)?;
     let slots = item_slots(&block);
     let time = level.game_time(&*host).unwrap_or(0);
+    // The gate's field, read once from the machine's own compound and the level's signal.
+    let redstone = redstone_field(host, level, pos);
     let (energy, carbon, fuel, charge) = match kind {
         Kind::Furnator(tier) => {
             let entity = host.block_entity(level, pos)?;
@@ -2145,6 +2376,7 @@ pub(crate) fn info_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> Option<Stri
                 clamp_energy(int(&saved, KEY_ENERGY), tier.capacity),
                 tier,
                 facing,
+                &redstone,
                 time,
             ));
         }
@@ -2165,6 +2397,7 @@ pub(crate) fn info_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> Option<Stri
                 tier,
                 Some(sky_at(&*host, level, pos)),
                 &charge,
+                &redstone,
                 time,
             ));
         }
@@ -2190,6 +2423,7 @@ pub(crate) fn info_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> Option<Stri
                 key.channel,
                 gate.then(|| facing_at(&*host, level, pos)).flatten(),
                 &charge,
+                &redstone,
                 time,
             ));
         }
@@ -2235,6 +2469,7 @@ pub(crate) fn info_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> Option<Stri
                 clamp_energy(int(&saved, KEY_ENERGY), tier.capacity),
                 tier,
                 card,
+                &redstone,
                 time,
             ));
         }
@@ -2247,7 +2482,9 @@ pub(crate) fn info_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> Option<Stri
                 .map(|(item, held, capacity)| (item.as_str(), *held, *capacity))
         })
         .collect();
-    Some(status_line(kind, pos, energy, carbon, fuel, &charge, time))
+    Some(status_line(
+        kind, pos, energy, carbon, fuel, &charge, &redstone, time,
+    ))
 }
 
 /// Set a furnator's, a cell's, the orb's or a rod's stored FE (`/powah set`): the
@@ -2338,8 +2575,14 @@ impl BlockEntityPart for FurnatorPart {
     /// then queue this position for the level's move phase. The payload is left
     /// `Changed` only when something moved, so an idle furnator does not dirty its
     /// chunk every tick.
+    ///
+    /// `FurnatorTile.postTick` runs the burn behind `checkRedstone()` and its
+    /// `extractFromSides` (this port's move phase) outside it: a shut gate stops the fuel and the
+    /// carbon, not the FE the buffer already holds.
     fn block_entity_tick(&self, host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
-        let changed = burn(host, event, self.tier);
+        let open = level_now(host)
+            .is_none_or(|level| gate_open(&*host, level, event.pos, &event.entity.nbt));
+        let changed = open && burn(host, event, self.tier);
         self.enqueue(host, event.pos);
         if !changed {
             *event.reply = BlockEntityTickReply::Unchanged;
@@ -2521,7 +2764,11 @@ impl BlockEntityPart for SolarPart {
                 .expect("the powah queue lock is held for one insert")
                 .push(level, event.pos);
         }
-        if !solar_tick(host, event, self.tier) {
+        // `SolarTile.postTick` runs its generation behind `checkRedstone()`, after the item charge
+        // and `extractFromSides`: a shut gate stops the panel making FE, not the FE it holds.
+        let open = level_now(host)
+            .is_none_or(|level| gate_open(&*host, level, event.pos, &event.entity.nbt));
+        if !solar_tick(host, event, self.tier, open) {
             *event.reply = BlockEntityTickReply::Unchanged;
         }
     }
@@ -2534,6 +2781,7 @@ fn solar_tick(
     host: &mut dyn ServerHost,
     event: &mut BlockEntityTickEvent<'_>,
     tier: SolarTier,
+    open: bool,
 ) -> bool {
     let resized = event.entity.items.len() != SOLAR_SLOTS;
     if resized {
@@ -2550,8 +2798,8 @@ fn solar_tick(
         &mut event.entity.items,
     );
     energy -= charged;
-    let produced = match level_now(host) {
-        Some(level) => crate::runtime::solar_production(
+    let produced = match (open, level_now(host)) {
+        (true, Some(level)) => crate::runtime::solar_production(
             energy,
             tier,
             sky_at(&*host, level, event.pos),
@@ -2559,7 +2807,7 @@ fn solar_tick(
             // slot are not ported (see `notes.md`), so no panel this port places has one.
             false,
         ),
-        None => 0,
+        _ => 0,
     };
     energy += produced;
     let changed = energy != before;
@@ -2593,9 +2841,13 @@ impl BlockEntityPart for TransmitterPart {
         event.ticks = true;
     }
 
-    /// `PlayerTransmitterTile.postTick`: clamp the buffer into the tier, then spend the tier's
-    /// rate on the inventory of the player the card in slot 0 names, out of that buffer.
+    /// `PlayerTransmitterTile.postTick`: clamp the buffer into the tier, then — behind
+    /// `checkRedstone()` — spend the tier's rate on the inventory of the player the card in slot 0
+    /// names, out of that buffer. A shut gate leaves the buffer alone: upstream returns before it
+    /// reads the card at all.
     fn block_entity_tick(&self, host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
+        let open = level_now(host)
+            .is_none_or(|level| gate_open(&*host, level, event.pos, &event.entity.nbt));
         let mut saved = Tag::Compound(std::mem::take(&mut event.entity.nbt));
         let before = int(&saved, KEY_ENERGY);
         let mut energy = crate::runtime::clamp_energy(before, self.tier.capacity);
@@ -2604,7 +2856,11 @@ impl BlockEntityPart for TransmitterPart {
             .items
             .get(TRANSMITTER_CARD_SLOT)
             .and_then(Option::as_ref);
-        let charged = charge_bound_player(host, self.tier, energy, card);
+        let charged = if open {
+            charge_bound_player(host, self.tier, energy, card)
+        } else {
+            0
+        };
         energy -= charged;
         let changed = energy != before;
         if changed {
@@ -3289,11 +3545,20 @@ pub(crate) fn on_level_tick_post(
         };
         match kind {
             Kind::Furnator(tier) => push_out(host, level, pos, tier.transfer),
-            Kind::Cell(tier) => push_out(host, level, pos, tier.transfer),
+            // `EnergyCellTile.canExtractEnergy` is `checkRedstone() && super…`: a cell whose gate is
+            // shut gives nothing on any face (`faces_open` also keeps a cable from pulling at it).
+            Kind::Cell(tier) => {
+                if faces_open(host, level, pos) {
+                    push_out(host, level, pos, tier.transfer);
+                }
+            }
             // A discharger fills from its own slots first, then pushes: upstream's
-            // `postTick` discharges and then runs `extractFromSides`.
+            // `postTick` discharges and then runs `extractFromSides` — the drain is behind
+            // `checkRedstone()`, the push is not.
             Kind::Discharger(tier) => {
-                drain_items(host, level, pos, tier);
+                if gate_open_at(host, level, pos) {
+                    drain_items(host, level, pos, tier);
+                }
                 push_out(host, level, pos, tier.transfer);
             }
             // A rod gives to its orb in the same phase; the orb itself moves
@@ -3304,7 +3569,9 @@ pub(crate) fn on_level_tick_post(
             // A hopper charges the container on the face its `facing` names, out of its own
             // buffer (`EnergyHopperTile.postTick`), and pushes nothing anywhere.
             Kind::Hopper(tier) => {
-                charge_container(host, level, pos, tier);
+                if gate_open_at(host, level, pos) {
+                    charge_container(host, level, pos, tier);
+                }
             }
             // A solar panel gives only on the face upstream's `isEnergyPresent` names, its own
             // bottom (`Direction.DOWN`).
@@ -3324,8 +3591,11 @@ pub(crate) fn on_level_tick_post(
                     push_out_on(host, level, pos, tier.transfer, &[facing]);
                 }
             }
+            // `CableTile.receiveEnergy` is the one place a cable reads its gate: the door FE comes
+            // in through. Gated here, that cable relays nothing; an open cable of the same network
+            // still does, because a gated one does not claim the network below.
             Kind::Cable(tier) => {
-                if planned.contains(&pos) {
+                if planned.contains(&pos) || !gate_open_at(host, level, pos) {
                     continue;
                 }
                 planned.extend(relay_network(host, level, pos, tier));
@@ -3368,6 +3638,11 @@ fn push_out_on(
         // Upstream's `extractFromSides` skips a side whose neighbour refuses a fill; this
         // mod's own blocks say so in their declaration (`furnator_battery` has no insert
         // face), and a foreign block is tried, its handler refusing.
+        // Upstream's `canReceiveEnergy` on a cell or an ender block is `checkRedstone() && super…`:
+        // a machine whose gate is shut takes nothing through its faces.
+        if !faces_open(host, level, neighbour) {
+            continue;
+        }
         let Some(target_block) = block_at(&*host, level, neighbour) else {
             continue;
         };
@@ -3658,6 +3933,11 @@ fn neighbour(
     pos: [i32; 3],
     side: Direction,
 ) -> Option<Neighbour> {
+    // A cell or an ender block whose gate is shut is not a port at all: `canExtractEnergy` and
+    // `canReceiveEnergy` answer false there, so the network neither reads nor writes it.
+    if !faces_open(host, level, pos) {
+        return None;
+    }
     let block = block_at(&*host, level, pos)?;
     let handler = level.capability(&mut *host, &ENERGY, pos, Some(side))?;
     let energy = i32::try_from(handler.amount(host)).unwrap_or(i32::MAX);
@@ -3711,8 +3991,9 @@ mod tests {
         declare_commands(&mut commands);
         assert_eq!(
             commands.len(),
-            4,
-            "every usage is declared: `info`, `set`, the item charge control and the channel control"
+            7,
+            "every usage is declared: `info`, `set`, the item charge control, the channel control \
+             and the three redstone modes"
         );
         let usages: Vec<&str> = commands
             .iter()
@@ -3726,6 +4007,13 @@ mod tests {
             usages.contains(&"powah channel <channel:integer> <pos:block_pos>"),
             "the channel control is the packet's replacement: {usages:?}"
         );
+        for mode in crate::runtime::RedstoneMode::ALL {
+            let usage = format!("powah redstone {} <pos:block_pos>", mode.command_word());
+            assert!(
+                usages.contains(&usage.as_str()),
+                "the {mode:?} gate control is the GUI button's replacement: {usages:?}"
+            );
+        }
         for command in &commands {
             assert!(
                 command.usage.starts_with("powah "),
@@ -3824,6 +4112,7 @@ mod tests {
             0,
             None,
             &[None, None],
+            "",
             42,
         );
         assert_eq!(
@@ -3838,6 +4127,7 @@ mod tests {
             1,
             Some(Direction::North),
             &[None, None],
+            "",
             42,
         );
         assert_eq!(
@@ -4202,7 +4492,7 @@ mod tests {
     fn the_info_lines_are_the_ones_the_e2e_asserts() {
         let starter_furnator = Kind::Furnator(furnator_tier(0).expect("the starter tier"));
         assert_eq!(
-            status_line(starter_furnator, [0, 100, 0], 0, 0, None, &[None], 150),
+            status_line(starter_furnator, [0, 100, 0], 0, 0, None, &[None], "", 150),
             "Furnator at 0,100,0: 0/20000 FE (comparator 0, carbon 0, burning false, fuel empty, \
              charge empty, 80 FE/t a side, t=150)"
         );
@@ -4214,6 +4504,7 @@ mod tests {
                 46_800,
                 Some(("minecraft:coal", 4)),
                 &[None],
+                "",
                 282
             ),
             "Furnator at 0,100,0: 320/20000 FE (comparator 0, carbon 46800, burning true, fuel \
@@ -4228,6 +4519,7 @@ mod tests {
                 8_000,
                 None,
                 &[None],
+                "",
                 500
             ),
             "Furnator at 0,100,8: 40000000/40000000 FE (comparator 15, carbon 8000, burning \
@@ -4235,12 +4527,21 @@ mod tests {
         );
         let starter = Kind::Cell(cell_tier(0).expect("the starter tier"));
         assert_eq!(
-            status_line(starter, [2, 100, 0], 1_360, 0, None, &[None, None], 290),
+            status_line(starter, [2, 100, 0], 1_360, 0, None, &[None, None], "", 290),
             "Energy Cell at 2,100,0: 1360/1000000 FE (comparator 0, charge empty, empty, 1000 FE/t a \
              side, t=290)"
         );
         assert_eq!(
-            status_line(starter, [2, 100, 0], 1_000_000, 0, None, &[None, None], 380),
+            status_line(
+                starter,
+                [2, 100, 0],
+                1_000_000,
+                0,
+                None,
+                &[None, None],
+                "",
+                380
+            ),
             "Energy Cell at 2,100,0: 1000000/1000000 FE (comparator 15, charge empty, empty, 1000 FE/t \
              a side, t=380)"
         );
@@ -4253,6 +4554,7 @@ mod tests {
                 0,
                 None,
                 &[None, None],
+                "",
                 380
             ),
             "Energy Cell at 2,100,0: 2000000000/2000000000 FE (comparator 15, charge empty, empty, \
@@ -4266,6 +4568,7 @@ mod tests {
                 0,
                 None,
                 &[],
+                "",
                 188
             ),
             "Energy Cable at 1,100,0: no storage, moves up to 500 FE/t (t=188)"
@@ -4278,6 +4581,7 @@ mod tests {
                 0,
                 None,
                 &[],
+                "",
                 188
             ),
             "Energy Cable at 1,100,0: no storage, moves up to 2000 FE/t (t=188)"
@@ -4443,25 +4747,32 @@ mod tests {
             name: "AdLf0208".to_owned(),
         };
         assert_eq!(
-            transmitter_line([3, 100, 5], 5_000, tier, CardReadout::Bound(&bound), 1_234),
+            transmitter_line(
+                [3, 100, 5],
+                5_000,
+                tier,
+                CardReadout::Bound(&bound),
+                "",
+                1_234
+            ),
             "Player Transmitter at 3,100,5: 5000/1000000 FE (comparator 0, bound AdLf0208, \
              charging 500 FE/t, 1000 FE/t a side, t=1234)",
             "a bound card names the player the tick charges"
         );
         assert_eq!(
-            transmitter_line([3, 100, 5], 5_000, tier, CardReadout::Blank, 1_234),
+            transmitter_line([3, 100, 5], 5_000, tier, CardReadout::Blank, "", 1_234),
             "Player Transmitter at 3,100,5: 5000/1000000 FE (comparator 0, bound none, \
              charging 500 FE/t, 1000 FE/t a side, t=1234)",
             "a blank card is the control: nothing is bound, so nothing is charged"
         );
         assert_eq!(
-            transmitter_line([3, 100, 5], 0, tier, CardReadout::Empty, 0),
+            transmitter_line([3, 100, 5], 0, tier, CardReadout::Empty, "", 0),
             "Player Transmitter at 3,100,5: 0/1000000 FE (comparator 0, bound empty, \
              charging 500 FE/t, 1000 FE/t a side, t=0)",
             "an empty slot is not a blank card, so the readout says so"
         );
         assert!(
-            transmitter_line([3, 100, 5], 0, tier, CardReadout::Unknown, 0)
+            transmitter_line([3, 100, 5], 0, tier, CardReadout::Unknown, "", 0)
                 .contains("bound unknown"),
             "no block entity read is the exhaustiveness arm, not a claim"
         );
@@ -4541,7 +4852,7 @@ mod tests {
     #[test]
     fn the_readout_names_every_charge_slot() {
         let furnator = Kind::Furnator(furnator_tier(0).expect("the starter tier"));
-        let empty = status_line(furnator, [0, 100, 0], 0, 0, None, &[None], 150);
+        let empty = status_line(furnator, [0, 100, 0], 0, 0, None, &[None], "", 150);
         assert!(
             empty.contains("fuel empty, charge empty, 80 FE/t a side"),
             "an empty charge slot reads `empty`: {empty}"
@@ -4553,6 +4864,7 @@ mod tests {
             0,
             Some(("minecraft:coal", 1)),
             &[Some(("powah:energy_cell_starter", 40, 1_000_000))],
+            "",
             282,
         );
         assert!(
@@ -4570,6 +4882,7 @@ mod tests {
                 Some(("powah:energy_cell_starter", 1_000, 1_000_000)),
                 Some(("powah:energy_cell_starter", 500, 1_000_000)),
             ],
+            "",
             300,
         );
         assert!(
@@ -4586,6 +4899,7 @@ mod tests {
             0,
             None,
             &[Some(("minecraft:stone", 0, 0))],
+            "",
             150,
         );
         assert!(
@@ -4688,14 +5002,14 @@ mod tests {
         let starter = Kind::Discharger(cell_tier(0).expect("the starter tier"));
         let empty = [None; DISCHARGER_SLOTS];
         assert_eq!(
-            status_line(starter, [20, 100, 34], 0, 0, None, &empty, 2600),
+            status_line(starter, [20, 100, 34], 0, 0, None, &empty, "", 2600),
             "Energy Discharger at 20,100,34: 0/1000000 FE (comparator 0, charge empty, empty, \
              empty, empty, empty, empty, empty, 1000 FE/t a side, t=2600)"
         );
         let mut charged = empty;
         charged[0] = Some(("powah:energy_cell_starter", 5_000, 1_000_000));
         assert_eq!(
-            status_line(starter, [20, 100, 34], 5_000, 0, None, &charged, 2612),
+            status_line(starter, [20, 100, 34], 5_000, 0, None, &charged, "", 2612),
             "Energy Discharger at 20,100,34: 5000/1000000 FE (comparator 0, charge \
              powah:energy_cell_starter 5000/1000000, empty, empty, empty, empty, empty, empty, \
              1000 FE/t a side, t=2612)"
@@ -4707,6 +5021,7 @@ mod tests {
             0,
             None,
             &[Some(("minecraft:stone", 0, 0)); DISCHARGER_SLOTS],
+            "",
             2620,
         );
         assert!(
@@ -4877,6 +5192,7 @@ mod tests {
                 0,
                 crate::runtime::hopper_tier(0).unwrap(),
                 None,
+                "",
                 2600
             ),
             "Energy Hopper at 20,100,40: 0/1000000 FE (comparator 0, facing unknown, charging \
@@ -4888,6 +5204,7 @@ mod tests {
                 5_000,
                 crate::runtime::hopper_tier(0).unwrap(),
                 Some(Direction::North),
+                "",
                 2612,
             ),
             "Energy Hopper at 20,100,40: 5000/1000000 FE (comparator 0, facing north, charging \
@@ -4895,18 +5212,19 @@ mod tests {
         );
         // `status_line` gets the same line for the type's exhaustiveness, with no state to read.
         assert_eq!(
-            status_line(starter, [20, 100, 40], 0, 0, None, &[], 2600),
+            status_line(starter, [20, 100, 40], 0, 0, None, &[], "", 2600),
             hopper_line(
                 [20, 100, 40],
                 0,
                 crate::runtime::hopper_tier(0).unwrap(),
                 None,
+                "",
                 2600
             )
         );
         let nitro = crate::runtime::hopper_tier(6).expect("the nitro tier");
         assert!(
-            hopper_line([1, 2, 3], 2_000_000_000, nitro, Some(Direction::Down), 7)
+            hopper_line([1, 2, 3], 2_000_000_000, nitro, Some(Direction::Down), "",  7)
                 .contains("2000000000/2000000000 FE (comparator 15, facing down, charging 1000000 FE/t, 2000000 FE/t a side, t=7)"),
             "the nitro tier names its own numbers"
         );
@@ -5024,7 +5342,7 @@ mod tests {
             darken: 0,
         };
         assert_eq!(
-            solar_line([16, 100, 20], 20, starter, Some(day), &[None], 1234),
+            solar_line([16, 100, 20], 20, starter, Some(day), &[None], "", 1234),
             "Solar Panel at 16,100,20: 20/20000 FE (comparator 0, sky open, day true, generating \
              20 FE/t, 80 FE/t a side, charge empty, t=1234)"
         );
@@ -5038,6 +5356,7 @@ mod tests {
                     ..day
                 }),
                 &[None],
+                "",
                 1300
             ),
             "Solar Panel at 16,100,20: 10000/20000 FE (comparator 7, sky covered, day true, \
@@ -5050,6 +5369,7 @@ mod tests {
                 starter,
                 Some(crate::runtime::Sky { darken: 11, ..day }),
                 &[None],
+                "",
                 1400
             )
             .contains("sky open, day false, generating 20 FE/t"),
@@ -5063,6 +5383,7 @@ mod tests {
                 nitro,
                 Some(day),
                 &[Some(("powah:energy_cell_nitro", 5_000, 2_000_000_000))],
+                "",
                 1500
             )
             .contains(
@@ -5073,13 +5394,205 @@ mod tests {
         );
         // `status_line`'s exhaustiveness arm has no level to ask, so it reports neither sky nor day.
         assert_eq!(
-            status_line(Kind::Solar(starter), [16, 100, 20], 0, 0, None, &[None], 7),
-            solar_line([16, 100, 20], 0, starter, None, &[None], 7)
+            status_line(
+                Kind::Solar(starter),
+                [16, 100, 20],
+                0,
+                0,
+                None,
+                &[None],
+                "",
+                7
+            ),
+            solar_line([16, 100, 20], 0, starter, None, &[None], "", 7)
         );
         assert!(
-            solar_line([16, 100, 20], 0, starter, None, &[None], 7)
+            solar_line([16, 100, 20], 0, starter, None, &[None], "", 7)
                 .contains("sky unknown, day unknown"),
             "the arm without a level says so instead of guessing"
+        );
+    }
+
+    #[test]
+    fn every_machine_with_a_redstone_button_has_a_mode_and_the_orb_and_rods_do_not() {
+        // `AbstractEnergyScreen.init` offers the button to every energy machine, and exactly those
+        // tile classes call `checkRedstone()`: the furnator, the cell, the cable, the discharger, the
+        // hopper, the solar panel, the ender cell and gate, and the player transmitter.
+        let offered = [
+            powah_blocks::<{ FURNATOR_TIER_COUNT }>(&FURNATORS),
+            powah_blocks::<{ CELL_TIER_COUNT }>(&CELLS),
+            powah_blocks::<{ CABLE_TIER_COUNT }>(&CABLES),
+            powah_blocks::<{ DISCHARGER_TIER_COUNT }>(&DISCHARGERS),
+            powah_blocks::<{ HOPPER_TIER_COUNT }>(&HOPPERS),
+            powah_blocks::<{ SOLAR_TIER_COUNT }>(&SOLARS),
+            powah_blocks::<{ ENDER_TIER_COUNT }>(&ENDER_CELLS),
+            powah_blocks::<{ ENDER_TIER_COUNT }>(&ENDER_GATES),
+            powah_blocks::<{ TRANSMITTER_TIER_COUNT }>(&TRANSMITTERS),
+        ];
+        for (family, blocks) in [
+            "furnator",
+            "cell",
+            "cable",
+            "discharger",
+            "hopper",
+            "solar",
+            "ender cell",
+            "ender gate",
+            "transmitter",
+        ]
+        .into_iter()
+        .zip(offered)
+        {
+            assert!(!blocks.is_empty(), "the {family} ladder is not empty");
+            for block in blocks {
+                assert!(
+                    has_redstone_mode(&block),
+                    "{block} is a {family}: upstream's screen offers the button and its tile reads it"
+                );
+            }
+        }
+        // The orb and the rods are `AbstractTileScreen`s with neither the button nor the call.
+        assert!(
+            !has_redstone_mode(ORB),
+            "the energizing orb has no redstone mode"
+        );
+        for (block, _) in RODS {
+            assert!(
+                !has_redstone_mode(block),
+                "{block} is a rod: neither its screen nor its tile has a redstone mode"
+            );
+        }
+        assert!(
+            !has_redstone_mode("minecraft:stone"),
+            "a foreign block has none"
+        );
+        // `/powah redstone` at a foreign block is "no block" (upstream's packet only acts on an
+        // `AbstractTileEntity`); the orb and the rods are the "no mode" case. The in-game leg
+        // caught this ordering first: a stone answered "no redstone mode" before "no block".
+        assert_eq!(
+            redstone_target("minecraft:stone"),
+            RedstoneTarget::NoBlock,
+            "a foreign block is not a machine without a mode, it is not one at all"
+        );
+        assert_eq!(redstone_target(ORB), RedstoneTarget::NoMode);
+        assert_eq!(redstone_target(RODS[0].0), RedstoneTarget::NoMode);
+        assert_eq!(redstone_target(TRANSMITTERS[0].0), RedstoneTarget::Machine);
+        assert_eq!(redstone_target(CELLS[0].0), RedstoneTarget::Machine);
+        assert_eq!(
+            RedstoneMode::ALL.len(),
+            3,
+            "the three modes are the assembled set above, none missing"
+        );
+    }
+
+    /// One ladder's block ids, as a `Vec`.
+    fn powah_blocks<const N: usize>(ladder: &[(&'static str, &'static str); N]) -> Vec<String> {
+        ladder
+            .iter()
+            .map(|(block, _)| (*block).to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_saved_mode_is_the_int_upstream_writes_and_a_missing_key_is_the_default() {
+        // `writeSync` puts the ordinal under `redstone_mode`; `Redstone.values()[getInt(..)]` reads
+        // it back, and 0 (the default) is what a compound with no key reads as.
+        let mut saved = Compound::new();
+        assert_eq!(
+            saved_mode(&saved),
+            RedstoneMode::Ignore,
+            "a fresh machine has no gate: upstream's default IGNORE"
+        );
+        for mode in RedstoneMode::ALL {
+            saved.insert(KEY_REDSTONE_MODE.into(), Tag::Int(mode.ordinal()));
+            assert_eq!(
+                saved_mode(&saved),
+                mode,
+                "a saved ordinal {0} reads back as {1:?}",
+                mode.ordinal(),
+                mode,
+            );
+        }
+        saved.insert(KEY_REDSTONE_MODE.into(), Tag::Int(9));
+        assert_eq!(
+            saved_mode(&saved),
+            RedstoneMode::Ignore,
+            "a doctored ordinal is the default, not a panic"
+        );
+        saved.insert(KEY_REDSTONE_MODE.into(), Tag::String("off".into()));
+        assert_eq!(
+            saved_mode(&saved),
+            RedstoneMode::Ignore,
+            "a key of the wrong type is the default"
+        );
+    }
+
+    #[test]
+    fn a_machines_readout_names_its_gate_only_when_it_is_not_the_default() {
+        let tier = crate::runtime::transmitter_tier(0).expect("the starter transmitter");
+        let plain = transmitter_line([3, 100, 5], 5000, tier, CardReadout::Empty, "", 1234);
+        assert!(
+            plain.ends_with("1000 FE/t a side, t=1234)"),
+            "the default adds nothing, so every earlier slice's line is unchanged: {plain}"
+        );
+        // `IGNORE` adds nothing at all, which is what keeps the older legs' assertions matching.
+        assert_eq!(
+            RedstoneField {
+                mode: RedstoneMode::Ignore,
+                powered: true,
+            }
+            .text(),
+            "",
+            "the default mode is silent"
+        );
+        for (mode, powered, field) in [
+            (RedstoneMode::Off, true, ", redstone off (powered)"),
+            (RedstoneMode::Off, false, ", redstone off"),
+            (RedstoneMode::On, true, ", redstone on (powered)"),
+            (RedstoneMode::On, false, ", redstone on"),
+        ] {
+            assert_eq!(
+                RedstoneField { mode, powered }.text(),
+                field,
+                "{mode:?} powered={powered}"
+            );
+        }
+        // The field lands before the shared ` t=<n>)` tail the harness parses the clock from.
+        let gated = transmitter_line(
+            [3, 100, 5],
+            5000,
+            tier,
+            CardReadout::Empty,
+            &RedstoneField {
+                mode: RedstoneMode::Off,
+                powered: true,
+            }
+            .text(),
+            1234,
+        );
+        assert!(
+            gated.ends_with("1000 FE/t a side, redstone off (powered), t=1234)"),
+            "the gate's field sits before the clock: {gated}"
+        );
+        // A cell's line carries it the same way.
+        let cell = cell_tier(0).expect("the starter cell");
+        let line = status_line(
+            Kind::Cell(cell),
+            [2, 100, 0],
+            0,
+            0,
+            None,
+            &[None],
+            &RedstoneField {
+                mode: RedstoneMode::On,
+                powered: false,
+            }
+            .text(),
+            77,
+        );
+        assert!(
+            line.ends_with("FE/t a side, redstone on, t=77)"),
+            "a cell's readout names its gate: {line}"
         );
     }
 }

@@ -405,6 +405,20 @@ impl Hooks for Mod {
                     powah::ChannelOutcome::NoBlock => "No ender cell or gate there.".to_owned(),
                 }
             }
+            // `powah redstone <mode> <pos>`: the mode is a literal of the usage, so the dispatcher
+            // has already refused a word that names none (as `/powah channel` refuses a non-integer).
+            (["powah", "redstone", mode], Some(pos)) => {
+                let Some(mode) = runtime::RedstoneMode::named(mode) else {
+                    return Flow::Continue;
+                };
+                match powah::set_redstone_mode(host, pos, mode) {
+                    powah::RedstoneOutcome::Set(mode) => {
+                        format!("Redstone mode set to {}.", mode.command_word())
+                    }
+                    powah::RedstoneOutcome::NoMode => "That block has no redstone mode.".to_owned(),
+                    powah::RedstoneOutcome::NoBlock => "No Powah block there.".to_owned(),
+                }
+            }
             _ => return Flow::Continue,
         };
         let _ = host.commands().feedback(Text::literal(line));

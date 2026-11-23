@@ -98,6 +98,14 @@ item. The card is crafted from a blank card, and the starter transmitter's `p` i
 **player aerial pearl** an aerial pearl makes of a zombie, so the whole chain is
 obtainable in survival.
 
+Slice 13 is the **redstone mode** upstream's GUI button cycles: `IGNORE` (the default, always
+running), `ON` (only while a neighbour powers the block) and `OFF` (only while none does), saved as
+`redstone_mode` in the block entity's own data and asked once per tick through the level's own
+neighbour-signal read. A machine whose gate is shut stops its own work — a furnator's burn, a solar
+panel's generation, a discharger's drain, a hopper's charge, a transmitter's charge — and a cell or
+an ender block also stops answering energy on its faces, as upstream's `canExtractEnergy` and
+`canReceiveEnergy` do. `/powah redstone <ignore|on|off> <pos>` is the GUI button's replacement.
+
 Every machine declares a real `Capabilities.Energy.BLOCK` buffer (the amount is the int
 `energy` in the block entity's saved compound), so other machines can fill and drain a
 furnator, a cell, a discharger, a hopper, a solar panel or a transmitter; an ender cell or
@@ -116,7 +124,7 @@ moves FE from the fuller store to the emptier one (a network never takes back wh
 
 ```text
 powah.hmod            the delivered package (horizon-mod.toml + Cargo.toml + src/ + assets/ + data/)
-horizon-mod.toml      the only manifest and identity: id, version 0.2.12, api 0.2, [native] pins
+horizon-mod.toml      the only manifest and identity: id, version 0.2.13, api 0.2, [native] pins
 Cargo.toml            one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 src/lib.rs            the one `#[mod_api::horizon_mod] impl Hooks`
 src/powah.rs          the glue: the block entity Parts, the queue, the tier tables, the buffers, the cable network, the command

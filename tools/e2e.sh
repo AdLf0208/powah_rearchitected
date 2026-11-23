@@ -208,6 +208,22 @@
 #    starter transmitter recipe's ingredient.
 # SELFTEST=transmitter expects the item to have gained nothing (it must FAIL), proving the charging
 # assertion can fail.
+#
+# Slice 13 (the redstone mode, `AbstractTileEntity.checkRedstone`) adds:
+#  - `/powah redstone ignore|on|off <pos>` sets a machine's mode (the GUI button's replacement) and the
+#    readout names `redstone <mode> (powered)` when it is not the default;
+#  - the brief's rig — a starter transmitter with its bound card, a cell item in the operator's
+#    hotbar, a **redstone block** on its west face — is measured in all three modes: IGNORE charges
+#    through it, OFF holds the item's `block_entity_data.energy` and the transmitter's balance still,
+#    the same rig with the block gone spends exactly 500 x dt FE against the game's clock, and ON
+#    charges only once the block is back;
+#  - one machine of each kind that moves FE on its own is held by its gate and runs when it opens:
+#    the furnator (no fuel taken, no carbon burnt), the cell (nothing pushed and nothing pulled
+#    through its faces), the cable (no relay), the discharger (no drain), the hopper (no charge), the
+#    solar panel (no generation under a noon sky) and the ender cell (its own handler refuses);
+#  - a foreign block and the energizing orb refuse a mode (upstream's orb screen has no button).
+# SELFTEST=redstone expects the shut gate to have charged the item (it must FAIL), proving the gate's
+# assertion can fail.
 set -euo pipefail
 export LC_ALL=C
 
@@ -519,6 +535,23 @@ channel_reply() { # channel_reply X Y Z CHANNEL SUBSTRING
         esac
     done
     fail "expected /powah channel $4 at $1,$2,$3 to answer '$5', got '$line'"
+}
+
+# redstone_reply X Y Z MODE SUBSTRING: `/powah redstone`, asserting the command's own reply — the
+# control that replaces upstream's GUI redstone button (`NextRedstoneModePacket`).
+redstone_reply() { # redstone_reply X Y Z MODE SUBSTRING
+    local out line=""
+    say "powah redstone $4 $1 $2 $3"
+    for _ in $(seq 1 30); do
+        ctl wait 10
+        out=$(ctl messages 20)
+        line=$(jq -r '.chat[]' <<<"$out" |
+            grep -E "Redstone mode set to|no redstone mode|No Powah block" | head -1)
+        case "$line" in
+            *"$5"*) echo "  redstone($1,$2,$3) reply: $line"; return 0 ;;
+        esac
+    done
+    fail "expected /powah redstone $4 at $1,$2,$3 to answer '$5', got '$line'"
 }
 
 # set_reply X Y Z AMOUNT SUBSTRING: `/powah set`, asserting the command's own
@@ -2425,6 +2458,326 @@ echo "  unaccounted: $unaccounted FE (item + transmitter against the 100,000 it 
 [ "$unaccounted" -ge $((-window)) ] && [ "$unaccounted" -le "$window" ] ||
     fail "the item's $item_second FE and the transmitter's $b3 FE do not add up to the 100,000 it held (off by $unaccounted, beyond the $window FE that could have moved in $window_span ticks): $rate_last"
 
+echo "== slice 13: the redstone mode's command and its readout =="
+# `NextRedstoneModePacket` is what upstream's GUI button sends (`tile.nextRedstoneMode();
+# tile.sync()`); the GUI is not ported, so the command is the button's replacement, as
+# `/powah channel` is the ender GUI's. The mode saves as `redstone_mode` (an ordinal) and the
+# readout names it only when it is not the default IGNORE, which is why every line above printed
+# without it.
+redstone_reply 16 100 22 off "Redstone mode set to off."
+expect_info 16 100 22 "redstone off,"
+redstone_reply 16 100 22 on "Redstone mode set to on."
+expect_info 16 100 22 "redstone on,"
+redstone_reply 16 100 22 ignored "Redstone mode set to ignored."
+expect_info 16 100 22 "1000 FE/t a side, t="
+
+echo "== slice 13: IGNORE charges through a powered face, the brief's rig =="
+# The rig the brief names: the starter transmitter on 16,100,22 with its bound card in slot 0, a
+# cell item in the operator's inventory, and a redstone block on its west face (a redstone block
+# powers all six neighbours, which is `getBestNeighborSignal > 0`).
+ctl command "item replace entity @s hotbar.0 with minecraft:air" >/dev/null
+ctl wait 3
+# The buffer is set **before** the item arrives: a transmitter with something to charge spends on
+# the next tick, so an equality poll on its buffer could never settle. 200,000 is 400 whole 500 FE
+# steps, far more than the four 20-tick windows this phase reads.
+set_energy 16 100 22 200000
+ctl command "setblock 15 100 22 minecraft:redstone_block" >/dev/null
+ctl command "item replace entity @s hotbar.0 with powah:energy_cell_starter 1" >/dev/null
+ctl wait 20
+ignored_first=$(info 16 100 22)
+ignored_item_first=$(inv_energy 0)
+ctl wait 20
+ignored_second=$(info 16 100 22)
+ignored_item_second=$(inv_energy 0)
+echo "  ignored: $ignored_first / $ignored_second"
+echo "  ignored item: ${ignored_item_first:-none} -> ${ignored_item_second:-none} FE"
+[ -n "${ignored_item_first:-}" ] && [ -n "${ignored_item_second:-}" ] ||
+    fail "the cell item carries no energy payload, so the charge legs would prove nothing"
+[ "$ignored_item_second" -gt "$ignored_item_first" ] ||
+    fail "IGNORE with a powered face must keep charging (the block is a lever nobody set), got ${ignored_item_first} -> ${ignored_item_second} FE"
+
+echo "== slice 13: OFF with a powered face stops the charge, and the buffer stands still =="
+# `checkRedstone` for OFF is `!powered`: a redstone block on the west face shuts the gate.
+redstone_reply 16 100 22 off "Redstone mode set to off."
+gated_line=$(info 16 100 22)
+echo "  gated: $gated_line"
+case "$gated_line" in
+    *"redstone off (powered),"*) ;;
+    *) fail "the readout must name the shut gate and the power that shuts it, got '$gated_line'" ;;
+esac
+gated_first=$gated_line
+gated_buffer_first=$(energy_of "$gated_first")
+gated_item_first=$(inv_energy 0)
+ctl wait 20
+gated_second=$(info 16 100 22)
+gated_item_second=$(inv_energy 0)
+echo "  gated over 20 ticks: $gated_second (item ${gated_item_first:-none} -> ${gated_item_second:-none} FE)"
+if [ "$SELFTEST" = redstone ]; then
+    # The flip: expect the charge the gate must refuse, so a correct run fails here.
+    echo "  SELFTEST: expecting the shut gate to have charged (this must fail)"
+    [ "$gated_item_second" != "$gated_item_first" ] ||
+        fail "SELFTEST flipped: the shut gate charged nothing, as it should"
+fi
+[ "$gated_item_second" = "$gated_item_first" ] ||
+    fail "a shut gate must charge nothing: the item went ${gated_item_first} -> ${gated_item_second} FE"
+[ "$(energy_of "$gated_second")" = "$gated_buffer_first" ] ||
+    fail "a shut gate must spend nothing: the transmitter went $gated_buffer_first -> $(energy_of "$gated_second") FE"
+
+echo "== slice 13: the same rig with the block removed charges again (500 x dt) =="
+# OFF with no power is open: the gate the block shut opens when the block goes.
+ctl command "setblock 15 100 22 minecraft:air" >/dev/null
+ctl wait 4
+open_first=$(info 16 100 22)
+open_item_first=$(inv_energy 0)
+ctl wait 20
+open_second=$(info 16 100 22)
+open_item_second=$(inv_energy 0)
+open_t1=$(time_of "$open_first")
+open_t2=$(time_of "$open_second")
+[ -n "$open_t1" ] && [ -n "$open_t2" ] ||
+    fail "the two readouts carry no clock, so the rate cannot be measured: '$open_first' / '$open_second'"
+open_dt=$((open_t2 - open_t1))
+open_spent=$(( $(energy_of "$open_first") - $(energy_of "$open_second") ))
+echo "  opened: $open_second over dt=$open_dt, transmitter -$open_spent FE, item ${open_item_first:-none} -> ${open_item_second:-none} FE"
+case "$open_second" in
+    *"redstone off,"*) ;;
+    *) fail "with the block gone the gate must read shut-but-open ('redstone off'), got '$open_second'" ;;
+esac
+[ "$open_dt" -ge 10 ] && [ "$open_dt" -le 60 ] ||
+    fail "the two readouts were $open_dt ticks apart, outside the 20-tick window"
+[ "$open_spent" = $((500 * open_dt)) ] ||
+    fail "the open gate spent $open_spent FE over $open_dt ticks; its 500 FE a tick is $((500 * open_dt))"
+[ "$open_item_second" -gt "$open_item_first" ] ||
+    fail "the open gate must charge the item, it stayed at ${open_item_first:-none} FE"
+
+echo "== slice 13: ON needs the power, and both halves of the truth table hold =="
+# ON with no neighbour signal is shut; putting the block back opens it.
+redstone_reply 16 100 22 on "Redstone mode set to on."
+on_line=$(info 16 100 22)
+on_item_first=$(inv_energy 0)
+ctl wait 20
+on_item_second=$(inv_energy 0)
+echo "  on, unpowered: $on_line (item ${on_item_first:-none} -> ${on_item_second:-none} FE)"
+case "$on_line" in
+    *"redstone on,"*) ;;
+    *) fail "an unpowered ON gate must read 'redstone on', got '$on_line'" ;;
+esac
+[ "$on_item_second" = "$on_item_first" ] ||
+    fail "ON with no power must charge nothing: ${on_item_first} -> ${on_item_second} FE"
+ctl command "setblock 15 100 22 minecraft:redstone_block" >/dev/null
+ctl wait 4
+on_powered=$(info 16 100 22)
+on_powered_item=$(inv_energy 0)
+echo "  on, powered: $on_powered (item ${on_powered_item:-none} FE)"
+case "$on_powered" in
+    *"redstone on (powered),"*) ;;
+    *) fail "a powered ON gate must read 'redstone on (powered)', got '$on_powered'" ;;
+esac
+[ "$on_powered_item" -gt "$on_item_second" ] ||
+    fail "ON with power must charge, the item stayed at ${on_item_second} FE"
+# Back to the default and clean: the later phases (the blank card, the ladder) act on this machine.
+redstone_reply 16 100 22 ignored "Redstone mode set to ignored."
+ctl command "setblock 15 100 22 minecraft:air" >/dev/null
+ctl command "item replace entity @s hotbar.0 with minecraft:air" >/dev/null
+ctl wait 3
+
+echo "== slice 13: the mode is not a blocks-and-items family — it is the data and one rule =="
+# A machine that is not one of this mod's has no mode, and the block the mode is set on is the
+# machine's own: a foreign block refuses, and so does the orb (upstream's screen has no button).
+foreign_reply=$(ctl command "powah redstone off 0 99 46")
+echo "  foreign block: $foreign_reply"
+case "$foreign_reply" in
+    *"No Powah block"*) ;;
+    *) fail "a foreign block must refuse a redstone mode, got '$foreign_reply'" ;;
+esac
+place 0 100 46 powah:energizing_orb
+orb_reply=$(ctl command "powah redstone off 0 100 46")
+echo "  orb: $orb_reply"
+case "$orb_reply" in
+    *"no redstone mode"*) ;;
+    *) fail "the energizing orb has no redstone mode (neither its screen nor its tile has one), got '$orb_reply'" ;;
+esac
+ctl command "setblock 0 100 46 minecraft:air" >/dev/null
+ctl wait 3
+
+# No `floor_under` in this phase: it never teleports the player, and a machine placed by `setblock`
+# at y=100 does not need support.
+echo "== slice 13: the shut gate stops the furnator's burn, and the store's faces =="
+# `FurnatorTile.postTick` runs the burn inside `checkRedstone()`, so a shut furnator takes no fuel
+# and burns no carbon; it still gives what it holds (`extractFromSides` is outside the gate).
+place 0 100 48 powah:furnator_starter
+redstone_reply 0 100 48 off "Redstone mode set to off."
+ctl command "setblock -1 100 48 minecraft:redstone_block" >/dev/null
+put_fuel 0 100 48 minecraft:coal 5
+ctl wait 20
+shut_furnator=$(info 0 100 48)
+echo "  gated furnator: $shut_furnator"
+case "$shut_furnator" in
+    *"carbon 0, burning false, fuel minecraft:coal x5,"*) ;;
+    *) fail "a shut furnator must take no fuel and burn nothing, got '$shut_furnator'" ;;
+esac
+[ "$(energy_of "$shut_furnator")" = 0 ] ||
+    fail "a shut furnator must make no FE, got '$shut_furnator'"
+ctl command "setblock -1 100 48 minecraft:air" >/dev/null
+ctl wait 20
+open_furnator=$(info 0 100 48)
+echo "  opened furnator: $open_furnator"
+[ "$(energy_of "$open_furnator")" -gt 0 ] ||
+    fail "the furnator must burn once the gate opens, got '$open_furnator'"
+[ "$(carbon_of "$open_furnator")" -gt 0 ] ||
+    fail "the furnator must hold carbon once the gate opens, got '$open_furnator'"
+
+echo "== slice 13: a shut cell gives nothing on any face, so the cable beside it pulls nothing =="
+# `EnergyCellTile.canExtractEnergy`/`canReceiveEnergy` are `checkRedstone() && super…`: the cell's
+# own push and a cable's pull both stop.
+place 2 100 48 powah:energy_cell_starter
+place 2 100 49 powah:energy_cable_starter
+place 2 100 50 powah:energy_cell_starter
+redstone_reply 2 100 48 off "Redstone mode set to off."
+ctl command "setblock 1 100 48 minecraft:redstone_block" >/dev/null
+ctl wait 4
+set_energy 2 100 48 5000
+ctl wait 20
+shut_source=$(info 2 100 48)
+shut_sink=$(info 2 100 50)
+echo "  gated cell: $shut_source / sink: $shut_sink"
+[ "$(energy_of "$shut_source")" = 5000 ] ||
+    fail "a shut cell must keep its 5,000 (nothing may pull it), got '$shut_source'"
+[ "$(energy_of "$shut_sink")" = 0 ] ||
+    fail "the cell behind a gated one must stay empty, got '$shut_sink'"
+ctl command "setblock 1 100 48 minecraft:air" >/dev/null
+ctl wait 20
+open_sink=$(info 2 100 50)
+echo "  opened: sink $open_sink"
+[ "$(energy_of "$open_sink")" -gt 0 ] ||
+    fail "an open cell must feed the cable and the sink, got '$open_sink'"
+
+echo "== slice 13: a shut cable relays nothing while an open one beside it does =="
+# `CableTile.receiveEnergy` reads the gate: it is the door FE comes in through.
+place 4 100 48 powah:energy_cell_starter
+place 4 100 49 powah:energy_cable_starter
+place 4 100 50 powah:energy_cell_starter
+redstone_reply 4 100 49 off "Redstone mode set to off."
+ctl command "setblock 5 100 49 minecraft:redstone_block" >/dev/null
+ctl wait 4
+set_energy 4 100 48 5000
+ctl wait 20
+cable_shut_sink=$(info 4 100 50)
+echo "  gated cable: sink $cable_shut_sink"
+[ "$(energy_of "$cable_shut_sink")" = 0 ] ||
+    fail "a cable whose gate is shut must relay nothing, got '$cable_shut_sink'"
+ctl command "setblock 5 100 49 minecraft:air" >/dev/null
+ctl wait 20
+cable_open_sink=$(info 4 100 50)
+echo "  opened cable: sink $cable_open_sink"
+[ "$(energy_of "$cable_open_sink")" -gt 0 ] ||
+    fail "an open cable must relay, got '$cable_open_sink'"
+
+echo "== slice 13: a shut discharger drains no item, and a shut hopper charges no container =="
+place 6 100 48 powah:energy_discharger_starter
+redstone_reply 6 100 48 off "Redstone mode set to off."
+ctl command "setblock 5 100 48 minecraft:redstone_block" >/dev/null
+ctl wait 4
+put_charge 6 100 48 powah:energy_cell_starter
+item_energy 6 100 48 5000 powah:energy_cell_starter
+ctl wait 20
+shut_discharger=$(info 6 100 48)
+echo "  gated discharger: $shut_discharger"
+[ "$(energy_of "$shut_discharger")" = 0 ] ||
+    fail "a shut discharger must drain nothing, got '$shut_discharger'"
+[ "$(charge_energy_of "$shut_discharger")" = 5000 ] ||
+    fail "the item in a shut discharger must keep its 5,000, got '$(charge_of "$shut_discharger")'"
+ctl command "setblock 5 100 48 minecraft:air" >/dev/null
+ctl wait 20
+open_discharger=$(info 6 100 48)
+echo "  opened discharger: $open_discharger"
+[ "$(energy_of "$open_discharger")" -gt 0 ] ||
+    fail "an open discharger must drain its item, got '$open_discharger'"
+
+place 8 100 49 minecraft:chest
+ctl command "setblock 8 100 48 powah:energy_hopper_starter[facing=south]" >/dev/null
+ctl wait 4
+redstone_reply 8 100 48 off "Redstone mode set to off."
+ctl command "setblock 7 100 48 minecraft:redstone_block" >/dev/null
+ctl wait 4
+set_energy 8 100 48 5000
+ctl command "item replace block 8 100 49 container.0 with powah:energy_cell_starter 1" >/dev/null
+ctl wait 20
+shut_hopper=$(info 8 100 48)
+shut_chest=$(chest_energy 8 100 49 0)
+echo "  gated hopper: $shut_hopper (chest item ${shut_chest:-none} FE)"
+[ "$(energy_of "$shut_hopper")" = 5000 ] ||
+    fail "a shut hopper must spend nothing, got '$shut_hopper'"
+[ "${shut_chest:-0}" = 0 ] ||
+    fail "a shut hopper must charge nothing, the chest's item holds $shut_chest FE"
+ctl command "setblock 7 100 48 minecraft:air" >/dev/null
+ctl wait 20
+open_hopper=$(info 8 100 48)
+echo "  opened hopper: $open_hopper"
+[ "$(energy_of "$open_hopper")" -lt 5000 ] ||
+    fail "an open hopper must spend its buffer on the chest, got '$open_hopper'"
+
+echo "== slice 13: a shut solar panel generates nothing while the sun is out =="
+# `SolarTile.postTick` generates inside `checkRedstone()`; its item charge and its push are outside.
+ctl command "time set noon" >/dev/null
+# The panel's sky is the block above it (`SolarTile` reads `canBlockSeeSky(pos.above())`): clear the
+# column so this leg measures the gate and not an overhang.
+ctl command "fill 10 101 48 10 200 48 minecraft:air" >/dev/null
+place 10 100 48 powah:solar_panel_starter
+redstone_reply 10 100 48 off "Redstone mode set to off."
+ctl command "setblock 9 100 48 minecraft:redstone_block" >/dev/null
+ctl wait 4
+set_energy 10 100 48 5000
+ctl wait 40
+shut_solar=$(info 10 100 48)
+echo "  gated solar: $shut_solar"
+case "$shut_solar" in
+    *"redstone off (powered),"*) ;;
+    *) fail "the solar readout must name its gate, got '$shut_solar'" ;;
+esac
+[ "$(energy_of "$shut_solar")" = 5000 ] ||
+    fail "a shut panel must generate nothing, got '$shut_solar'"
+ctl command "setblock 9 100 48 minecraft:air" >/dev/null
+ctl wait 40
+open_solar=$(info 10 100 48)
+echo "  opened solar: $open_solar"
+[ "$(energy_of "$open_solar")" -gt 5000 ] ||
+    fail "an open panel under a noon sky must generate, got '$open_solar'"
+
+echo "== slice 13: a shut ender cell refuses the cable at its own handler =="
+# `AbstractEnderTile.canExtractEnergy`/`canReceiveEnergy` are `checkRedstone() && super…`, and the
+# ender handler is this port's own (`EnderEnergy`), so the gate sits inside `insert`/`extract`.
+# The channel store is the world's, keyed by (owner, channel), so a starter cell (one channel, 0)
+# would share the FE — and the extenders' capacity — with slice 11's cells on channel 0. A nitro
+# cell offers twelve, and this leg takes the last one: nothing else in this run touches it.
+place 12 100 48 powah:ender_cell_nitro
+channel_reply 12 100 48 11 "Channel set to 11 of 0..=11."
+put_charge 12 100 48 powah:energy_cell_starter
+redstone_reply 12 100 48 off "Redstone mode set to off."
+ctl command "setblock 11 100 48 minecraft:redstone_block" >/dev/null
+ctl wait 4
+set_clamped 12 100 48 5000 5000
+place 12 100 49 powah:energy_cable_starter
+place 12 100 50 powah:energy_cell_starter
+ctl wait 20
+shut_ender_sink=$(info 12 100 50)
+echo "  gated ender cell: sink $shut_ender_sink"
+[ "$(energy_of "$shut_ender_sink")" = 0 ] ||
+    fail "a shut ender cell must give the cable nothing, got '$shut_ender_sink'"
+ctl command "setblock 11 100 48 minecraft:air" >/dev/null
+ctl wait 20
+open_ender_sink=$(info 12 100 50)
+echo "  opened ender cell: sink $open_ender_sink"
+[ "$(energy_of "$open_ender_sink")" -gt 0 ] ||
+    fail "an open ender cell must feed the cable, got '$open_ender_sink'"
+
+# The modes are data, not blocks: nothing this slice added is left standing.
+for block in "15 100 22" "-1 100 48" "1 100 48" "5 100 49" "5 100 48" "7 100 48" "9 100 48" "11 100 48"; do
+    set -- $block
+    ctl command "setblock $1 $2 $3 minecraft:air" >/dev/null
+done
+ctl wait 3
+
 echo "== slice 12: a card with no bound player charges nothing, and spends nothing =="
 # The control: the same transmitter, the same 10,000, the same cell item in the operator's
 # inventory — with a **blank** card in slot 0 (`canInsert` refuses one upstream; a container
@@ -2691,4 +3044,4 @@ ctl command "gamemode creative @s" >/dev/null
 ctl command "clear @s" >/dev/null
 ctl wait 3
 
-echo "PASS: a fuelled furnator made FE, the cable carried it into the cell, an unfuelled furnator made nothing, a cell without a cable stayed empty, a full cell stayed full, a charged cell drained through a cable into an empty one, a three-cable network carried a charge across its run with the two cells' sum unchanged and a cell off the network empty, the six material items exist, every material and machine recipe crafted its declared output and consumed its ingredients, each machine dropped itself, every energy cell tier clamped 2,000,000,000 FE at its own capacity and carried its own transfer, two adjacent cells swapped within their own transfer cap without creating FE, every cell tier dropped itself, a starter rod filled the orb to exactly its recipe's 10,000 FE and stood at 0, an orb with no rod and an orb with no recipe produced nothing while its rod kept its charge, a nitro rod made a blazing crystal at exactly 120,000 FE and kept the other 80,000, the blaze-rod blazing recipe, the niotic, spirited and nitro crystals all energised, every new block and item exists, every carried recipe including the five previously blocked cells crafts its declared output and consumes its ingredients, every furnator tier clamped 2,000,000,000 FE at its own generation capacity, a nitro furnator made exactly 40,000 FE in one tick of a coal and a starter furnator kept energy + carbon at 48,000 while filling slowly, every cable tier read back its own rate, a basic network refused to relay through a starter cable and delivered once that cable was basic, every new furnator, cable and discharger tier dropped itself, a starter furnator charged the item in its charge slot at exactly min(transfer, stored, room) with the FE coming out of its own buffer and left an item with no buffer alone, a cell charged two slots out of one budget, a 5,000 FE furnator and a 4,000 FE cell broken in survival carried their buffers on their own items and gave them back on placement while their spilled stacks did not, an item doctored to 2,000,000,000 FE clamped to its tier's 20,000 on placement and a fresh item placed an empty machine, a starter hopper spent exactly 500 FE a tick on the cell item in the chest it faced and the two halves of the 5,000 it held added up, a hopper facing away from the chest charged nothing and a stone in the chest took nothing, every hopper tier dropped itself, a 7,000 FE hopper carried its buffer back on its own item, a starter solar panel under an open noon sky generated exactly 20 FE a tick measured against the game clock and filled its last 20 of room without overflowing, a stone above it and midnight each left it at exactly 5,000 for 60 ticks, a cell under a panel charged while a cell beside it stayed empty and the panel took no fill, a nitro panel clamped 2,000,000,000 FE at 40,000,000 and named its 2,000 FE/t, every solar panel tier dropped itself, the photoelectric pane and all seven panels crafted, two ender cells on one channel held and showed the same 100,000 FE while a cell on another channel read 0, a cell moved to the fresh channel read 0 while its peer kept exactly 100,000 and moving it back found the channel's FE again, an ender cell's extender item gave its channel 4,000,000 FE of capacity and its charge slot took 1,000 a tick out of the channel, the channel gave its tier's 4,000 a tick and lost exactly what the sink gained, an ender gate fed only the hopper on its facing side at the cable row's 500 a tick, the nitro ender cell and gate named 12 channels and their 2,000,000/1,000,000 FE a tick, both ender tags matched in game, every ender cell and gate tier dropped itself, a starter player transmitter read its slot empty with no card, a card bound to the operator by its own use named them in the transmitter's readout, the transmitter spent exactly 500 FE a tick out of its 10,000 on the cell item in that player's inventory and the item gained whole 500 FE steps with the two halves adding up, a blank card charged nothing and spent nothing, a nitro transmitter clamped 2,000,000,000 FE and named its 1,000,000 FE/t charging rate, powah:player_transmitters matched in game, a broken 7,000 FE transmitter carried its buffer back on its own item, every transmitter tier dropped itself, an aerial pearl used on a zombie gave the player aerial pearl and killed it, and every guessed id is unknown without the package"
+echo "PASS: a fuelled furnator made FE, the cable carried it into the cell, an unfuelled furnator made nothing, a cell without a cable stayed empty, a full cell stayed full, a charged cell drained through a cable into an empty one, a three-cable network carried a charge across its run with the two cells' sum unchanged and a cell off the network empty, the six material items exist, every material and machine recipe crafted its declared output and consumed its ingredients, each machine dropped itself, every energy cell tier clamped 2,000,000,000 FE at its own capacity and carried its own transfer, two adjacent cells swapped within their own transfer cap without creating FE, every cell tier dropped itself, a starter rod filled the orb to exactly its recipe's 10,000 FE and stood at 0, an orb with no rod and an orb with no recipe produced nothing while its rod kept its charge, a nitro rod made a blazing crystal at exactly 120,000 FE and kept the other 80,000, the blaze-rod blazing recipe, the niotic, spirited and nitro crystals all energised, every new block and item exists, every carried recipe including the five previously blocked cells crafts its declared output and consumes its ingredients, every furnator tier clamped 2,000,000,000 FE at its own generation capacity, a nitro furnator made exactly 40,000 FE in one tick of a coal and a starter furnator kept energy + carbon at 48,000 while filling slowly, every cable tier read back its own rate, a basic network refused to relay through a starter cable and delivered once that cable was basic, every new furnator, cable and discharger tier dropped itself, a starter furnator charged the item in its charge slot at exactly min(transfer, stored, room) with the FE coming out of its own buffer and left an item with no buffer alone, a cell charged two slots out of one budget, a 5,000 FE furnator and a 4,000 FE cell broken in survival carried their buffers on their own items and gave them back on placement while their spilled stacks did not, an item doctored to 2,000,000,000 FE clamped to its tier's 20,000 on placement and a fresh item placed an empty machine, a starter hopper spent exactly 500 FE a tick on the cell item in the chest it faced and the two halves of the 5,000 it held added up, a hopper facing away from the chest charged nothing and a stone in the chest took nothing, every hopper tier dropped itself, a 7,000 FE hopper carried its buffer back on its own item, a starter solar panel under an open noon sky generated exactly 20 FE a tick measured against the game clock and filled its last 20 of room without overflowing, a stone above it and midnight each left it at exactly 5,000 for 60 ticks, a cell under a panel charged while a cell beside it stayed empty and the panel took no fill, a nitro panel clamped 2,000,000,000 FE at 40,000,000 and named its 2,000 FE/t, every solar panel tier dropped itself, the photoelectric pane and all seven panels crafted, two ender cells on one channel held and showed the same 100,000 FE while a cell on another channel read 0, a cell moved to the fresh channel read 0 while its peer kept exactly 100,000 and moving it back found the channel's FE again, an ender cell's extender item gave its channel 4,000,000 FE of capacity and its charge slot took 1,000 a tick out of the channel, the channel gave its tier's 4,000 a tick and lost exactly what the sink gained, an ender gate fed only the hopper on its facing side at the cable row's 500 a tick, the nitro ender cell and gate named 12 channels and their 2,000,000/1,000,000 FE a tick, both ender tags matched in game, every ender cell and gate tier dropped itself, a starter player transmitter read its slot empty with no card, a card bound to the operator by its own use named them in the transmitter's readout, the transmitter spent exactly 500 FE a tick out of its 10,000 on the cell item in that player's inventory and the item gained whole 500 FE steps with the two halves adding up, a blank card charged nothing and spent nothing, a nitro transmitter clamped 2,000,000,000 FE and named its 1,000,000 FE/t charging rate, powah:player_transmitters matched in game, a broken 7,000 FE transmitter carried its buffer back on its own item, every transmitter tier dropped itself, an aerial pearl used on a zombie gave the player aerial pearl and killed it, the redstone mode saved and read back through /powah redstone with the readout naming it only when it was not the default, a shut gate holding the transmitter, the furnator, the cell, the cable, the discharger, the hopper, the solar panel and the ender cell at their own work and every one of them running again when the gate opened, and every guessed id is unknown without the package"

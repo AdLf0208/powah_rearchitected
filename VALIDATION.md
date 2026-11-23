@@ -1,4 +1,33 @@
-# Validation — Powah slices 1 to 12
+# Validation — Powah slices 1 to 13
+
+> **0.2.13 (slice 13, the redstone mode)** is recorded in
+> [`notes.md`](notes.md#slice-13--the-redstone-mode-abstracttileentitycheckredstone-2026-11-23): the
+> slice and the gap lines it comes from (slice 1's gap 6, "No side config or redstone modes", named
+> again by slices 8–10 and by 0.2.12's own next-slice proposal), the upstream facts read at tag
+> `v6.2.10` (`Redstone.java`'s three modes with `IGNORE` the default, `checkRedstone`'s
+> `getBestNeighborSignal(pos) > 0` rule, the `redstone_mode` ordinal in the *sync* compound, the
+> eleven call sites — cable, discharger, cell, ender cell/gate, furnator, hopper, solar, transmitter,
+> magmator, thermo, reactor — and the orb's and rods' having neither the call nor the button), the
+> red proof (two `todo!()` rules, **91 passed / 2 failed**, quoted verbatim, plus five in-game runs
+> that each caught a real defect: the usage word, the test's expectation, a 10,000 FE buffer spent in
+> 20 ticks, `set_redstone_mode` asking "no mode" before "no block", and a starter ender cell sharing
+> the world's channel 0 with slice 11's extended cells), the ladder at pin `0a875da` (**96 tests**,
+> clippy 0 warnings, `fmt --check` clean, two `cmp`-identical builds of **533,187 B**, `check`,
+> `fits` against the pin **and** `0b14f8a`, gate 1/1 with **860 entries**, `check-recipe-types` ok)
+> and the in-game legs (main `PASS`+`EXIT:0` on the delivered archive; the control game knowing none
+> of the ids; `SELFTEST=1` and `SELFTEST=redstone` at `EXIT:1`; the log gate 53/53 `--strict`).
+> Package: `powah.hmod`, 533,187 B, sha256
+> `70f218d63974277c44b1d98fe6fd2a90b3fb131e45ecc212972ff532e3d9cf04`. Launcher build:
+> `Compiling powah (1 of 1)`, `native-0a875da-13e86a810b6a`, instance `powah-e2e`. What it proves: a
+> machine saves `redstone_mode` and names it in its readout only when it is not the default; the
+> brief's rig (starter transmitter, bound card, a cell item in the operator's inventory, a redstone
+> block on its west face) charges under `ignored`, is **frozen — item and balance both — over 20
+> ticks** under `off` (readout `redstone off (powered)`), spends exactly **500 × dt** once the block
+> is removed (`-14,500` over `dt=29`, the item gaining the same), and charges under `on` only while
+> the block is back; a shut gate also stops the furnator's burn (no fuel taken, no carbon burnt), the
+> cell's faces (nothing pushed, nothing pulled), a cable's relay, a discharger's drain, a hopper's
+> charge, a solar panel's generation under a noon sky and an ender cell's own handler, and each runs
+> again when the gate opens.
 
 > **0.2.12 (slice 12, the Player Transmitter and its Binding Card)** is recorded in
 > [`notes.md`](notes.md#slice-12--the-player-transmitter-and-its-binding-card-2026-11-23): the slice

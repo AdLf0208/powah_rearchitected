@@ -63,7 +63,7 @@ Transmitter, upgrades, GUIs, side config, worldgen) is a recorded gap below.
 | cell tick | push to every side + charge its 2 item slots | push only (no item charging, no slots) |
 | **Cable** | no storage (capacity 0); `receiveEnergy` forwards an insertion through the same-tier network, round-robin, skipping the side it came from | no buffer at all; on its tick it moves FE straight from each adjacent giver into each adjacent taker, up to 500 FE/t, with the round-robin start rotating by the game time (`runtime::cable_moves`) |
 | cable sides | a side joins a neighbour that is not a cable and has FE | the same rule via `native_energy`; the six visual sides come from the content tag |
-| redstone | `checkRedstone()` — default mode `IGNORE`, so always on | no redstone gate (defaults only); a recorded gap |
+| redstone | `checkRedstone()` — default mode `IGNORE`, so always on | slice 13: the three modes, saved as `redstone_mode` and read once per tick; `/powah redstone` replaces the button |
 | comparator | `hasAnalogOutputSignal` from the FE fraction | computed and printed by the command; no `has_analog_output` hook declared — gap |
 | keep energy | `keepEnergy()`: the block item carries the buffer | a broken machine loses its FE — gap |
 
@@ -254,7 +254,11 @@ round trip in this environment is ~2 s, far longer than a tick).
    gives it back on placement, clamped to its tier.
 6. **No side config or redstone modes.** Upstream's six per-side transfer types
    and redstone IGNORE/ON/OFF default to `ALL`/`IGNORE`; this slice ships only
-   those defaults.
+   those defaults. — the **redstone** half is **closed by slice 13**
+   ([`## Slice 13`](#slice-13--the-redstone-mode-abstracttileentitycheckredstone-2026-11-23)):
+   the mode saves as `redstone_mode`, one rule reads it in every machine's own tick, and
+   `/powah redstone <mode> <pos>` is the GUI button's replacement. The **side config** stays open:
+   a `ModEnergyBuffer` declares six face booleans, not six per-side transfer types.
 7. **No comparator output.** `comparator_strength` is computed and printed, but
    no `has_analog_output` hook is declared, so a vanilla comparator beside a
    machine still reads container fullness.
@@ -3295,5 +3299,281 @@ the two differ in `README.md` alone, which is not in the game.
 
 Version: **0.2.11 → 0.2.12** (one patch). The published `[[versions]]` record keeps 0.2.11 and gains
 0.2.12 at publish time — this port does not touch the registry entry.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+
+## Slice 13 — the redstone mode: `AbstractTileEntity.checkRedstone` (2026-11-23)
+
+### The slice, quoted from this port's own gaps
+
+`## Deviations and gaps (slice 1)`, item 6 — the port's own gap list, unchanged through twelve slices:
+
+> **6. No side config or redstone modes.** Upstream's six per-side transfer types
+> and redstone IGNORE/ON/OFF default to `ALL`/`IGNORE`; this slice ships only
+> those defaults.
+
+the `## Behaviour` table's row:
+
+> | redstone | `checkRedstone()` — default mode `IGNORE`, so always on | no redstone gate (defaults only); a recorded gap |
+
+slices 8, 9 and 10 repeated it ("the discharger GUI, its side-config/redstone modes, the Energy
+Hopper | `not ported` — slice 1's GUI/side-config gaps"), slice 12's diagrams name it
+(`postTick`: `checkRedstone()`), and 0.2.12's own next-slice proposal named it as the family that
+sits inside the transmitter's existing tick. The **side config** is *not* in this slice: it is the
+same gap item's other half, and it needs a per-side declaration the port cannot express (a
+`ModEnergyBuffer` carries six face booleans only, not six transfer types). Redstone only needs the
+tick the machines already have, which is why it comes first.
+
+### What the artefact says (tag `v6.2.10`, commit `a5a8f25`)
+
+**The mode set is exactly three** — `lib/logistics/Redstone.java`:
+
+| Ordinal (saved) | Mode | `checkRedstone()` returns |
+|---:|---|---|
+| 0 | `IGNORE` (the default) | `true` — the signal is never read |
+| 1 | `ON` | `powered` |
+| 2 | `OFF` | `!powered` |
+
+`next()` is `ordinal + 1`, wrapping past `OFF` back to `IGNORE` (the GUI button's cycle).
+`powered` is `level.getBestNeighborSignal(pos) > 0` — vanilla's own read, in `Redstone.java`'s
+comment "avoid checking redstone if mode is IGNORE: `getBestNeighborSignal` is relatively expensive".
+
+**The rule** — `lib/block/AbstractTileEntity.java:202-214`:
+
+```java
+if (Redstone.IGNORE.equals(redstoneMode)) return true;
+boolean power = this.level != null && this.level.getBestNeighborSignal(this.worldPosition) > 0;
+return power && Redstone.ON.equals(redstoneMode) || !power && Redstone.OFF.equals(redstoneMode);
+```
+
+**Which machines honour it** — every `checkRedstone()` call site in the jar, and what each gates:
+
+| Machine | Site | What the gate stops |
+|---|---|---|
+| Energy Cable | `CableTile.receiveEnergy` | an insertion into the cable's network (the door FE comes in through) |
+| Energy Discharger | `EnergyDischargerTile.postTick` | the **item drain** only — `extractFromSides` runs outside the gate |
+| Energy Cell | `EnergyCellTile.canExtractEnergy`/`canReceiveEnergy` | every face, both ways (the capability itself) |
+| Ender Cell, Ender Gate | `AbstractEnderTile.canExtractEnergy`/`canReceiveEnergy` | every face, both ways (the channel handler) |
+| Furnator | `FurnatorTile.postTick` | the **burn** only (the fuel load included) — `super.postTick`'s `extractFromSides` runs outside it |
+| Energy Hopper | `EnergyHopperTile.postTick` | the charge it spends on its faced container |
+| Solar Panel | `SolarTile.postTick` | the **generation** only — the item charge and `extractFromSides` run first |
+| Player Transmitter | `PlayerTransmitterTile.postTick` | the whole pass (upstream returns before it reads the card) |
+| Magmator, Thermo Generator, Reactor | their `postTick` | the generation — **not ported** (unported machines) |
+
+**The energizing orb and the rods have no redstone mode at all**: neither calls `checkRedstone()`
+and neither screen is an `AbstractEnergyScreen`, so neither offers the button. **The control**
+upstream is that GUI button: `AbstractEnergyScreen.init` calls `addRedstoneButton` when
+`hasRedstoneButton()`, and the button sends `NextRedstoneModePacket(pos)` →
+`tile.nextRedstoneMode(); tile.sync()`. The set of machines with the button is exactly the set with
+the call site. **The saved key** is `redstone_mode`, an int ordinal, in the block entity's *sync*
+compound (`writeSync`/`readSync`) — **not** in `writeStorable`, so a broken machine's item carries
+its buffer and never its mode.
+
+### What it ships
+
+| File | Change |
+|---|---|
+| `src/runtime.rs` | `RedstoneMode` (`ALL`, `ordinal`, `from_ordinal`, `name`, `command_word`, `named`, `next`) and `check_redstone(mode, powered)`; assertions added to the red test below |
+| `src/powah.rs` | `KEY_REDSTONE_MODE`, `has_redstone_mode`, `redstone_target`, `saved_mode`, `powered`, `gate_open`, `gate_open_at`, `faces_open`, `RedstoneField`/`redstone_field`; the gate inside the furnator's, the solar panel's and the transmitter's own tick, inside the level-tick phase for the cell, the discharger, the hopper and the cable, and inside `EnderEnergy::insert`/`extract`; the readout's `redstone <mode>[ (powered)]` field; `set_redstone_mode` and `/powah redstone ignore|ignored|on|off <pos>`; **3 tests** |
+| `src/lib.rs` | the `redstone` command arm |
+| `tools/e2e.sh` | the slice-13 phase (the brief's rig in all three modes, then one machine of each kind) and `SELFTEST=redstone` |
+| `horizon-mod.toml`, `Cargo.toml`, `README.md` | version 0.2.13 and the slice's paragraph |
+
+No content change: the mode is data and one rule, not blocks or items.
+
+### The rule in the port
+
+`gate_open(host, level, pos, saved)` = `runtime::check_redstone(saved_mode(saved), powered)` where
+`saved_mode` reads upstream's key (absent → `IGNORE`) and `powered` is
+`LevelRef::best_neighbor_signal(host, pos) > 0` — the pin's own `SignalGetter.getBestNeighborSignal`
+read, so a lever, a repeater, a torch and a redstone block all answer exactly as they do upstream.
+The default short-circuits before the signal read, as upstream's does.
+
+Where each machine's gate sits, in the port's own structure:
+
+| Kind | Gate site | Matches upstream |
+|---|---|---|
+| Furnator | the tick's `burn` call | yes — the push at the level-tick end is outside it |
+| Solar | the tick's `solar_production` | yes — the item charge runs first, the push is outside |
+| Transmitter | the tick's `charge_bound_player` | yes |
+| Cell | the level-tick `push_out`, and `faces_open` on every port this port's movers see | yes, both faces |
+| Ender cell / gate | inside `EnderEnergy::insert`/`extract`, and `faces_open` at the relay's ports | yes, both faces, for a foreign mover too |
+| Discharger | the level-tick `drain_items` | yes — `push_out` still runs |
+| Hopper | the level-tick `charge_container` | yes |
+| Cable | the level-tick `relay_network` for that cable | the cable's own relay, not only the insertion path (see deviations) |
+| Orb, rods | none — `has_redstone_mode` is false and the command refuses with "no redstone mode" | yes (upstream has neither) |
+
+### The red proof
+
+**1. The mode's rules, before either existed** (`cargo test`, **91 passed / 2 failed**;
+`evidence/powah/slice13-red-runtime.log`):
+
+```
+---- runtime::tests::the_three_redstone_modes_are_upstreams_ordinals_and_cycle_in_its_order stdout ----
+
+thread '...' panicked at src/runtime.rs:952:9:
+not yet implemented: slice 13: a redstone mode's ordinal
+
+---- runtime::tests::a_machine_runs_unless_its_mode_names_the_other_power_state stdout ----
+
+thread '...' panicked at src/runtime.rs:987:5:
+not yet implemented: slice 13: whether a machine's redstone gate is open
+
+test result: FAILED. 91 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+```
+
+**2. In game, five runs before the green one**, each catching a real defect:
+
+| Run | Verbatim |
+|---|---|
+| first | `FAIL: expected /powah redstone ignored at 16,100,22 to answer 'Redstone mode set to ignore.', got 'Redstone mode set to on.'` — the usage was declared as `ignore` (the enum's own spelling) while the command sent `ignored`; the dispatcher refused the word and no mod command ran. Fixed by `RedstoneMode::command_word` (`ignored`, with `ignore` still accepted). |
+| second | the same two words one step on (`got 'Redstone mode set to ignored.'`) — the *test* still expected `ignore.` |
+| third | `FAIL: IGNORE with a powered face must keep charging … got 10000 -> 10000 FE` — the leg set the buffer to 10,000, which 500 FE a tick spends in 20 ticks, so both reads saw the item already full. Fixed by setting 200,000 **before** the item arrives (a transmitter with something to charge never settles an equality poll). |
+| fourth | `FAIL: a foreign block must refuse a redstone mode, got '{"chat":["That block has no redstone mode."],"ok":true}'` — `set_redstone_mode` asked `has_redstone_mode` before asking whether the block was this mod's, so a stone answered "no mode" where upstream's packet (which only acts on an `AbstractTileEntity`) answers nothing. Fixed with `redstone_target` (`NoBlock` before `NoMode`), pinned by the test. |
+| fifth | `FAIL: could not clamp 12,100,48 to 5000 FE: Ender Cell at 12,100,48: 4500/5000000 FE (… channel 0/1 …)` — the ender channel store is **the world's**, keyed by (owner, channel), so a starter cell (one channel) shared channel 0 with slice 11's extended cells: their extenders' 4,000,000 capacity showed and a neighbour still on that channel took the 500. Fixed by giving the leg a **nitro** ender cell on channel 11. |
+
+One more in the same wave: `floor_under 6 48`'s `/fill` answered *"No blocks were filled"* and the
+next read found air, so the platform assertion stopped the leg before the discharger. The phase
+never teleports the player, and a machine placed by `setblock` needs no support, so the phase's
+`floor_under` calls were removed.
+
+### Green
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+
+| Check | Result |
+|---|---|
+| `cargo test --offline` | **96 passed, 0 failed** (`sdk-test.log`) |
+| `cargo clippy --all-targets --offline -- -D warnings` | 0 warnings, `CLIPPY_EXIT:0` |
+| `cargo fmt --check` | clean, exit 0 |
+| two builds | `BUILD1_EXIT:0`, `BUILD2_EXIT:0`, **`cmp`-identical** (533,187 B, 860 entries, `version = "0.2.13"`, no packed `Cargo.lock`) — `slice13-build-twice.log` |
+| `cargo horizon-mod check powah.hmod` | `powah 0.2.13 (native-mod, format native-1/0a875da…/e59da909…, for 26.3)` · `533187 bytes, SHA-256 70f218d63974277c44b1d98fe6fd2a90b3fb131e45ecc212972ff532e3d9cf04`, `CHECK_EXIT:0` |
+| `cargo horizon-mod fits powah.hmod --build 0a875da` | `Powah:` / `0a875da  made for`, `FITS_PIN_EXIT:0` |
+| `cargo horizon-mod fits powah.hmod --build 0b14f8a` | `Powah:` / `0b14f8a  fits`, `FITS_OTHER_EXIT:0` |
+| `python3 ports/tools/check-recipe-types.py powah` | `powah: ok`, exit 0 (no recipe changed) |
+| `python3 ports/tools/verify-sdk-package.py powah` | **1/1**, 860 entries, every packed file the tree's bytes |
+| launcher build | `Compiling powah (1 of 1)`, `native-0a875da-13e86a810b6a`, instance `powah-e2e` (`launcher-build-0.2.13.log`) |
+| in-game main leg | **`PASS` + `EXIT:0`** (`e2e-launcher-0.2.13.log`), on the delivered archive (`package: powah.hmod (533187 B, sha256 70f218d6…)`); the control game (the same Nightly without the package) knows none of the ids |
+| `SELFTEST=1` | `EXIT:1` — `FAIL: SELFTEST flipped: the unfuelled furnator made no FE, as it should` (`e2e-selftest-0.2.13.log`) |
+| `SELFTEST=redstone` | `EXIT:1` — `FAIL: SELFTEST flipped: the shut gate charged nothing, as it should` (`e2e-selftest-redstone-0.2.13.log`) |
+| `check-e2e-logs.py powah-e2e --strict` | `logs=53  ok=53  missing-exit=0  bad-exit=0`, exit 0 |
+
+### The in-game transcript (the brief's assertion, quoted from `e2e-launcher-0.2.13.log`)
+
+The rig: the starter transmitter at **16,100,22** with its bound card in slot 0, a
+`powah:energy_cell_starter` in the operator's hotbar, and a **redstone block at 15,100,22** (its
+west face; a redstone block powers all six neighbours).
+
+```
+== slice 13: the redstone mode's command and its readout ==
+  redstone(16,100,22) reply: Redstone mode set to off.
+  info(16,100,22): Player Transmitter at 16,100,22: 66000/1000000 FE (comparator 0, bound Player85052, charging 500 FE/t, 1000 FE/t a side, redstone off, t=4804)
+  redstone(16,100,22) reply: Redstone mode set to on.
+  info(16,100,22): Player Transmitter at 16,100,22: 61500/1000000 FE (comparator 0, bound Player85052, charging 500 FE/t, 1000 FE/t a side, redstone on, t=4828)
+  redstone(16,100,22) reply: Redstone mode set to ignored.
+  info(16,100,22): Player Transmitter at 16,100,22: 53000/1000000 FE (comparator 0, bound Player85052, charging 500 FE/t, 1000 FE/t a side, t=4855)
+== slice 13: IGNORE charges through a powered face, the brief's rig ==
+  set(16,100,22) = Player Transmitter at 16,100,22: 200000/1000000 FE (comparator 3, bound Player85052, charging 500 FE/t, 1000 FE/t a side, t=4870)
+  ignored item: 14000 -> 28000 FE
+== slice 13: OFF with a powered face stops the charge, and the buffer stands still ==
+  gated: Player Transmitter at 16,100,22: 171500/1000000 FE (comparator 2, bound Player85052, charging 500 FE/t, 1000 FE/t a side, redstone off (powered), t=4946)
+  gated over 20 ticks: Player Transmitter at 16,100,22: 171500/1000000 FE (comparator 2, bound Player85052, charging 500 FE/t, 1000 FE/t a side, redstone off (powered), t=4973) (item 28500 -> 28500 FE)
+== slice 13: the same rig with the block removed charges again (500 x dt) ==
+  opened: Player Transmitter at 16,100,22: 153500/1000000 FE (comparator 2, bound Player85052, charging 500 FE/t, 1000 FE/t a side, redstone off, t=5017) over dt=29, transmitter -14500 FE, item 35000 -> 49500 FE
+== slice 13: ON needs the power, and both halves of the truth table hold ==
+  on, unpowered: Player Transmitter at 16,100,22: 150000/1000000 FE (comparator 2, bound Player85052, charging 500 FE/t, 1000 FE/t a side, redstone on, t=5037) (item 50000 -> 50000 FE)
+  on, powered: Player Transmitter at 16,100,22: 147000/1000000 FE (comparator 2, bound Player85052, charging 500 FE/t, 1000 FE/t a side, redstone on (powered), t=5071) (item 56000 FE)
+```
+
+The rest of the phase, one machine of each kind that moves FE on its own:
+
+```
+== slice 13: a shut cell gives nothing on any face, so the cable beside it pulls nothing ==
+  gated cell: Energy Cell at 2,100,48: 5000/1000000 FE (comparator 0, charge empty, empty, 1000 FE/t a side, redstone off (powered), t=5399) / sink: Energy Cell at 2,100,50: 0/1000000 FE (… t=5406)
+  opened: sink Energy Cell at 2,100,50: 2500/1000000 FE (… t=5434)
+== slice 13: a shut cable relays nothing while an open one beside it does ==
+  gated cable: sink Energy Cell at 4,100,50: 0/1000000 FE (… t=5506)
+  opened cable: sink Energy Cell at 4,100,50: 2500/1000000 FE (… t=5534)
+```
+
+(the furnator's leg reads `carbon 0, burning false, fuel minecraft:coal x5` while shut and makes FE
+once opened; the discharger keeps its item's 5,000 and drains it once opened; the hopper keeps its
+5,000 and spends it on the chest's item once opened; the solar panel holds 5,000 under a noon sky
+and generates once opened; the nitro ender cell on channel 11 gives the cable nothing while shut and
+feeds it once opened.)
+
+### Coverage (parity rule, the family this slice adds)
+
+| Family (from the jar) | Status |
+|---|---|
+| the three modes and `checkRedstone`'s truth table | **tested** — the unit test pins the ordinals (0/1/2), the cycle, the words and all six mode×powered answers; in game all three modes × both power states are measured on the transmitter |
+| `/powah redstone <mode> <pos>` (the GUI button's `NextRedstoneModePacket`) | **tested** — three replies asserted (off/on/ignored), a foreign block answers "No Powah block there." and the orb "That block has no redstone mode." |
+| the readout's `redstone <mode>[ (powered)]` | **tested** — on the transmitter, the cell and the solar panel; absent on the default, which keeps every earlier line byte-identical (unit test + every earlier leg green) |
+| the transmitter's `postTick` gate | **tested** — the brief's rig: item and balance frozen over 20 ticks with the block on the west face, `500 × dt` once it is removed, ON needing the power |
+| the furnator's burn | **tested** — no fuel taken, no carbon burnt, no FE while shut |
+| the cell's faces | **tested** — its 5,000 stays put and the cable behind it delivers nothing |
+| the cable's relay | **tested** — a gated cable relays nothing, the same cable relays once opened |
+| the discharger's item drain | **tested** — the item keeps its 5,000 |
+| the hopper's charge | **tested** — the buffer keeps its 5,000 and the chest's item stays empty |
+| the solar panel's generation | **tested** — 5,000 under a noon sky, unchanged for 40 ticks |
+| the ender cell's (and gate's) handler | **tested** — the cell refuses the cable at `EnderEnergy`; the gate shares the same handler and gate |
+| the magmator, the thermo generator, the reactor | `not ported` — the machines themselves are unported (slice 1's gap 11), so their gates have nothing to gate |
+| the GUI's redstone button | `not ported` — slice 1's GUI gap; `/powah redstone` is its replacement, as `/powah channel` is the ender GUI's |
+| a **foreign** mover's view of a gated cell | `blocked(pin: block_energy has no per-instance hook)` — see deviation 2 |
+| the mode on a broken machine's item | `not carried` — upstream's own `writeStorable` omits `redstone_mode`, so the item carries the buffer and never the mode |
+
+### Deviations and upstream defects this slice records
+
+1. **The button is a command.** Upstream's mode is set from the machine's screen and any player may
+   press it; this port has no GUI (slice 1's gap 1), so `/powah redstone <mode> <pos>` sets it, and
+   it is operator-only (level 2) like every other harness control here, because it acts at
+   coordinates the caller chooses.
+2. **A foreign mover still sees a gated cell's declared buffer.** The pin's
+   `Registrar::block_energy` declaration is per *block*, not per instance: a cell's `ENERGY`
+   capability cannot ask its own saved mode, so a block from another mod that pulls on a gated cell
+   still gets FE. This port's own movers (a push, a cable's relay) ask `faces_open` first, and the
+   ender cell and gate — whose handler is this port's own `EnderEnergy` — refuse inside `insert` and
+   `extract` even to a foreign mover. Expressed with the closest supported API, recorded rather than
+   faked.
+3. **A cable's gate closes that cable's whole relay**, where upstream's gate closes only
+   `CableTile.receiveEnergy` (the door an insertion comes in through; a network already inside still
+   relays). The port's cable *is* its network's entry point, so a gated cable relays nothing — and it
+   does not claim the network, so another cable of the same network that is open still relays.
+4. **The readout names the gate only when it is not the default.** `IGNORE` is what a placed machine
+   has, and an untouched machine must print the line twelve slices of legs assert; the field appears
+   from `, redstone on`/`off` on. The `t=` clock stays the last field, which is what the harness's
+   `time_of` anchors on.
+5. **`ignored` is the command's word, `ignore` the readout's.** Upstream's enum is `IGNORE`; both
+   parse, the usage declares `ignored` (the brief's and the notes' word), and the reply repeats it.
+6. **The mode is saved but not carried.** Faithful: upstream writes `redstone_mode` in `writeSync`
+   only, so a broken machine is placed with `IGNORE` again. Nothing to do.
+
+**Upstream defects fixed: none.** The five in-game failures above were this port's own defects (a
+command word, two test expectations, a short buffer, an ordering bug in `set_redstone_mode` and a
+shared ender channel in the leg), not the mod's.
+
+### Harness findings this slice measured (for the next port)
+
+1. **A command's usage word and the word the test sends must be one value.** `MODE` was declared as
+   `ignore` while the leg sent `ignored`: the dispatcher refused it and the only reply was the
+   *previous* command's, which a polling helper reads as a stale answer. Pin both from one function
+   (`RedstoneMode::command_word`).
+2. **The ender channel store is world data.** A leg sharing channel 0 with an earlier slice's
+   extended cells inherits *their* capacity (4,000,000 + 1,000,000 = 5,000,000 in the first run) and
+   can lose FE to a neighbour they left standing. Use a tier with spare channels (the nitro cell's
+   twelve) and a channel no other leg touches.
+3. **`IGNORE` must short-circuit before the signal read**, or every machine pays a
+   `best_neighbor_signal` per tick for a gate nobody set (upstream says so in a comment; the port
+   does the same).
+4. **A redstone block powers all six neighbours** (`getBestNeighborSignal` reads the block's own
+   signal), so one block on any face is the whole rig — no lever, no dust.
+5. **A `SELFTEST` flip is `[ wrong ] || fail`.** Writing `[ right ] || fail` under `SELFTEST=…`
+   makes the leg *pass* when the behaviour is correct (this happened once: the redstone selftest
+   exited 0 before the flip was inverted).
+6. **`floor_under`'s `/fill` can answer "No blocks were filled"** for a region the platform check
+   then reads as air — a phase that never teleports the player needs no platform at all.
+
+Version: **0.2.12 → 0.2.13** (one patch). The published `[[versions]]` record keeps 0.2.12 and
+gains 0.2.13 at publish time — this port does not touch the registry entry.
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices

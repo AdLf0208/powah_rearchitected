@@ -6,10 +6,10 @@
 #
 # Cargo's name and version are not the mod's identity: horizon-mod.toml is.
 name = "powah"
-version = "0.2.12"
+version = "0.2.13"
 edition = "2024"
 license = "LGPL-3.0-only"
-description = "Powah for Horizon: the seven-tier Furnator, Energy Cell, Energy Cable, Energy Discharger and Solar Panel ladders with their cable network, the dielectric/capacitor family, the Energizing Orb with its rod ladder and materials, the seven-tier Energy Hopper that charges the container it faces, the seven-tier Ender Cell and Ender Gate channel network, the item-energy family (a broken machine's item carries its buffer, machines charge the items in their slots and a discharger drains them), and the seven-tier Player Transmitter that charges the inventory of the player its binding card names"
+description = "Powah for Horizon: the seven-tier Furnator, Energy Cell, Energy Cable, Energy Discharger and Solar Panel ladders with their cable network, the dielectric/capacitor family, the Energizing Orb with its rod ladder and materials, the seven-tier Energy Hopper that charges the container it faces, the seven-tier Ender Cell and Ender Gate channel network, the item-energy family (a broken machine's item carries its buffer, machines charge the items in their slots and a discharger drains them), the seven-tier Player Transmitter that charges the inventory of the player its binding card names, and the redstone mode every machine reads in its own tick"
 publish = false
 
 [dependencies]

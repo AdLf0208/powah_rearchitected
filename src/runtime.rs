@@ -928,9 +928,175 @@ pub fn rod_cooldown(charging: bool, cooldown: i32) -> i32 {
     }
 }
 
+/// Upstream's `Redstone` (`lib/logistics/Redstone.java`): the three modes a machine's GUI button
+/// cycles through, in the enum's own ordinal order, which is what the block entity saves under
+/// `redstone_mode`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RedstoneMode {
+    /// No gate: the machine always runs (upstream's default, `Redstone.IGNORE`).
+    #[default]
+    Ignore,
+    /// The machine runs only while a neighbour powers it (`Redstone.ON`).
+    On,
+    /// The machine runs only while no neighbour powers it (`Redstone.OFF`).
+    Off,
+}
+
+impl RedstoneMode {
+    /// The three modes in `Redstone.values()` order, which is the ordinal order.
+    pub const ALL: [RedstoneMode; 3] = [Self::Ignore, Self::On, Self::Off];
+
+    /// The ordinal upstream saves (`writeSync`'s `redstone_mode`).
+    #[must_use]
+    pub fn ordinal(self) -> i32 {
+        match self {
+            Self::Ignore => 0,
+            Self::On => 1,
+            Self::Off => 2,
+        }
+    }
+
+    /// The mode an ordinal names. Upstream indexes `Redstone.values()` directly and would throw
+    /// on a doctored value; a value outside the three reads as the default here.
+    #[must_use]
+    pub fn from_ordinal(value: i32) -> RedstoneMode {
+        Self::ALL
+            .into_iter()
+            .find(|mode| mode.ordinal() == value)
+            .unwrap_or_default()
+    }
+
+    /// The mode's name as this port's readout spells it: upstream's lang keys are
+    /// `info.lollipop.ignore`/`on`/`off`, named after `Redstone.IGNORE` and friends.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Ignore => "ignore",
+            Self::On => "on",
+            Self::Off => "off",
+        }
+    }
+
+    /// The word the `/powah redstone` usage uses for this mode: `ignored` for the default (upstream's
+    /// enum is `IGNORE`, and a command reads as English) and the mode's own name otherwise. `ignore`
+    /// is accepted beside it, because that is the spelling `name` gives the readout.
+    #[must_use]
+    pub fn command_word(self) -> &'static str {
+        match self {
+            Self::Ignore => "ignored",
+            other => other.name(),
+        }
+    }
+
+    /// The mode a command word names, `None` for anything else. `ignored` is accepted beside
+    /// `ignore`, because the command reads better that way and both name the same mode.
+    #[must_use]
+    pub fn named(name: &str) -> Option<RedstoneMode> {
+        match name {
+            "ignore" | "ignored" => Some(Self::Ignore),
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            _ => None,
+        }
+    }
+
+    /// The next mode, as the GUI button's `NextRedstoneModePacket` cycles: `IGNORE` → `ON` →
+    /// `OFF` → `IGNORE`.
+    #[must_use]
+    pub fn next(self) -> RedstoneMode {
+        match self {
+            Self::Ignore => Self::On,
+            Self::On => Self::Off,
+            Self::Off => Self::Ignore,
+        }
+    }
+}
+
+/// `AbstractTileEntity.checkRedstone()`: whether the machine does its work this tick, from its
+/// mode and whether any neighbour powers it (`level.getBestNeighborSignal(pos) > 0`).
+#[must_use]
+pub fn check_redstone(mode: RedstoneMode, powered: bool) -> bool {
+    match mode {
+        // Upstream returns true before it ever reads the signal: IGNORE is the cheap default.
+        RedstoneMode::Ignore => true,
+        RedstoneMode::On => powered,
+        RedstoneMode::Off => !powered,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_three_redstone_modes_are_upstreams_ordinals_and_cycle_in_its_order() {
+        // `Redstone.java`: IGNORE, ON, OFF — the ordinal is the saved `redstone_mode`.
+        let expected = [
+            (RedstoneMode::Ignore, 0, "ignore"),
+            (RedstoneMode::On, 1, "on"),
+            (RedstoneMode::Off, 2, "off"),
+        ];
+        for (mode, ordinal, name) in expected {
+            assert_eq!(mode.ordinal(), ordinal, "{mode:?}'s saved ordinal");
+            assert_eq!(
+                RedstoneMode::from_ordinal(ordinal),
+                mode,
+                "ordinal {ordinal} names {mode:?}"
+            );
+            assert_eq!(mode.name(), name, "{mode:?}'s name");
+        }
+        assert_eq!(
+            RedstoneMode::from_ordinal(3),
+            RedstoneMode::Ignore,
+            "a doctored ordinal above the three is the default, not a panic"
+        );
+        assert_eq!(
+            RedstoneMode::from_ordinal(-1),
+            RedstoneMode::Ignore,
+            "a negative ordinal is the default"
+        );
+        // `next()`: ordinal + 1, wrapping past OFF back to IGNORE.
+        assert_eq!(RedstoneMode::Ignore.next(), RedstoneMode::On);
+        assert_eq!(RedstoneMode::On.next(), RedstoneMode::Off);
+        assert_eq!(RedstoneMode::Off.next(), RedstoneMode::Ignore);
+        // The command's words are the names, `ignored` included.
+        assert_eq!(RedstoneMode::named("ignored"), Some(RedstoneMode::Ignore));
+        assert_eq!(RedstoneMode::named("on"), Some(RedstoneMode::On));
+        assert_eq!(RedstoneMode::named("off"), Some(RedstoneMode::Off));
+        assert_eq!(RedstoneMode::named("ignore"), Some(RedstoneMode::Ignore));
+        assert_eq!(RedstoneMode::named("ON"), None, "the words are lower case");
+        assert_eq!(RedstoneMode::named("else"), None);
+        // The usage's word is `ignored` (the command reads as English); `name` stays upstream's
+        // `ignore` for the readout, and both parse.
+        assert_eq!(RedstoneMode::Ignore.command_word(), "ignored");
+        assert_eq!(RedstoneMode::On.command_word(), "on");
+        assert_eq!(RedstoneMode::Off.command_word(), "off");
+        assert_eq!(RedstoneMode::default(), RedstoneMode::Ignore);
+        assert_eq!(RedstoneMode::ALL.len(), 3, "upstream has exactly three");
+    }
+
+    #[test]
+    fn a_machine_runs_unless_its_mode_names_the_other_power_state() {
+        // `checkRedstone`: IGNORE is always open; ON needs power; OFF needs no power.
+        assert!(check_redstone(RedstoneMode::Ignore, false));
+        assert!(check_redstone(RedstoneMode::Ignore, true));
+        assert!(
+            !check_redstone(RedstoneMode::On, false),
+            "ON with no power is shut"
+        );
+        assert!(
+            check_redstone(RedstoneMode::On, true),
+            "ON with power is open"
+        );
+        assert!(
+            !check_redstone(RedstoneMode::Off, true),
+            "OFF with power is shut"
+        );
+        assert!(
+            check_redstone(RedstoneMode::Off, false),
+            "OFF with no power is open"
+        );
+    }
 
     fn buffer(energy: i32, capacity: i32, max_insert: i32, max_extract: i32) -> Neighbour {
         Neighbour {
