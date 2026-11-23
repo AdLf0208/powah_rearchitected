@@ -16,14 +16,14 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use mod_api::HostBlockStates;
 use mod_api::{
-    self, AttachmentCodec, AttachmentError, AttachmentType, BlockDropsEvent, BlockEntityPart,
-    BlockEntityTickEvent, BlockEntityTickReply, BlockEntityTicksEvent, BlockEntityTypeKey,
-    BlockFace, BlockPart, BlockSide, Command, CommandArgumentValue, Component, ComponentId,
-    Compound, Direction, ENERGY, EnergyHandler, Flow, Hand, Holder, Host, HostSide,
-    HostTransaction, Identifier, InteractionResult, ItemComponentHandler, ItemInteractMobEvent,
-    ItemKey, ItemPart, ItemPlace, LevelHost, LevelRef, ModContainer, ModEnergyBuffer,
-    OnBlockPlacedByEvent, PlayerRef, Registrar, ServerHost, Tag, Transaction, UseItemEvent,
-    move_energy,
+    self, AnalogOutputEvent, AttachmentCodec, AttachmentError, AttachmentType, BlockDropsEvent,
+    BlockEntityPart, BlockEntityTickEvent, BlockEntityTickReply, BlockEntityTicksEvent,
+    BlockEntityTypeKey, BlockFace, BlockPart, BlockSide, Command, CommandArgumentValue, Component,
+    ComponentId, Compound, Direction, ENERGY, EnergyHandler, Flow, Hand, HasAnalogOutputEvent,
+    Holder, Host, HostSide, HostTransaction, Identifier, InteractionResult, ItemComponentHandler,
+    ItemInteractMobEvent, ItemKey, ItemPart, ItemPlace, LevelDimension, LevelHost, LevelKey,
+    LevelRef, ModContainer, ModEnergyBuffer, NeighbourUpdate, OnBlockPlacedByEvent, PlayerRef,
+    Registrar, ServerHost, Tag, Transaction, UseItemEvent, move_energy,
 };
 
 use crate::runtime::{
@@ -652,6 +652,39 @@ pub(crate) fn has_redstone_mode(block: &str) -> bool {
                 | Kind::Transmitter(_)
         )
     )
+}
+
+/// Whether a comparator gets a reading from the machine `kind` at all: exactly the machines whose
+/// `/powah info` line prints a `comparator` field, which is the strength
+/// `runtime::comparator_strength` computes for them. A cable stores nothing, and the energizing orb
+/// (upstream's own rule is its non-empty stack count) and the rods print no comparator, so they
+/// answer no signal — a comparator beside them is left to vanilla instead of being told a number.
+pub(crate) fn has_comparator(kind: Kind) -> bool {
+    matches!(
+        kind,
+        Kind::Furnator(_)
+            | Kind::Cell(_)
+            | Kind::Discharger(_)
+            | Kind::Hopper(_)
+            | Kind::Solar(_)
+            | Kind::Transmitter(_)
+            | Kind::EnderCell(_)
+            | Kind::EnderGate(_)
+    )
+}
+
+/// The reading a comparator gets from a machine `kind` whose buffer holds `stored` of `capacity`:
+/// the same number its readout prints, upstream's `Energy.toComparatorPower()` (the fraction of the
+/// buffer times 15, truncated), clamped into the buffer and to 0..=15. `None` for a block whose
+/// readout prints no comparator (see [`has_comparator`]).
+pub(crate) fn comparator_of(kind: Kind, stored: i32, capacity: i32) -> Option<i32> {
+    if !has_comparator(kind) {
+        return None;
+    }
+    Some(comparator_strength(
+        clamp_energy(stored, capacity),
+        capacity,
+    ))
 }
 
 /// What `/powah redstone` finds at a position. Upstream's `NextRedstoneModePacket` acts only on an
@@ -1340,7 +1373,17 @@ impl EnderPart {
 }
 
 #[mod_api::horizon_part]
-impl BlockPart for EnderPart {}
+impl BlockPart for EnderPart {
+    /// A comparator beside this block gets the machine's reading: the block declares it has one, and
+    /// the answer is the strength the level tick's drain recorded (the hook's level is read-only and
+    /// cannot reach the block entity).
+    fn has_analog_output(&self, _level: &dyn LevelHost, event: &mut HasAnalogOutputEvent) {
+        event.output = true;
+    }
+    fn analog_output(&self, _level: &dyn LevelHost, event: &mut AnalogOutputEvent) {
+        event.output = cached_reading(event.dimension, [event.pos.x, event.pos.y, event.pos.z]);
+    }
+}
 
 #[mod_api::horizon_part]
 impl BlockEntityPart for EnderPart {
@@ -2133,6 +2176,62 @@ pub(crate) fn rod_line(
     )
 }
 
+/// The comparator reading each machine last had, per level and position: what the machines'
+/// `analog_output` part answers.
+///
+/// The comparator hooks get only a read-only [`LevelHost`], which cannot reach a block entity, so
+/// the reading cannot be read live there. Every machine's FE change runs through its own tick and
+/// the level tick's move phase, whose drain records the strength here from the buffer the machine
+/// keeps; a changed value tells the comparators beside it to read it again. The key is the level's
+/// dimension key, so two dimensions' machines at one position never share a number.
+#[derive(Default)]
+pub(crate) struct Outputs {
+    strengths: HashMap<(LevelKey, [i32; 3]), i32>,
+}
+
+impl Outputs {
+    /// Record `strength` for `pos`; whether the stored value changed (a first value counts).
+    pub(crate) fn record(&mut self, dimension: LevelKey, pos: [i32; 3], strength: i32) -> bool {
+        self.strengths.insert((dimension, pos), strength) != Some(strength)
+    }
+
+    /// The strength last recorded for `pos`, `None` where no machine recorded one.
+    pub(crate) fn get(&self, dimension: LevelKey, pos: [i32; 3]) -> Option<i32> {
+        self.strengths.get(&(dimension, pos)).copied()
+    }
+
+    /// Forget every reading: a world opened or closed.
+    pub(crate) fn clear(&mut self) {
+        self.strengths.clear();
+    }
+}
+
+/// The process's readings: one per open world, cleared when the world lifecycle says so.
+static OUTPUTS: OnceLock<Mutex<Outputs>> = OnceLock::new();
+
+/// The readings every machine Part answers from.
+fn outputs() -> &'static Mutex<Outputs> {
+    OUTPUTS.get_or_init(|| Mutex::new(Outputs::default()))
+}
+
+/// The reading a comparator beside the machine at `pos` gets: the strength the level tick's drain
+/// recorded, 0 where no machine recorded one (a comparator beside anything else keeps vanilla's).
+pub(crate) fn cached_reading(dimension: LevelDimension, pos: [i32; 3]) -> i32 {
+    outputs()
+        .lock()
+        .expect("the powah output lock is held for one read")
+        .get(dimension.key(), pos)
+        .unwrap_or(0)
+}
+
+/// Forget every recorded reading: a world opened or closed, so no number outlives its world.
+pub(crate) fn clear_outputs() {
+    outputs()
+        .lock()
+        .expect("the powah output lock is held for one clear")
+        .clear();
+}
+
 /// The machines whose block entity ticked this tick, per level, drained at the
 /// end of that level's tick. The SDK cannot enumerate a level's block entities
 /// and a ticking one is out of the world, so the tick leaves its position here
@@ -2502,7 +2601,7 @@ pub(crate) fn set_energy(host: &mut dyn ServerHost, pos: [i32; 3], amount: i32) 
     let Some(block) = block_at(&*host, level, pos) else {
         return SetOutcome::NoBlock;
     };
-    if let Some(Kind::EnderCell(_) | Kind::EnderGate(_)) = Kind::of(&block) {
+    if let Some(kind @ (Kind::EnderCell(_) | Kind::EnderGate(_))) = Kind::of(&block) {
         let Some(key) = ender_key_at(host, level, pos) else {
             return SetOutcome::NoBlock;
         };
@@ -2511,12 +2610,17 @@ pub(crate) fn set_energy(host: &mut dyn ServerHost, pos: [i32; 3], amount: i32) 
         let stored = clamp_energy(amount, channel.capacity);
         store.set(key, Channel { stored, ..channel });
         return if write_channels(host, &store) {
+            // The channel is the block's buffer: a comparator reads the new fraction at once.
+            if let Some(reading) = comparator_of(kind, stored, channel.capacity) {
+                publish_strength(host, level, pos, reading);
+            }
             SetOutcome::Set(stored)
         } else {
             SetOutcome::NoBlock
         };
     }
-    let capacity = match Kind::of(&block) {
+    let kind = Kind::of(&block);
+    let capacity = match kind {
         Some(Kind::Furnator(tier)) => tier.capacity,
         Some(Kind::Cell(tier)) => tier.capacity,
         Some(Kind::Discharger(tier)) => tier.capacity,
@@ -2543,7 +2647,12 @@ pub(crate) fn set_energy(host: &mut dyn ServerHost, pos: [i32; 3], amount: i32) 
     // `merge_data` is `/data merge block`: it loads the patch and marks the chunk
     // changed, which is the `setChanged` the retired bundle had to fake.
     match entity.merge_data(host, patch) {
-        Ok(_) => SetOutcome::Set(energy),
+        Ok(_) => {
+            if let Some(reading) = kind.and_then(|kind| comparator_of(kind, energy, capacity)) {
+                publish_strength(host, level, pos, reading);
+            }
+            SetOutcome::Set(energy)
+        }
         Err(_) => SetOutcome::NoBlock,
     }
 }
@@ -2562,7 +2671,17 @@ impl FurnatorPart {
 }
 
 #[mod_api::horizon_part]
-impl BlockPart for FurnatorPart {}
+impl BlockPart for FurnatorPart {
+    /// A comparator beside this block gets the machine's reading: the block declares it has one, and
+    /// the answer is the strength the level tick's drain recorded (the hook's level is read-only and
+    /// cannot reach the block entity).
+    fn has_analog_output(&self, _level: &dyn LevelHost, event: &mut HasAnalogOutputEvent) {
+        event.output = true;
+    }
+    fn analog_output(&self, _level: &dyn LevelHost, event: &mut AnalogOutputEvent) {
+        event.output = cached_reading(event.dimension, [event.pos.x, event.pos.y, event.pos.z]);
+    }
+}
 
 #[mod_api::horizon_part]
 impl BlockEntityPart for FurnatorPart {
@@ -2630,16 +2749,41 @@ pub(crate) struct IdleRules {
 pub(crate) struct IdlePart {
     queue: Arc<Mutex<Queue>>,
     rules: Option<IdleRules>,
+    /// Whether this block's readout prints a comparator, which is what a comparator gets: a cell
+    /// and a discharger do; a cable stores nothing and a rod prints none, so both answer none.
+    comparator: bool,
 }
 
 impl IdlePart {
-    pub(crate) fn new(queue: Arc<Mutex<Queue>>, rules: Option<IdleRules>) -> IdlePart {
-        IdlePart { queue, rules }
+    pub(crate) fn new(
+        queue: Arc<Mutex<Queue>>,
+        rules: Option<IdleRules>,
+        comparator: bool,
+    ) -> IdlePart {
+        IdlePart {
+            queue,
+            rules,
+            comparator,
+        }
     }
 }
 
 #[mod_api::horizon_part]
-impl BlockPart for IdlePart {}
+impl BlockPart for IdlePart {
+    /// A cell and a discharger print a comparator and answer one; a cable and a rod answer none, so
+    /// a comparator beside them keeps vanilla's reading rather than a wrong number.
+    fn has_analog_output(&self, _level: &dyn LevelHost, event: &mut HasAnalogOutputEvent) {
+        if self.comparator {
+            event.output = true;
+        }
+    }
+
+    fn analog_output(&self, _level: &dyn LevelHost, event: &mut AnalogOutputEvent) {
+        if self.comparator {
+            event.output = cached_reading(event.dimension, [event.pos.x, event.pos.y, event.pos.z]);
+        }
+    }
+}
 
 #[mod_api::horizon_part]
 impl BlockEntityPart for IdlePart {
@@ -2700,7 +2844,17 @@ impl HopperPart {
 }
 
 #[mod_api::horizon_part]
-impl BlockPart for HopperPart {}
+impl BlockPart for HopperPart {
+    /// A comparator beside this block gets the machine's reading: the block declares it has one, and
+    /// the answer is the strength the level tick's drain recorded (the hook's level is read-only and
+    /// cannot reach the block entity).
+    fn has_analog_output(&self, _level: &dyn LevelHost, event: &mut HasAnalogOutputEvent) {
+        event.output = true;
+    }
+    fn analog_output(&self, _level: &dyn LevelHost, event: &mut AnalogOutputEvent) {
+        event.output = cached_reading(event.dimension, [event.pos.x, event.pos.y, event.pos.z]);
+    }
+}
 
 #[mod_api::horizon_part]
 impl BlockEntityPart for HopperPart {
@@ -2747,7 +2901,17 @@ impl SolarPart {
 }
 
 #[mod_api::horizon_part]
-impl BlockPart for SolarPart {}
+impl BlockPart for SolarPart {
+    /// A comparator beside this block gets the machine's reading: the block declares it has one, and
+    /// the answer is the strength the level tick's drain recorded (the hook's level is read-only and
+    /// cannot reach the block entity).
+    fn has_analog_output(&self, _level: &dyn LevelHost, event: &mut HasAnalogOutputEvent) {
+        event.output = true;
+    }
+    fn analog_output(&self, _level: &dyn LevelHost, event: &mut AnalogOutputEvent) {
+        event.output = cached_reading(event.dimension, [event.pos.x, event.pos.y, event.pos.z]);
+    }
+}
 
 #[mod_api::horizon_part]
 impl BlockEntityPart for SolarPart {
@@ -2833,7 +2997,17 @@ impl TransmitterPart {
 }
 
 #[mod_api::horizon_part]
-impl BlockPart for TransmitterPart {}
+impl BlockPart for TransmitterPart {
+    /// A comparator beside this block gets the machine's reading: the block declares it has one, and
+    /// the answer is the strength the level tick's drain recorded (the hook's level is read-only and
+    /// cannot reach the block entity).
+    fn has_analog_output(&self, _level: &dyn LevelHost, event: &mut HasAnalogOutputEvent) {
+        event.output = true;
+    }
+    fn analog_output(&self, _level: &dyn LevelHost, event: &mut AnalogOutputEvent) {
+        event.output = cached_reading(event.dimension, [event.pos.x, event.pos.y, event.pos.z]);
+    }
+}
 
 #[mod_api::horizon_part]
 impl BlockEntityPart for TransmitterPart {
@@ -3531,6 +3705,95 @@ fn remaining(host: &dyn Host, stack: &mod_api::ItemStack) -> Option<mod_api::Ite
 /// After the level's tick: run the queued moves. A block entity is out of the
 /// world during its own tick, so every machine reads its neighbours here, where
 /// they are all back in the world.
+/// The reading the machine at `pos` holds now, `None` where the block answers no comparator (a
+/// cable, the orb, a rod — or nothing at all).
+fn strength_at(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Option<i32> {
+    let block = block_at(&*host, level, pos)?;
+    let kind = Kind::of(&block)?;
+    let (stored, capacity) = match kind {
+        Kind::Furnator(tier) => (saved_energy(host, level, pos)?, tier.capacity),
+        Kind::Cell(tier) | Kind::Discharger(tier) => {
+            (saved_energy(host, level, pos)?, tier.capacity)
+        }
+        Kind::Hopper(tier) => (saved_energy(host, level, pos)?, tier.capacity),
+        Kind::Solar(tier) => (saved_energy(host, level, pos)?, tier.capacity),
+        Kind::Transmitter(tier) => (saved_energy(host, level, pos)?, tier.capacity),
+        // An ender block's buffer is the owner's channel, not its own compound.
+        Kind::EnderCell(_) | Kind::EnderGate(_) => {
+            let entity = host.block_entity(level, pos)?;
+            let saved = Tag::Compound(entity.data(&*host)?);
+            let key = channel_key(&saved);
+            let channel = read_channels(host).get(&key);
+            (channel.stored, channel.capacity)
+        }
+        Kind::Cable(_) | Kind::Orb | Kind::Rod(_) => return None,
+    };
+    comparator_of(kind, stored, capacity)
+}
+
+/// The FE a machine keeps in its own saved compound (the readout clamps it into the tier).
+fn saved_energy(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Option<i32> {
+    let entity = host.block_entity(level, pos)?;
+    let saved = Tag::Compound(entity.data(&*host)?);
+    Some(int(&saved, KEY_ENERGY))
+}
+
+/// Record what every machine moved this tick answers a comparator, and tell the comparators beside
+/// a machine whose reading changed to read it again — vanilla's `setChanged` →
+/// `Level.updateNeighbourForOutputSignal`, which a buffer changing without its state changing does
+/// not get on its own.
+fn publish_outputs(host: &mut dyn ServerHost, level: LevelRef, queued: &BTreeSet<[i32; 3]>) {
+    let Some(dimension) = level.dimension().id(&*host) else {
+        return;
+    };
+    let Ok(dimension) = LevelKey::parse(&dimension) else {
+        return;
+    };
+    let mut changed = Vec::new();
+    for &pos in queued {
+        let Some(strength) = strength_at(host, level, pos) else {
+            continue;
+        };
+        let is_new = outputs()
+            .lock()
+            .expect("the powah output lock is held for one record")
+            .record(dimension, pos, strength);
+        if is_new {
+            changed.push(pos);
+        }
+    }
+    for pos in changed {
+        notify_comparators(host, level, pos);
+    }
+}
+
+/// Record one machine's reading (a harness control's write) and tell its comparators when it moved.
+fn publish_strength(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3], strength: i32) {
+    let Some(dimension) = level.dimension().id(&*host) else {
+        return;
+    };
+    let Ok(dimension) = LevelKey::parse(&dimension) else {
+        return;
+    };
+    let changed = outputs()
+        .lock()
+        .expect("the powah output lock is held for one record")
+        .record(dimension, pos, strength);
+    if changed {
+        notify_comparators(host, level, pos);
+    }
+}
+
+/// `Level.updateNeighbourForOutputSignal`: the comparators beside `pos` read its answer again.
+fn notify_comparators(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) {
+    let Some(state) = level.block_state(&*host, pos) else {
+        return;
+    };
+    // The update's outcome is the game's business: a level that refuses it leaves the reading in
+    // place for the next change.
+    let _ = level.update_neighbors(&mut *host, pos, state, NeighbourUpdate::OutputSignal);
+}
+
 pub(crate) fn on_level_tick_post(
     host: &mut dyn ServerHost,
     level: LevelRef,
@@ -3539,7 +3802,7 @@ pub(crate) fn on_level_tick_post(
     // The cables already covered by a network this tick: every cable in a network
     // ticks, so without this a run of N cables would plan the same relay N times.
     let mut planned: BTreeSet<[i32; 3]> = BTreeSet::new();
-    for pos in queued {
+    for &pos in &queued {
         let Some(kind) = block_at(&*host, level, pos).as_deref().and_then(Kind::of) else {
             continue;
         };
@@ -3602,6 +3865,9 @@ pub(crate) fn on_level_tick_post(
             }
         }
     }
+    // After every move: what each machine answers a comparator now. The comparators beside a
+    // machine whose reading changed are told to read it again.
+    publish_outputs(host, level, &queued);
 }
 
 /// Upstream's `extractFromSides`: at most the transfer and what is stored, into
@@ -5594,5 +5860,142 @@ mod tests {
             line.ends_with("FE/t a side, redstone on, t=77)"),
             "a cell's readout names its gate: {line}"
         );
+    }
+
+    /// The `comparator <n>` a readout line prints, so a test can compare the hook's answer with
+    /// the number players already see.
+    fn printed_comparator(line: &str) -> Option<i32> {
+        let rest = line.split("comparator ").nth(1)?;
+        let number: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        number.parse().ok()
+    }
+
+    #[test]
+    fn only_the_machines_with_a_printed_comparator_answer_one() {
+        let answers = [
+            (Kind::Furnator(furnator_tier(0).unwrap()), 320, 20_000),
+            (Kind::Cell(cell_tier(0).unwrap()), 500_000, 1_000_000),
+            (
+                Kind::Discharger(discharger_tier(0).unwrap()),
+                500_000,
+                1_000_000,
+            ),
+            (
+                Kind::Hopper(crate::runtime::hopper_tier(0).unwrap()),
+                500_000,
+                1_000_000,
+            ),
+            (
+                Kind::Solar(crate::runtime::solar_tier(0).unwrap()),
+                10_000,
+                20_000,
+            ),
+            (
+                Kind::Transmitter(crate::runtime::transmitter_tier(0).unwrap()),
+                500_000,
+                1_000_000,
+            ),
+            (
+                Kind::EnderCell(ender_cell_tier(0).unwrap()),
+                500_000,
+                4_000_000,
+            ),
+            (
+                Kind::EnderGate(ender_gate_tier(0).unwrap()),
+                500_000,
+                4_000_000,
+            ),
+        ];
+        for (kind, stored, capacity) in answers {
+            assert!(has_comparator(kind), "{kind:?} prints a comparator field");
+            let reading = comparator_of(kind, stored, capacity)
+                .unwrap_or_else(|| panic!("{kind:?} answers a comparator"));
+            // The readout is the authority: the hook must print the number the player reads.
+            let line = match kind {
+                Kind::Furnator(_) => status_line(kind, [1, 2, 3], stored, 0, None, &[None], "", 1),
+                Kind::Hopper(tier) => {
+                    hopper_line([1, 2, 3], stored, tier, Some(Direction::North), "", 1)
+                }
+                Kind::Solar(tier) => solar_line(
+                    [1, 2, 3],
+                    stored,
+                    tier,
+                    Some(Sky {
+                        can_see_sky: true,
+                        has_skylight: true,
+                        darken: 0,
+                    }),
+                    &[None],
+                    "",
+                    1,
+                ),
+                Kind::Transmitter(tier) => {
+                    transmitter_line([1, 2, 3], stored, tier, CardReadout::Empty, "", 1)
+                }
+                Kind::EnderCell(_) | Kind::EnderGate(_) => ender_line(
+                    kind,
+                    [1, 2, 3],
+                    Channel { stored, capacity },
+                    0,
+                    None,
+                    &[None],
+                    "",
+                    1,
+                ),
+                _ => status_line(kind, [1, 2, 3], stored, 0, None, &[None], "", 1),
+            };
+            assert_eq!(
+                printed_comparator(&line),
+                Some(reading),
+                "the comparator at {kind:?} reads what its line prints: {line}"
+            );
+            // The fraction is upstream's `toComparatorPower` and the readout's own rounding.
+            assert_eq!(
+                reading,
+                crate::runtime::comparator_strength(stored, capacity)
+            );
+            assert_eq!(comparator_of(kind, capacity * 2, capacity), Some(15));
+            assert_eq!(comparator_of(kind, 0, capacity), Some(0));
+        }
+    }
+
+    #[test]
+    fn a_cable_the_orb_and_the_rods_answer_no_comparator() {
+        for kind in [
+            Kind::Cable(cable_of("powah:energy_cable_starter").unwrap()),
+            Kind::Orb,
+            Kind::Rod(rod_of("powah:energizing_rod_starter").unwrap()),
+        ] {
+            assert!(
+                !has_comparator(kind),
+                "{kind:?} answers none: no buffer, or no printed comparator"
+            );
+            assert_eq!(comparator_of(kind, 1_000, 20_000), None);
+        }
+    }
+
+    #[test]
+    fn a_comparators_reading_is_per_position_and_per_dimension() {
+        let mut outputs = Outputs::default();
+        assert_eq!(outputs.get(LevelKey::OVERWORLD, [1, 2, 3]), None);
+        assert!(
+            outputs.record(LevelKey::OVERWORLD, [1, 2, 3], 7),
+            "a first reading is a change"
+        );
+        assert_eq!(outputs.get(LevelKey::OVERWORLD, [1, 2, 3]), Some(7));
+        assert_eq!(
+            outputs.get(LevelKey::NETHER, [1, 2, 3]),
+            None,
+            "another dimension's machine at one position has its own reading"
+        );
+        assert_eq!(outputs.get(LevelKey::OVERWORLD, [1, 2, 4]), None);
+        assert!(
+            !outputs.record(LevelKey::OVERWORLD, [1, 2, 3], 7),
+            "an unchanged reading tells no comparator"
+        );
+        assert!(outputs.record(LevelKey::OVERWORLD, [1, 2, 3], 8));
+        assert_eq!(outputs.get(LevelKey::OVERWORLD, [1, 2, 3]), Some(8));
+        outputs.clear();
+        assert_eq!(outputs.get(LevelKey::OVERWORLD, [1, 2, 3]), None);
     }
 }

@@ -224,6 +224,20 @@
 #  - a foreign block and the energizing orb refuse a mode (upstream's orb screen has no button).
 # SELFTEST=redstone expects the shut gate to have charged the item (it must FAIL), proving the gate's
 # assertion can fail.
+#
+# Slice 14 (gap 7, "no comparator output") adds:
+#  - a starter cell at 500,000 of 1,000,000 (readout `comparator 7`) with a `minecraft:comparator`
+#    on its north face: the block is `powered=true` and the redstone wire in front of it carries the
+#    readout's own `comparator` field as its `power` (this pin keeps a comparator's output in the
+#    level, not a block entity, so `data get block … OutputSignal` has nothing to read); the reading
+#    follows the buffer to 15 at full and 3 at a quarter, which the hook announces
+#    (`Level.updateNeighbourForOutputSignal`);
+#  - a `minecraft:stone` in the same rig reads 0 and is not powered;
+#  - a cable (no buffer) reads nothing even with a full chest behind it — after the control showed
+#    the same rig reading that chest's own vanilla fullness;
+#  - a full energizing rod reads nothing, because its readout prints no comparator.
+# SELFTEST=comparator expects the cell's comparator to read something other than its readout
+# (it must FAIL), proving the equality and its notification can fail.
 set -euo pipefail
 export LC_ALL=C
 
@@ -2778,6 +2792,146 @@ for block in "15 100 22" "-1 100 48" "1 100 48" "5 100 49" "5 100 48" "7 100 48"
 done
 ctl wait 3
 
+echo "== slice 14: a comparator beside a machine reads the strength its readout prints =="
+# `AbstractEnergyBlock.getAnalogOutputSignal` is `Energy.toComparatorPower()` — the stored fraction
+# times 15, truncated — which is the number `/powah info` already prints. The hook gets a read-only
+# level and cannot reach a block entity, so the port records each machine's strength in its level
+# tick's drain (and on `/powah set`) and answers from there; a changed reading tells the comparators
+# beside the machine to read it again (`Level.updateNeighbourForOutputSignal`).
+#
+# At this pin a comparator has no block entity (`comparator_outputs` is the level's own map), so
+# `data get block … OutputSignal` cannot read it. Its output is measured where the game itself uses
+# it: a redstone wire in front of the comparator (its `facing` side is its input, the opposite side
+# its output) carries exactly the comparator's signal as its `power`.
+ctl command "fill -6 99 48 4 99 53 minecraft:stone" >/dev/null
+ctl wait 3
+# block_prop X Y Z NAME: one property of a block state. `ctl block` answers `block` (the name) and
+# `state` (`name[prop=value,...]`), not a property object, so the state string is parsed.
+block_prop() { # block_prop X Y Z NAME
+    ctl block "$1" "$2" "$3" | jq -r --arg s "$4" '
+        ((.state // "") | [scan("([a-z_]+)=([a-z0-9_]+)")] | map({key: .[0], value: .[1]}) | from_entries | .[$s]) // ""'
+}
+cmp_signal() { # cmp_signal X Y Z: the wire's power in front of a comparator at X,Y,Z (facing south)
+    block_prop "$1" "$2" "$(($3 - 1))" power
+}
+cmp_powered() { # cmp_powered X Y Z
+    block_prop "$1" "$2" "$3" powered
+}
+# comparator_rig X Y Z: a comparator on the machine at X,Y,Z (its north face, facing it) and the
+# wire that carries its reading. `nudge_comparator` wakes it with a neighbour change; its top face
+# is not an input (its sides are the two perpendicular to `facing`), so the nudge is inert.
+comparator_rig() { # comparator_rig X Y Z
+    ctl command "setblock $1 $2 $(($3 - 1)) minecraft:comparator[facing=south]" >/dev/null
+    ctl command "setblock $1 $2 $(($3 - 2)) minecraft:redstone_wire" >/dev/null
+    ctl wait 3
+    ctl command "setblock $1 $(($2 + 1)) $(($3 - 1)) minecraft:redstone_block" >/dev/null
+    ctl wait 3
+    ctl command "setblock $1 $(($2 + 1)) $(($3 - 1)) minecraft:air" >/dev/null
+    ctl wait 10
+    [ "$(ctl block "$1" "$2" "$(($3 - 1))" | jq -r '.name // .block // empty')" = "minecraft:comparator" ] ||
+        fail "the comparator did not place at $1,$2,$(($3 - 1))"
+    [ "$(ctl block "$1" "$2" "$(($3 - 2))" | jq -r '.name // .block // empty')" = "minecraft:redstone_wire" ] ||
+        fail "the wire did not stay in front of the comparator at $1,$2,$(($3 - 2))"
+}
+# A cell at 500,000 of 1,000,000: the readout prints `comparator 7` (floor of 7.5), and the
+# comparator on its north face must read the same number.
+place -4 100 52 powah:energy_cell_starter
+set_energy -4 100 52 500000
+cell_line=$(info -4 100 52)
+cell_printed=$(sed -nE 's/.*comparator ([0-9]+),.*/\1/p' <<<"$cell_line")
+echo "  readout: $cell_line"
+[ "$cell_printed" = 7 ] ||
+    fail "500,000 of 1,000,000 is floor(7.5) = comparator 7, got '$cell_line'"
+comparator_rig -4 100 52
+cell_signal=$(cmp_signal -4 100 51)
+cell_powered=$(cmp_powered -4 100 51)
+echo "  comparator(-4,100,51) = powered $cell_powered, the wire in front reads $cell_signal, the readout says $cell_printed"
+[ "$cell_powered" = true ] ||
+    fail "a comparator beside a half-full cell must be powered, got '$cell_powered'"
+[ "$cell_signal" = "$cell_printed" ] ||
+    fail "the comparator reads $cell_signal but the readout's own comparator is $cell_printed: $cell_line"
+if [ "$SELFTEST" = comparator ]; then
+    echo "  SELFTEST: expecting the comparator to read something other than $cell_printed (this must fail)"
+    [ "$cell_signal" != "$cell_printed" ] ||
+        fail "SELFTEST flipped: the comparator read $cell_signal, the readout's own $cell_printed, as it should"
+fi
+
+echo "== slice 14: the reading follows the buffer (15 at full, 3 at a quarter) =="
+# A buffer that changes without the block's state changing is the case the hook has to announce.
+set_energy -4 100 52 1000000
+ctl wait 10
+full_line=$(info -4 100 52)
+full_printed=$(sed -nE 's/.*comparator ([0-9]+),.*/\1/p' <<<"$full_line")
+full_signal=$(cmp_signal -4 100 51)
+echo "  full: $full_line -> comparator $full_signal"
+[ "$full_printed" = 15 ] && [ "$full_signal" = 15 ] ||
+    fail "a full cell must read comparator 15 both ways, got readout $full_printed and comparator $full_signal"
+set_energy -4 100 52 250000
+ctl wait 10
+quarter_line=$(info -4 100 52)
+quarter_printed=$(sed -nE 's/.*comparator ([0-9]+),.*/\1/p' <<<"$quarter_line")
+quarter_signal=$(cmp_signal -4 100 51)
+echo "  quarter: $quarter_line -> comparator $quarter_signal"
+[ "$quarter_printed" = 3 ] && [ "$quarter_signal" = 3 ] ||
+    fail "a quarter-full cell must read comparator 3 both ways, got readout $quarter_printed and comparator $quarter_signal"
+
+echo "== slice 14: a stone in the same rig reads nothing =="
+place -2 100 52 minecraft:stone
+comparator_rig -2 100 52
+stone_signal=$(cmp_signal -2 100 51)
+stone_powered=$(cmp_powered -2 100 51)
+echo "  stone: wire $stone_signal, powered $stone_powered"
+[ "$stone_signal" = 0 ] || fail "a stone must give a comparator 0, got $stone_signal"
+[ "$stone_powered" = false ] || fail "a comparator beside a stone must not be powered, got '$stone_powered'"
+
+echo "== slice 14: a cable answers nothing, even with a full container behind it =="
+# The control first: the same rig with a chest where the comparator reads it — vanilla's own
+# container fullness — so the cable's zero below is its own answer, not a dead rig.
+ctl command "setblock 0 100 52 minecraft:chest" >/dev/null
+ctl command "item replace block 0 100 52 container.0 with minecraft:diamond 64" >/dev/null
+comparator_rig 0 100 52
+chest_signal=$(cmp_signal 0 100 51)
+chest_powered=$(cmp_powered 0 100 51)
+echo "  chest: wire $chest_signal, powered $chest_powered"
+[ "$chest_signal" -gt 0 ] ||
+    fail "the rig does not read a chest (wire $chest_signal), so the cable's zero would prove nothing"
+[ "$chest_powered" = true ] || fail "a comparator beside a chest with an item must be powered"
+# The cable where the comparator reads it, with the same full chest behind it.
+ctl command "setblock 0 100 52 powah:energy_cable_starter" >/dev/null
+ctl command "setblock 0 100 53 minecraft:chest" >/dev/null
+ctl command "item replace block 0 100 53 container.0 with minecraft:diamond 64" >/dev/null
+ctl wait 3
+ctl command "setblock 0 101 51 minecraft:redstone_block" >/dev/null
+ctl wait 3
+ctl command "setblock 0 101 51 minecraft:air" >/dev/null
+ctl wait 10
+cable_signal=$(cmp_signal 0 100 51)
+cable_powered=$(cmp_powered 0 100 51)
+echo "  cable: wire $cable_signal, powered $cable_powered (the full chest sits behind it at 0,100,53)"
+[ "$cable_signal" = 0 ] || fail "a cable stores nothing and must answer no comparator signal, got $cable_signal"
+[ "$cable_powered" = false ] || fail "a comparator beside a cable must not be powered, got '$cable_powered'"
+
+echo "== slice 14: a full rod answers nothing (its readout prints no comparator) =="
+place 2 100 52 powah:energizing_rod_starter
+set_energy 2 100 52 10000
+rod_line=$(info 2 100 52)
+case "$rod_line" in
+    *comparator*) fail "a rod's readout prints no comparator, got '$rod_line'" ;;
+esac
+comparator_rig 2 100 52
+rod_signal=$(cmp_signal 2 100 51)
+echo "  full rod: $rod_line -> wire $rod_signal"
+[ "$rod_signal" = 0 ] ||
+    fail "a rod may hold FE but prints no comparator, so it answers none; the comparator reads $rod_signal"
+
+# The readings are data, not blocks: nothing this slice added is left standing.
+for block in "-4 100 50" "-4 100 51" "-4 100 52" "-2 100 50" "-2 100 51" "-2 100 52" "0 100 50" "0 100 51" "0 100 52" "0 100 53" "2 100 50" "2 100 51" "2 100 52"; do
+    set -- $block
+    ctl command "setblock $1 $2 $3 minecraft:air" >/dev/null
+done
+ctl command "fill -6 99 48 4 99 53 minecraft:air" >/dev/null
+ctl wait 3
+
 echo "== slice 12: a card with no bound player charges nothing, and spends nothing =="
 # The control: the same transmitter, the same 10,000, the same cell item in the operator's
 # inventory — with a **blank** card in slot 0 (`canInsert` refuses one upstream; a container
@@ -3044,4 +3198,4 @@ ctl command "gamemode creative @s" >/dev/null
 ctl command "clear @s" >/dev/null
 ctl wait 3
 
-echo "PASS: a fuelled furnator made FE, the cable carried it into the cell, an unfuelled furnator made nothing, a cell without a cable stayed empty, a full cell stayed full, a charged cell drained through a cable into an empty one, a three-cable network carried a charge across its run with the two cells' sum unchanged and a cell off the network empty, the six material items exist, every material and machine recipe crafted its declared output and consumed its ingredients, each machine dropped itself, every energy cell tier clamped 2,000,000,000 FE at its own capacity and carried its own transfer, two adjacent cells swapped within their own transfer cap without creating FE, every cell tier dropped itself, a starter rod filled the orb to exactly its recipe's 10,000 FE and stood at 0, an orb with no rod and an orb with no recipe produced nothing while its rod kept its charge, a nitro rod made a blazing crystal at exactly 120,000 FE and kept the other 80,000, the blaze-rod blazing recipe, the niotic, spirited and nitro crystals all energised, every new block and item exists, every carried recipe including the five previously blocked cells crafts its declared output and consumes its ingredients, every furnator tier clamped 2,000,000,000 FE at its own generation capacity, a nitro furnator made exactly 40,000 FE in one tick of a coal and a starter furnator kept energy + carbon at 48,000 while filling slowly, every cable tier read back its own rate, a basic network refused to relay through a starter cable and delivered once that cable was basic, every new furnator, cable and discharger tier dropped itself, a starter furnator charged the item in its charge slot at exactly min(transfer, stored, room) with the FE coming out of its own buffer and left an item with no buffer alone, a cell charged two slots out of one budget, a 5,000 FE furnator and a 4,000 FE cell broken in survival carried their buffers on their own items and gave them back on placement while their spilled stacks did not, an item doctored to 2,000,000,000 FE clamped to its tier's 20,000 on placement and a fresh item placed an empty machine, a starter hopper spent exactly 500 FE a tick on the cell item in the chest it faced and the two halves of the 5,000 it held added up, a hopper facing away from the chest charged nothing and a stone in the chest took nothing, every hopper tier dropped itself, a 7,000 FE hopper carried its buffer back on its own item, a starter solar panel under an open noon sky generated exactly 20 FE a tick measured against the game clock and filled its last 20 of room without overflowing, a stone above it and midnight each left it at exactly 5,000 for 60 ticks, a cell under a panel charged while a cell beside it stayed empty and the panel took no fill, a nitro panel clamped 2,000,000,000 FE at 40,000,000 and named its 2,000 FE/t, every solar panel tier dropped itself, the photoelectric pane and all seven panels crafted, two ender cells on one channel held and showed the same 100,000 FE while a cell on another channel read 0, a cell moved to the fresh channel read 0 while its peer kept exactly 100,000 and moving it back found the channel's FE again, an ender cell's extender item gave its channel 4,000,000 FE of capacity and its charge slot took 1,000 a tick out of the channel, the channel gave its tier's 4,000 a tick and lost exactly what the sink gained, an ender gate fed only the hopper on its facing side at the cable row's 500 a tick, the nitro ender cell and gate named 12 channels and their 2,000,000/1,000,000 FE a tick, both ender tags matched in game, every ender cell and gate tier dropped itself, a starter player transmitter read its slot empty with no card, a card bound to the operator by its own use named them in the transmitter's readout, the transmitter spent exactly 500 FE a tick out of its 10,000 on the cell item in that player's inventory and the item gained whole 500 FE steps with the two halves adding up, a blank card charged nothing and spent nothing, a nitro transmitter clamped 2,000,000,000 FE and named its 1,000,000 FE/t charging rate, powah:player_transmitters matched in game, a broken 7,000 FE transmitter carried its buffer back on its own item, every transmitter tier dropped itself, an aerial pearl used on a zombie gave the player aerial pearl and killed it, the redstone mode saved and read back through /powah redstone with the readout naming it only when it was not the default, a shut gate holding the transmitter, the furnator, the cell, the cable, the discharger, the hopper, the solar panel and the ender cell at their own work and every one of them running again when the gate opened, and every guessed id is unknown without the package"
+echo "PASS: a fuelled furnator made FE, the cable carried it into the cell, an unfuelled furnator made nothing, a cell without a cable stayed empty, a full cell stayed full, a charged cell drained through a cable into an empty one, a three-cable network carried a charge across its run with the two cells' sum unchanged and a cell off the network empty, the six material items exist, every material and machine recipe crafted its declared output and consumed its ingredients, each machine dropped itself, every energy cell tier clamped 2,000,000,000 FE at its own capacity and carried its own transfer, two adjacent cells swapped within their own transfer cap without creating FE, every cell tier dropped itself, a starter rod filled the orb to exactly its recipe's 10,000 FE and stood at 0, an orb with no rod and an orb with no recipe produced nothing while its rod kept its charge, a nitro rod made a blazing crystal at exactly 120,000 FE and kept the other 80,000, the blaze-rod blazing recipe, the niotic, spirited and nitro crystals all energised, every new block and item exists, every carried recipe including the five previously blocked cells crafts its declared output and consumes its ingredients, every furnator tier clamped 2,000,000,000 FE at its own generation capacity, a nitro furnator made exactly 40,000 FE in one tick of a coal and a starter furnator kept energy + carbon at 48,000 while filling slowly, every cable tier read back its own rate, a basic network refused to relay through a starter cable and delivered once that cable was basic, every new furnator, cable and discharger tier dropped itself, a starter furnator charged the item in its charge slot at exactly min(transfer, stored, room) with the FE coming out of its own buffer and left an item with no buffer alone, a cell charged two slots out of one budget, a 5,000 FE furnator and a 4,000 FE cell broken in survival carried their buffers on their own items and gave them back on placement while their spilled stacks did not, an item doctored to 2,000,000,000 FE clamped to its tier's 20,000 on placement and a fresh item placed an empty machine, a starter hopper spent exactly 500 FE a tick on the cell item in the chest it faced and the two halves of the 5,000 it held added up, a hopper facing away from the chest charged nothing and a stone in the chest took nothing, every hopper tier dropped itself, a 7,000 FE hopper carried its buffer back on its own item, a starter solar panel under an open noon sky generated exactly 20 FE a tick measured against the game clock and filled its last 20 of room without overflowing, a stone above it and midnight each left it at exactly 5,000 for 60 ticks, a cell under a panel charged while a cell beside it stayed empty and the panel took no fill, a nitro panel clamped 2,000,000,000 FE at 40,000,000 and named its 2,000 FE/t, every solar panel tier dropped itself, the photoelectric pane and all seven panels crafted, two ender cells on one channel held and showed the same 100,000 FE while a cell on another channel read 0, a cell moved to the fresh channel read 0 while its peer kept exactly 100,000 and moving it back found the channel's FE again, an ender cell's extender item gave its channel 4,000,000 FE of capacity and its charge slot took 1,000 a tick out of the channel, the channel gave its tier's 4,000 a tick and lost exactly what the sink gained, an ender gate fed only the hopper on its facing side at the cable row's 500 a tick, the nitro ender cell and gate named 12 channels and their 2,000,000/1,000,000 FE a tick, both ender tags matched in game, every ender cell and gate tier dropped itself, a starter player transmitter read its slot empty with no card, a card bound to the operator by its own use named them in the transmitter's readout, the transmitter spent exactly 500 FE a tick out of its 10,000 on the cell item in that player's inventory and the item gained whole 500 FE steps with the two halves adding up, a blank card charged nothing and spent nothing, a nitro transmitter clamped 2,000,000,000 FE and named its 1,000,000 FE/t charging rate, powah:player_transmitters matched in game, a broken 7,000 FE transmitter carried its buffer back on its own item, every transmitter tier dropped itself, an aerial pearl used on a zombie gave the player aerial pearl and killed it, the redstone mode saved and read back through /powah redstone with the readout naming it only when it was not the default, a shut gate holding the transmitter, the furnator, the cell, the cable, the discharger, the hopper, the solar panel and the ender cell at their own work and every one of them running again when the gate opened, a comparator beside a 500,000 FE cell read the strength its readout printed, the reading tracked the buffer to 15 at full and 3 at a quarter, a stone read nothing, a cable answered nothing even with a full chest behind it, a full rod answered nothing because its readout prints no comparator, and every guessed id is unknown without the package"

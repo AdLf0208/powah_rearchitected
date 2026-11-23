@@ -1,4 +1,26 @@
-# Validation — Powah slices 1 to 13
+# Validation — Powah slices 1 to 14
+
+> **0.2.14 (slice 14, the comparator reading)** is recorded in
+> [`notes.md`](notes.md#slice-14--the-comparator-reading-analog_output-2026-11-23): the slice and the
+> gap line it comes from (slice 1's gap 7, "No comparator output", and the `Behaviour` table's
+> comparator row), the upstream facts read at tag `v6.2.10` (`AbstractEnergyBlock.hasAnalogOutputSignal`
+> / `getAnalogOutputSignal` over `Energy.toComparatorPower()` = `(int)(stored/capacity*15)`, which is the
+> number the readout already printed; the orb's own stack-count rule excluded by the brief), the red
+> proof (three failing tests, **96 passed / 3 failed**, quoted verbatim, plus two in-game runs before
+> the green one: this pin's comparator has **no block entity**, so `data get block … OutputSignal` has
+> nothing to read, and `ctl block` has no `properties` object), the ladder at pin `0a875da` (**99
+> tests**, clippy 0 warnings, `fmt --check` clean, two `cmp`-identical builds of **538,155 B**, `check`,
+> `fits` against the pin **and** `0b14f8a`, gate **1/1** with `package matches the tree`, 860 entries,
+> no packed `Cargo.lock`, `check-recipe-types` ok) and the in-game legs (main `PASS`+`EXIT:0` on the
+> delivered archive; the control game red at the first powah block; `SELFTEST=1` and
+> `SELFTEST=comparator` at `EXIT:1`; the log gate 57/57 `--strict`). Package: `powah.hmod`, 538,155 B,
+> sha256 `c6f1e813acea2b4891f40eebfc1e49e5ee889449715458206939234fb53f0ac2`. Launcher build:
+> `Compiling powah (1 of 1)`, `native-0a875da-2417ecf27009`, instance `powah-e2e`. What it proves: a
+> comparator on a starter cell's north face is `powered=true` and the wire in front of it reads the
+> readout's own `comparator` field — **7** at 500,000 of 1,000,000, **15** at full and **3** at a
+> quarter, each after `/powah set` (so the change is announced); a stone in the same rig reads 0 and is
+> not powered; a cable reads 0 with a **full chest** behind it, after the same rig read that chest as
+> 1; and a **full rod** reads 0, because its readout prints no comparator.
 
 > **0.2.13 (slice 13, the redstone mode)** is recorded in
 > [`notes.md`](notes.md#slice-13--the-redstone-mode-abstracttileentitycheckredstone-2026-11-23): the

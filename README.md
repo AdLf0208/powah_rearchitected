@@ -1,4 +1,4 @@
-# Powah for Horizon — slices 1–12
+# Powah for Horizon — slices 1–14
 
 A clean-room Rust rewrite of **Powah! (Rearchitected) 6.2.10** (`Technici4n/Powah`,
 **LGPL-3.0-only**) for Horizon 26.3, as one flat SDK package (`api = "0.2"`): the
@@ -106,6 +106,14 @@ panel's generation, a discharger's drain, a hopper's charge, a transmitter's cha
 an ender block also stops answering energy on its faces, as upstream's `canExtractEnergy` and
 `canReceiveEnergy` do. `/powah redstone <ignore|on|off> <pos>` is the GUI button's replacement.
 
+Slice 14 is the **comparator reading**: a vanilla comparator beside a buffered machine now reads the
+fraction of its buffer (upstream's `Energy.toComparatorPower()`, the number `/powah info` prints), not
+container fullness, and the reading follows the buffer without the block's state changing — a changed
+strength tells the comparators beside the machine to read it again. It is declared for the machines
+whose readout prints a comparator (every furnator, cell, discharger, hopper, solar panel, ender cell,
+ender gate and player transmitter) only: a cable stores nothing, and the orb and the rods print no
+comparator, so they answer none rather than a wrong number.
+
 Every machine declares a real `Capabilities.Energy.BLOCK` buffer (the amount is the int
 `energy` in the block entity's saved compound), so other machines can fill and drain a
 furnator, a cell, a discharger, a hopper, a solar panel or a transmitter; an ender cell or
@@ -124,7 +132,7 @@ moves FE from the fuller store to the emptier one (a network never takes back wh
 
 ```text
 powah.hmod            the delivered package (horizon-mod.toml + Cargo.toml + src/ + assets/ + data/)
-horizon-mod.toml      the only manifest and identity: id, version 0.2.13, api 0.2, [native] pins
+horizon-mod.toml      the only manifest and identity: id, version 0.2.14, api 0.2, [native] pins
 Cargo.toml            one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 src/lib.rs            the one `#[mod_api::horizon_mod] impl Hooks`
 src/powah.rs          the glue: the block entity Parts, the queue, the tier tables, the buffers, the cable network, the command

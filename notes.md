@@ -64,7 +64,7 @@ Transmitter, upgrades, GUIs, side config, worldgen) is a recorded gap below.
 | **Cable** | no storage (capacity 0); `receiveEnergy` forwards an insertion through the same-tier network, round-robin, skipping the side it came from | no buffer at all; on its tick it moves FE straight from each adjacent giver into each adjacent taker, up to 500 FE/t, with the round-robin start rotating by the game time (`runtime::cable_moves`) |
 | cable sides | a side joins a neighbour that is not a cable and has FE | the same rule via `native_energy`; the six visual sides come from the content tag |
 | redstone | `checkRedstone()` — default mode `IGNORE`, so always on | slice 13: the three modes, saved as `redstone_mode` and read once per tick; `/powah redstone` replaces the button |
-| comparator | `hasAnalogOutputSignal` from the FE fraction | computed and printed by the command; no `has_analog_output` hook declared — gap |
+| comparator | `hasAnalogOutputSignal` from the FE fraction | computed and printed by the command, and answered through `has_analog_output`/`analog_output` since slice 14; the orb's stack-count rule and the rods are still `not carried` |
 | keep energy | `keepEnergy()`: the block item carries the buffer | a broken machine loses its FE — gap |
 
 ## Hooks (0.1.0, kept as history)
@@ -261,7 +261,11 @@ round trip in this environment is ~2 s, far longer than a tick).
    a `ModEnergyBuffer` declares six face booleans, not six per-side transfer types.
 7. **No comparator output.** `comparator_strength` is computed and printed, but
    no `has_analog_output` hook is declared, so a vanilla comparator beside a
-   machine still reads container fullness.
+   machine still reads container fullness. — **closed by slice 14**
+   ([`## Slice 14 — the comparator reading`](#slice-14--the-comparator-reading-analog_output-2026-11-23)):
+   every machine whose readout prints a comparator answers `has_analog_output`/`analog_output`
+   with that number; a cable, the orb and the rods answer none (recorded in that slice's
+   deviations).
 8. **`lit`/`burning` is not a block state** (upstream's `burning` is a client
    sync flag for particles and sound), so nothing is drawn differently while
    burning, and no particles/sound play.
@@ -3575,5 +3579,195 @@ shared ender channel in the leg), not the mod's.
 
 Version: **0.2.12 → 0.2.13** (one patch). The published `[[versions]]` record keeps 0.2.12 and
 gains 0.2.13 at publish time — this port does not touch the registry entry.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+
+## Slice 14 — the comparator reading (`analog_output`, 2026-11-23)
+
+### The slice, quoted from this port's own gaps
+
+`## Deviations and gaps (slice 1)`, item 7 — unchanged through thirteen slices:
+
+> **7. No comparator output.** `comparator_strength` is computed and printed, but
+> no `has_analog_output` hook is declared, so a vanilla comparator beside a
+> machine still reads container fullness.
+
+and the `## Behaviour` table's row:
+
+> | comparator | `hasAnalogOutputSignal` from the FE fraction | computed and printed by the command; no
+> `has_analog_output` hook declared — gap |
+
+The brief for this slice fixes the shape: declare it only for the blocks that have a buffer **and**
+a `comparator_strength` today, and answer no signal for the rest.
+
+### What the artefact says (tag `v6.2.10`, commit `a5a8f25`)
+
+- `lib/block/AbstractEnergyBlock.hasAnalogOutputSignal` is `true` for every machine that extends it,
+  and `getAnalogOutputSignal` returns `AbstractEnergyStorage.getEnergy().toComparatorPower()` —
+  `lib/logistics/energy/Energy.java:227-233`, `(int)(stored / capacity * 15)` with `subSized()` 0 at
+  capacity 0. That is exactly `runtime::comparator_strength`, the number the readout prints.
+- The energizing orb overrides both with `EnergizingOrbBlock`'s non-empty stack count (a different
+  rule, not this slice), and a cable and a rod inherit `AbstractEnergyBlock` — the cable's storage is
+  0 (so 0), the rod computes its own fraction.
+
+### What it ships
+
+| File | Change |
+|---|---|
+| `src/powah.rs` | `has_comparator` and `comparator_of` (the set and the number), `Outputs` (record/get/clear), the `OUTPUTS` cache, `strength_at`/`saved_energy`, `publish_outputs` at the level tick's end, `publish_strength` on `/powah set`, `notify_comparators`, the two hooks on the six machine Parts; **3 tests** |
+| `src/lib.rs` | the comparator flag on `IdlePart` (a cell and a discharger answer, a rod and a cable do not); `clear_outputs` on the world lifecycle |
+| `tools/e2e.sh` | the slice-14 phase and `SELFTEST=comparator` |
+| `horizon-mod.toml`, `Cargo.toml`, `README.md` | version 0.2.14 and the slice's paragraph |
+
+No content change: the reading is data and one rule, not blocks or items.
+
+### The rule in the port
+
+`has_comparator(kind)` is exactly the machines whose readout prints a `comparator` field — every
+furnator, cell, discharger, hopper, solar panel, transmitter, ender cell and ender gate.
+`comparator_of(kind, stored, capacity)` returns `comparator_strength(clamp_energy(stored,
+capacity), capacity)`, i.e. the line's own number, or `None` for a cable, the orb and the rods.
+
+The comparator hooks (`BlockPart::has_analog_output`/`analog_output`, API 64) receive only a
+read-only `LevelHost`, which cannot reach a block entity (`LevelHost::block_entity_data` needs a
+`BlockEntityRef`, and only `Host::block_entity`/`block_entity_identity` make one). So the value is
+recorded, not read live: after the level tick's move phase, every queued machine's strength is
+written into `OUTPUTS`, keyed by the level's dimension key and the position; `/powah set` records its
+value at once. A **changed** reading calls `LevelRef::update_neighbors(host, pos, state,
+NeighbourUpdate::OutputSignal)` (`Level.updateNeighbourForOutputSignal`), which is what a buffer
+changing without its block state changing needs — vanilla's `setChanged` path. `analog_output`
+answers `OUTPUTS[dimension][pos]`, 0 where nothing recorded one. The cache is cleared when a world
+opens or closes.
+
+### The red proof
+
+**The rules, before either existed** (`cargo test`, **96 passed / 3 failed**;
+`evidence/powah/slice14-test-red.log`):
+
+```
+---- powah::tests::only_the_machines_with_a_printed_comparator_answer_one stdout ----
+thread '...' panicked at src/powah.rs:663:5:
+not yet implemented: slice 14: whether a machine answers a comparator
+
+---- powah::tests::a_cable_the_orb_and_the_rods_answer_no_comparator stdout ----
+thread '...' panicked at src/powah.rs:663:5:
+not yet implemented: slice 14: whether a machine answers a comparator
+
+---- powah::tests::a_comparators_reading_is_per_position_and_per_dimension stdout ----
+thread '...' panicked at src/powah.rs:2174:9:
+not yet implemented: slice 14: read a machine's comparator reading
+
+test result: FAILED. 96 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+```
+
+**In game, two runs before the green one:**
+
+| Run | Verbatim |
+|---|---|
+| first | `FAIL: data get block -4 100 51 OutputSignal answered '{"chat":["The target block is not a block entity"],"ok":true}'` — at this pin a comparator has **no block entity**: its output lives in the level's `comparator_outputs` map, so the brief's `data get block … OutputSignal` has nothing to read. Replaced by the game's own path: a redstone wire in front of the comparator (its `facing` side is its input, the opposite side its output) carries exactly its signal as `power`. |
+| second | `FAIL: a comparator beside a half-full cell must be powered, got ''` — `ctl block` answers `block` and `state` (`name[prop=value,…]`), not a `properties` object (the pneumaticcraft harness's jq already knew); the helper now parses the state string. A one-minute probe (`probe-slice14.log`) then showed `powered=true` and `wire … power=7` before a 15-minute leg depended on it. |
+
+### Green
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+
+| Check | Result |
+|---|---|
+| `cargo test --offline` | **99 passed, 0 failed** (`sdk-test.log`, regenerated for 0.2.14) |
+| `cargo clippy --all-targets --offline -- -D warnings` | 0 warnings, exit 0 (`slice14-clippy.log`) |
+| `cargo fmt --check` | clean, exit 0 (`slice14-fmt.log`) |
+| two builds | `BUILD1_EXIT:0`, `BUILD2_EXIT:0`, **`cmp`-identical** — **538,155 B**, sha256 `c6f1e813acea2b4891f40eebfc1e49e5ee889449715458206939234fb53f0ac2`, 860 entries, `version = "0.2.14"`, `LOCKLINE:0`, `WORKSPACE:0` (`slice14-build-twice.log`) |
+| `cargo horizon-mod check powah.hmod` | `powah 0.2.14 (native-mod, format native-1/0a875da…/e59da909…, for 26.3)` · `538155 bytes, SHA-256 c6f1e813…`, `CHECK_EXIT:0` |
+| `cargo horizon-mod fits powah.hmod --build 0a875da` | `Powah:` / `0a875da  made for`, `FITS_PIN_EXIT:0` |
+| `cargo horizon-mod fits powah.hmod --build 0b14f8a` | `Powah:` / `0b14f8a  fits`, `FITS_OTHER_EXIT:0` |
+| `python3 ports/tools/verify-sdk-package.py powah` | **1/1**, `package matches the tree`, `no packed Cargo.lock  860 entries`, `SDK-only dependencies (R9)`, `tests 99 passed`, `skills gate PASS` (`slice14-verify.log`) |
+| `python3 ports/tools/check-recipe-types.py powah` | `powah: ok`, exit 0 (no recipe changed) |
+| launcher build | `Compiling powah (1 of 1)`, tag `native-0a875da-2417ecf27009`, instance `powah-e2e` (`launcher-build-0.2.14.log`) |
+| in-game main leg | **`PASS` + `EXIT:0`** on the delivered archive (`package: powah.hmod (538155 B, sha256 c6f1e813…)`) |
+| in-game control | the whole leg on the same Nightly **without** the package: `FAIL: expected powah:furnator_starter at 0,100,0, got 'minecraft:air'` + `EXIT:1` (`e2e-control-0.2.14.log`); the main log's own control phase shows every powah id unknown there |
+| `SELFTEST=1` | `EXIT:1` — `FAIL: SELFTEST flipped: the unfuelled furnator made no FE, as it should` (`e2e-selftest-0.2.14.log`) |
+| `SELFTEST=comparator` | `EXIT:1` — `FAIL: SELFTEST flipped: the comparator read 7, the readout's own 7, as it should` (`e2e-selftest-comparator-0.2.14.log`) |
+| `check-e2e-logs.py powah-e2e --strict` | `logs=57  ok=57  missing-exit=0  bad-exit=0`, exit 0 |
+
+### The in-game transcript (quoted from `e2e-launcher-0.2.14.log`)
+
+The rig: a starter cell at **-4,100,52** set to 500,000, a `minecraft:comparator[facing=south]` at
+**-4,100,51** (a comparator's `facing` side is its input, so it reads the cell) and a
+`minecraft:redstone_wire` at **-4,100,50**, the comparator's output side.
+
+```
+== slice 14: a comparator beside a machine reads the strength its readout prints ==
+  block(-4,100,52) = powah:energy_cell_starter
+  set(-4,100,52) = Energy Cell at -4,100,52: 500000/1000000 FE (comparator 7, charge empty, empty, 1000 FE/t a side, t=5847)
+  readout: Energy Cell at -4,100,52: 500000/1000000 FE (comparator 7, charge empty, empty, 1000 FE/t a side, t=5854)
+  comparator(-4,100,51) = powered true, the wire in front reads 7, the readout says 7
+== slice 14: the reading follows the buffer (15 at full, 3 at a quarter) ==
+  full: Energy Cell at -4,100,52: 1000000/1000000 FE (comparator 15, …) -> comparator 15
+  quarter: Energy Cell at -4,100,52: 250000/1000000 FE (comparator 3, …) -> comparator 3
+== slice 14: a stone in the same rig reads nothing ==
+  stone: wire 0, powered false
+== slice 14: a cable answers nothing, even with a full container behind it ==
+  chest: wire 1, powered true
+  cable: wire 0, powered false (the full chest sits behind it at 0,100,53)
+== slice 14: a full rod answers nothing (its readout prints no comparator) ==
+  full rod: Energizing Rod at 2,100,52: 10000/10000 FE (100 FE/t a side, no orb, t=6032) -> wire 0
+```
+
+The 500,000 case prints and reads **7**, not the brief's parenthetical 8: upstream's
+`toComparatorPower()` is `(int)(7.5)`, truncating, and the readout has always printed 7. The
+assertion is the equality with the readout, which is what the brief calls for; the number itself is
+the artefact's.
+
+### Coverage (parity rule, the family this slice adds)
+
+| Family (from the jar) | Status |
+|---|---|
+| the reading (`Energy.toComparatorPower`, all 8 machine kinds) | **tested** — the unit test pins every kind's reading against its own printed line at one value, at full, and at twice capacity; in game 7, 15 and 3 on a cell |
+| `has_analog_output` (the declaration) | **tested** — a comparator beside a cell is `powered=true`; beside a stone it is not |
+| `analog_output` (the number and its updates) | **tested** — the wire in front reads 7, then 15 and 3 after `/powah set` (the notification path) |
+| a block that answers no signal | **tested** — a cable reads 0 with a full chest behind it after the same rig read that chest as 1; a full rod reads 0 |
+| the orb's own comparator (non-empty stack count) | `not ported` — a different rule from the FE fraction, and its readout prints no comparator (this slice's brief excludes it) |
+| a rod's fraction, a cable's 0 | `not carried` — upstream declares both through `AbstractEnergyBlock`; the brief limits the hook to the blocks whose readout prints a comparator, so both answer none (deviation 1) |
+
+### Deviations and upstream defects this slice records
+
+1. **Only the printed-comparator machines answer one.** Upstream's `AbstractEnergyBlock` also answers
+   for a cable (0, no storage) and a rod (its own fraction), and the orb answers its stack count. The
+   brief restricts the hook to the blocks whose `/powah info` line prints a comparator, so a
+   comparator beside a full rod reads 0 here where upstream would read 15, and the orb's stack count
+   is not carried. Recorded rather than faked; the orb's and rods' readings are the family's next
+   slice if it is asked for.
+2. **The reading is the end of the last tick, not a mid-tick live read.** The hook's level is
+   read-only, so the number is recorded at the level tick's end (and on `/powah set`) and announced
+   when it changes. A comparator therefore reads the buffer as of the machine's last completed move
+   phase — the same value the machine's own readout shows, one tick's movement behind a foreign mover
+   that inserted FE earlier in the same tick.
+3. **The brief's `data get block … OutputSignal` is not available at this pin.** A comparator has no
+   block entity (its output is `Level.ticks.comparator_outputs`), so the in-game assertion reads the
+   game's own consumer: the redstone wire in front of it carries exactly its signal as `power`. The
+   comparator's `powered` property is asserted as the brief asks.
+4. **The brief's "(8)" is not what the artefact computes.** `comparator_strength(500000,
+   1000000)` — and upstream's `(int)(subSized()*15)` — is 7, the number the readout prints; the
+   assertion is equality with that field.
+
+**Upstream defects fixed: none.** Neither in-game failure was the mod's: the pin has no comparator
+block entity, and `ctl block` has no `properties` object.
+
+### Harness findings this slice measured (for the next port)
+
+1. **`ctl block` answers `block` (a name) and `state` (`name[prop=value,…]`), not a `properties`
+   object.** Parse `.state`; a `.properties.powered` read answers `null`/empty and looks like a dead
+   block.
+2. **`data get block … <key>` needs a block entity.** At this pin a comparator has none, so a
+   comparator's output must be measured at its consumer (a redstone wire's `power`); the same holds
+   for any vanilla block whose data lives in a level map.
+3. **A comparator's `facing` names its input side, not its output side** (`diode_input_signal`: target
+   = pos + facing); its output goes the opposite way. A rig placed "on the north face" must
+   `facing=south` to read the machine, with the wire to the north.
+4. **Redstone dust needs a floor.** A wire `setblock`-ed above air pops off on the next update, so the
+   phase lays a stone platform under the rig first (the arena's own floor stops at z=24).
+
+Version: **0.2.13 → 0.2.14** (one patch). The published `[[versions]]` record keeps 0.2.13 and
+gains 0.2.14 at publish time — this port does not touch the registry entry.
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices

@@ -50,9 +50,10 @@ fn declare_idle(
     queue: &Arc<Mutex<Queue>>,
     name: &str,
     rules: Option<powah::IdleRules>,
+    comparator: bool,
 ) {
     let kind = powah::declare(registrar, name);
-    let part = powah::IdlePart::new(Arc::clone(queue), rules);
+    let part = powah::IdlePart::new(Arc::clone(queue), rules, comparator);
     if let Err(error) = registrar.block_entity_part(&kind, part) {
         context.refuse(&error.to_string());
     }
@@ -127,6 +128,7 @@ impl Hooks for Mod {
                     transfer: tier.transfer,
                     slots: powah::kind_item_slots(powah::Kind::Cell(tier)),
                 }),
+                true,
             );
             declare_item(registrar, block);
         }
@@ -152,6 +154,7 @@ impl Hooks for Mod {
                     // capability there answers nothing.
                     slots: 0,
                 }),
+                true,
             );
             declare_item(registrar, block);
         }
@@ -279,6 +282,7 @@ impl Hooks for Mod {
                     transfer: tier.transfer,
                     slots: powah::kind_item_slots(powah::Kind::Rod(tier)),
                 }),
+                false,
             );
             declare_item(registrar, block);
         }
@@ -291,7 +295,7 @@ impl Hooks for Mod {
             context.refuse(&error.to_string());
         }
         for (block, name) in powah::CABLES {
-            declare_idle(registrar, context, &self.queue, name, None);
+            declare_idle(registrar, context, &self.queue, name, None, false);
             // A cable's item stores nothing, but it is still one of this mod's
             // blocks: it has no payload to restore and the Part simply finds none.
             declare_item(registrar, block);
@@ -334,12 +338,13 @@ impl Hooks for Mod {
     }
 
     /// A world opened or closed: queued positions belong to the world they were
-    /// queued in, so none outlives it.
+    /// queued in, so none outlives it, and neither does a machine's comparator reading.
     fn world_lifecycle(&self, _host: &mut dyn ServerHost, _event: &mut WorldLifecycleEvent<'_>) {
         self.queue
             .lock()
             .expect("the powah queue lock is held for one clear")
             .clear();
+        powah::clear_outputs();
     }
 
     /// `/powah info <pos>` and `/powah set <amount> <pos>`: operator-only
