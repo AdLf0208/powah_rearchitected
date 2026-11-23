@@ -1,4 +1,4 @@
-# Powah for Horizon — slices 1–10
+# Powah for Horizon — slices 1–12
 
 A clean-room Rust rewrite of **Powah! (Rearchitected) 6.2.10** (`Technici4n/Powah`,
 **LGPL-3.0-only**) for Horizon 26.3, as one flat SDK package (`api = "0.2"`): the
@@ -88,10 +88,21 @@ cable's rate (`cableTransfer`) and cannot extend the network. The starter tier o
 channel, the nitro twelve (`TieredChannelValues`), and `/powah channel` is the GUI
 packet's replacement.
 
+Slice 12 is the **Player Transmitter**, seven tiers (a 1,000,000 FE buffer up to
+2,000,000,000, giving and taking 1,000…2,000,000 FE a side), and the **Binding Card** it
+takes: the card names the player it is bound to (`powah:bound_player`, bound by using it),
+and the transmitter spends its tier's **charging rate** (500…1,000,000 FE a tick) on that
+player's inventory — every slot through its own energy handler, so an energy cell the
+player carries takes the charge. `keepEnergy()` is true, so the buffer rides the block
+item. The card is crafted from a blank card, and the starter transmitter's `p` is the
+**player aerial pearl** an aerial pearl makes of a zombie, so the whole chain is
+obtainable in survival.
+
 Every machine declares a real `Capabilities.Energy.BLOCK` buffer (the amount is the int
 `energy` in the block entity's saved compound), so other machines can fill and drain a
-furnator, a cell, a discharger, a hopper or a solar panel; an ender cell or gate answers
-that capability with its owner's channel, and a cable is a pure relay.
+furnator, a cell, a discharger, a hopper, a solar panel or a transmitter; an ender cell or
+gate answers that capability with its owner's channel, and a cable is a pure relay that
+moves FE from the fuller store to the emptier one (a network never takes back what it gave).
 
 - Scope, behaviour table, the hook table, deviations and the gap list:
   [`notes.md`](notes.md); upstream analysis: [`FINDINGS.md`](FINDINGS.md);
@@ -105,14 +116,14 @@ that capability with its owner's channel, and a cable is a pure relay.
 
 ```text
 powah.hmod            the delivered package (horizon-mod.toml + Cargo.toml + src/ + assets/ + data/)
-horizon-mod.toml      the only manifest and identity: id, version 0.2.11, api 0.2, [native] pins
+horizon-mod.toml      the only manifest and identity: id, version 0.2.12, api 0.2, [native] pins
 Cargo.toml            one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 src/lib.rs            the one `#[mod_api::horizon_mod] impl Hooks`
 src/powah.rs          the glue: the block entity Parts, the queue, the tier tables, the buffers, the cable network, the command
 src/runtime.rs        the pure machine rules and their tests (no mod_api types)
 assets/powah/         the carried blockstates, models, items, textures and lang
 data/powah/           the carried blocks, items, loot, recipes, tags, the creative tab
-tools/craft_check.py  the recipe leg: every material, machine, discharger, hopper and solar recipe in a real table
+tools/craft_check.py  the recipe leg: every material, machine, discharger, hopper, solar, ender and transmitter recipe in a real table
 tools/e2e.sh          the in-game scenario (needs a launcher-built game, see below)
 ```
 

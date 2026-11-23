@@ -21,8 +21,9 @@ twenty-one (the energizing orb, the seven rods, the large capacitor and its five
 tiers, the five cell recipes that needed the orb's materials, and the blazing
 crystal block both ways), slice 6's eighteen (the six furnator tiers and both
 of the jar's cable recipes for the six cable tiers), slice 8's seven dischargers,
-slice 9's seven hoppers, slice 10's photoelectric pane and seven solar panels, and slice 11's
-fourteen ender cells and gates.
+slice 9's seven hoppers, slice 10's photoelectric pane and seven solar panels, slice 11's
+fourteen ender cells and gates, and slice 12's seven player transmitters, the binding card, the blank
+card and the aerial pearl.
 A wrong id or count exits 1 with the observed slot, and four off-pattern grids (a
 stick where the casing goes on the furnator's, the orb's and the solar panel's
 shapes, and where the capacitor goes on the cable's) must leave the result empty.
@@ -202,6 +203,16 @@ def ender_gate(tier):
     return {"minecraft:obsidian": [100, 102, 106, 108],
             f"powah:energy_cable_{tier}": [101, 103, 105, 107],
             "powah:ender_core": [104]}
+
+# --- slice 12: the player transmitters and the card family --------------------
+
+def transmitter(below, capacitor):
+    """`" p "/"ici"/" r "`: the transmitter the tier is built on, two capacitors, a
+    casing and a dielectric rod (the jar's `player_tranmitter_<tier>` shape)."""
+    return {below: [101],
+            capacitor: [103, 105],
+            "powah:dielectric_casing": [104],
+            "powah:dielectric_rod": [107]}
 
 
 
@@ -456,6 +467,42 @@ CASES = [
            ender_gate("spirited"), "powah:ender_gate_spirited", 4),
     shaped("4 obsidian + 4 nitro cables + an ender core -> 4 nitro ender gates",
            ender_gate("nitro"), "powah:ender_gate_nitro", 4),
+    # --- slice 12: the player transmitters, the card and its ingredients -----
+    shaped("aerial pearl + 2 tiny capacitors + casing + rod -> a starter player transmitter",
+           transmitter("powah:player_aerial_pearl", "powah:capacitor_basic_tiny"),
+           "powah:player_transmitter_starter", 1),
+    shaped("starter transmitter + 2 basic capacitors + casing + rod -> a basic transmitter",
+           transmitter("powah:player_transmitter_starter", "powah:capacitor_basic"),
+           "powah:player_transmitter_basic", 1),
+    shaped("basic transmitter + 2 hardened capacitors + casing + rod -> a hardened transmitter",
+           transmitter("powah:player_transmitter_basic", "powah:capacitor_hardened"),
+           "powah:player_transmitter_hardened", 1),
+    shaped("hardened transmitter + 2 blazing capacitors + casing + rod -> a blazing transmitter",
+           transmitter("powah:player_transmitter_hardened", "powah:capacitor_blazing"),
+           "powah:player_transmitter_blazing", 1),
+    shaped("blazing transmitter + 2 niotic capacitors + casing + rod -> a niotic transmitter",
+           transmitter("powah:player_transmitter_blazing", "powah:capacitor_niotic"),
+           "powah:player_transmitter_niotic", 1),
+    shaped("niotic transmitter + 2 spirited capacitors + casing + rod -> a spirited transmitter",
+           transmitter("powah:player_transmitter_niotic", "powah:capacitor_spirited"),
+           "powah:player_transmitter_spirited", 1),
+    shaped("spirited transmitter + 2 nitro capacitors + casing + rod -> a nitro transmitter",
+           transmitter("powah:player_transmitter_spirited", "powah:capacitor_nitro"),
+           "powah:player_transmitter_nitro", 1),
+    shaped("2 horizontal dielectric rods -> a blank card",
+           {"powah:dielectric_rod_horizontal": [100, 103]},
+           "powah:blank_card", 1),
+    # `"br"/"rf"`: a two-by-two pattern sits at the grid's top left (100,101 / 103,104).
+    shaped("blank card + 2 redstone + rotten flesh -> a binding card",
+           {"powah:blank_card": [100],
+            "minecraft:redstone": [101, 103],
+            "minecraft:rotten_flesh": [104]},
+           "powah:binding_card", 1),
+    shaped("4 paste + 4 iron bars + an ender pearl -> an aerial pearl",
+           {"powah:dielectric_paste": [100, 102, 106, 108],
+            "minecraft:iron_bars": [101, 103, 105, 107],
+            "minecraft:ender_pearl": [104]},
+           "powah:aerial_pearl", 1),
 ]
 
 
@@ -653,8 +700,10 @@ def main():
     print("recipe PASS: every carried recipe — the eight material recipes, the three machines, "
           "the basic cell, slice 5's orb, seven rods, six capacitors, five cells and the blazing "
           "crystal block both ways, slice 6's six furnator tiers and twelve cable recipes, "
-          "slice 8's seven dischargers, slice 9's seven hoppers and slice 10's photoelectric pane "
-          "and seven solar panels — crafts its declared output id and count, every ingredient is "
+          "slice 8's seven dischargers, slice 9's seven hoppers, slice 10's photoelectric pane "
+          "and seven solar panels, slice 11's fourteen ender cells and gates and slice 12's seven "
+          "player transmitters, binding card, blank card and aerial pearl — crafts its declared "
+          "output id and count, every ingredient is "
           "consumed, the lava bucket leaves its bucket, and all four off-pattern grids leave the "
           "result empty")
 

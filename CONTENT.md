@@ -271,3 +271,23 @@ CARGO_TARGET_DIR=<slot target>/cargo-horizon-mod cargo run --locked \
 then copied beside the folder as `content/powah.hmod` (39,262 B; SHA-256
 `7d344174…`; 42 entries) — retired to
 `../_shared/evidence/powah/retired-hnmod-0.1.0/content-old/`.
+
+## Slice 12 — the player transmitter and the card family (93 files)
+
+`tools/carry_slice12.py` writes all of it and `--check` reproves it. Carried byte-for-byte from the
+jar/carry: the transmitter body model (`models/block/player_transmitter.json`), its particle and core
+textures, the seven tier models, the seven `_var` tier textures, the seven `items/*.json`, the seven
+loot tables and unlock advancements, the `powah:player_transmitters` block and item tags, the seven
+recipes' advancements, `binding_card`/`blank_card`/`aerial_pearl`/`player_aerial_pearl` items,
+textures and items JSON, and their recipes' advancements.
+
+Written rather than carried, each with its reason in the script's docstring: the seven block
+definitions (the metal block upstream's `Blcks.PLAYER_TRANSMITTER` declares — the carry's guess is a
+bare stone block), the seven blockstates (one variant: this slice carries the bottom half only), the
+seven item models (the block model plus upstream's own `display` transforms, because the carried item
+model is the two-block structure) and `models/item/binding_card.json` (the carried one's `powah:bound`
+override is 26.3 item model property this slice does not register).
+
+The ten recipes are read from the jar's own files and their `{"item": …}` ingredients rewritten to
+the pin's id-string form (`recipe_from_jar`), because the carry's importer skipped this family; the
+jar's `player_tranmitter_*` spelling is kept, since renaming an upstream recipe changes its id.

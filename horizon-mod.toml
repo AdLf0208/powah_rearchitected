@@ -5,7 +5,7 @@
 # until the maintainer approves publishing (ARCHITECTURE.md §8).
 id = "powah"
 name = "Powah"
-version = "0.2.11"
+version = "0.2.12"
 description = """A port of Powah! (Rearchitected) for Horizon, slice 1: the starter tier of the energy
 chain. The Furnator burns a furnace fuel into carbon and makes 20 FE/t into a 20,000 FE buffer
 (one coal is 48,000 FE); the Energy Cell is a 1,000,000 FE capacitor that takes and gives 1,000
@@ -50,8 +50,13 @@ cell item into it, which adds that cell's capacity and charge to the channel; th
 pushes only on the face its `facing` names, moves at the cable's rate and cannot extend the network.
 The channels survive breaking the blocks and relaunching the world, because they are the world's
 data and not the block's.
+Slice 12 adds the player transmitter, seven tiers: a 1M…2G FE buffer that charges the inventory of
+the player a binding card is bound to, at 500…1,000,000 FE a tick, out of its own buffer — every
+item through its own energy handler, so an energy cell carried by that player takes the charge. The
+binding card is the item that names the player (`powah:bound_player`, bound by using it), with the
+blank card, the aerial pearl and the player aerial pearl its recipes are built from.
 Not yet ported: the creative cell, the magmator and thermo generators, the reactors, the Lens of
-Ender, side config, redstone modes and the GUIs."""
+Ender, the dimensional binding card, side config, redstone modes and the GUIs."""
 authors = ["owmii", "Technici4n", "AdLf0208"]
 # A native mod: Rust in src/, compiled by the launcher against the game build [native] pins,
 # beside the carried assets/ and data/. The id is the resource namespace and the only identity.

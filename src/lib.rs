@@ -34,9 +34,9 @@ mod powah;
 use std::sync::{Arc, Mutex};
 
 use mod_api::{
-    self, BlockDropsEvent, Flow, Hooks, HostSide, LevelHost, LevelTickPostEvent,
-    RegisterCommandsEvent, Registrar, RegistrationContext, RunModCommandEvent, ServerHost, Text,
-    WorldLifecycleEvent,
+    self, BlockDropsEvent, ComponentTypesEvent, Flow, Hooks, HostSide, LevelHost,
+    LevelTickPostEvent, RegisterCommandsEvent, Registrar, RegistrationContext, RunModCommandEvent,
+    ServerHost, Text, WorldLifecycleEvent,
 };
 
 use crate::powah::{Queue, SetOutcome};
@@ -231,6 +231,35 @@ impl Hooks for Mod {
             }
             declare_item(registrar, block);
         }
+        // Every player transmitter tier: one slot (the binding card) and a buffer with the tier's
+        // capacity and transfer, charged into the bound player's inventory at the tier's rate
+        // (upstream's `devices.player_transmitters`, a `ChargingConfig`, over
+        // `PlayerTransmitterTile.postTick`).
+        for (index, (block, name)) in powah::TRANSMITTERS.into_iter().enumerate() {
+            let tier = runtime::transmitter_tier(index)
+                .expect("every player transmitter id is on the ladder");
+            let transmitter = registrar.block_key(block);
+            registrar.block_container(&transmitter, powah::transmitter_container());
+            registrar.block_energy(&transmitter, powah::transmitter_battery(tier));
+            let kind = powah::declare(registrar, name);
+            let part = powah::TransmitterPart::new(tier);
+            if let Err(error) = registrar.block_entity_part(&kind, part) {
+                context.refuse(&error.to_string());
+            }
+            declare_item(registrar, block);
+        }
+        // A player transmitter's block entity and its one slot are registered above; the card's
+        // own item is the one Part that is not a machine item.
+        let card = registrar.item_key(powah::BINDING_CARD);
+        registrar.item_part(card, powah::CardPart);
+        // The aerial pearl: used on a zombie it makes the player aerial pearl the starter
+        // transmitter's recipe is built from.
+        let pearl = registrar.item_key(powah::AERIAL_PEARL);
+        powah::remember_item(
+            powah::PLAYER_AERIAL_PEARL,
+            registrar.item_key(powah::PLAYER_AERIAL_PEARL),
+        );
+        registrar.item_part(pearl, powah::PearlPart);
         // The energizing orb: the seven slots and the insert-only buffer a rod fills.
         let orb = registrar.block_key(powah::ORB);
         registrar.block_container(&orb, powah::orb_container());
@@ -267,6 +296,13 @@ impl Hooks for Mod {
             // blocks: it has no payload to restore and the Part simply finds none.
             declare_item(registrar, block);
         }
+    }
+
+    /// The components this mod registers: a binding card's bound player (`powah:bound_player`,
+    /// upstream's `PowahComponents.BOUND_PLAYER`), which the card's own `use` writes and the
+    /// transmitter's tick reads.
+    fn component_types(&self, _context: &RegistrationContext, event: &mut ComponentTypesEvent<'_>) {
+        event.types.push(powah::BOUND_PLAYER.to_owned());
     }
 
     /// A block broke: its own item carries its buffer when it is one of the

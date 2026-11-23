@@ -323,3 +323,30 @@ Same clone, tag `v6.2.10` (commit `a5a8f25`). Files read:
   per slot with one budget for the pass, and debits the buffer by exactly what the item took.
 - A furnator's transfer type is `EXTRACT` (its own item only gives, so `isChargeable` is false); a
   cell's and a rod's are `ALL`.
+
+## Slice 12 — the Player Transmitter, the Binding Card and the aerial pearl (2026-11-23)
+
+Read from tag `v6.2.10` (commit `a5a8f25`): `block/transmitter/PlayerTransmitterBlock.java`,
+`PlayerTransmitterTile.java`, `item/BindingCardItem.java`, `item/AerialPearlItem.java`,
+`components/BoundPlayer.java`, `components/PowahComponents.java`, `lib/block/AbstractEnergyStorage.java`,
+`util/ChargeUtil.java`, `util/Player.java`, `config/v2/PowahConfig.java`, `config/v2/DefaultEnergies.java`,
+`block/Blcks.java`, `item/Itms.java`, and the guide book's `player_transmitter.md`, `binding_card.md`,
+`aerial_pearl.md`.
+
+| Fact | Where |
+|---|---|
+| `devices.player_transmitters = new ChargingConfig(batteryCapacity(), batteryTransfer(), chargingTransfer())` — the cell's storage row and `cableTransfer` as the charging rate | `config/v2/PowahConfig.java:114` |
+| `postTick`: `checkRedstone()`, the card in `inv.getFirst()`, `card.getPlayer`, `isMultiDim \|\| same dimension`, `ChargeUtil.chargeItemsInPlayerInv(player, charging, stored)`, `energy.consume` | `PlayerTransmitterTile.java:47-63` |
+| `chargeItemsInPlayerInv` = `transferSlotList` over `Player.invStacks` (36 main + 4 armour + 1 off hand) | `util/ChargeUtil.java:27`, `util/Player.java:48` |
+| `getSlotLimit(0) = 1`, `canInsert` = a card with `BOUND_PLAYER`, `keepEnergy()` true | `PlayerTransmitterTile.java:65-79` |
+| The block: `metalNoSolid(2.0, 20.0)`, a `top` state, a second decorative block above, the tile only at the bottom | `block/Blcks.java:52`, `PlayerTransmitterBlock.java` |
+| `BindingCardItem.use` writes `BOUND_PLAYER` (`{gameProfileId: [I;4], name}`); the EnderMan upgrade makes `binding_card_dim` | `item/BindingCardItem.java:52-72`, `components/BoundPlayer.java` |
+| `AerialPearlItem` on a Zombie/Husk/ZombieVillager gives a `player_aerial_pearl` and kills it | `item/AerialPearlItem.java:23-45` |
+| `itms`: `BINDING_CARD` stacks to 1, the other three stack to 64 | `item/Itms.java:36-45` |
+
+Behaviour extracted and reproduced: the buffer and the seven rows (the same numbers the hopper's
+`ChargingConfig` has); the 41-slot pass out of the transmitter's own buffer at `chargingTransfer`,
+one `min(rate, budget, room)` step a slot; the card test (a card with no bound player charges
+nothing); the same-level test; `keepEnergy`; the recipe chain (`blank_card` from two horizontal
+rods, the card from a blank card + redstone + rotten flesh, the starter transmitter's `p` from an
+aerial pearl on a zombie, each tier from the one below).

@@ -55,6 +55,13 @@
     "powah:ender_gate_blazing",
     "powah:ender_gate_niotic",
     "powah:ender_gate_spirited",
-    "powah:ender_gate_nitro"
+    "powah:ender_gate_nitro",
+    "powah:player_transmitter_starter",
+    "powah:player_transmitter_basic",
+    "powah:player_transmitter_hardened",
+    "powah:player_transmitter_blazing",
+    "powah:player_transmitter_niotic",
+    "powah:player_transmitter_spirited",
+    "powah:player_transmitter_nitro"
   ]
 }

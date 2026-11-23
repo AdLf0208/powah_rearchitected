@@ -193,6 +193,21 @@
 #    drops itself, and every guessed ender id is unknown without the package.
 # SELFTEST=ender expects the peer to read 0 FE after the shared cell moved
 # channel (it must FAIL), proving the shared-channel assertion can fail.
+# Slice 12 (the player transmitter and its binding card) adds:
+#  - a starter transmitter (1,000,000 FE, 1,000 FE/t a side, 500 FE/t charging) reads `bound empty`
+#    with no card; a card used from the hand binds to the operator (`powah:bound_player`), the
+#    readout names them once it is in slot 0, `/powah set 10000` and a cell item in the operator's
+#    hotbar make the transmitter spend exactly 500 x dt FE over dt ticks measured against the game's
+#    clock, the item gains whole 500 FE steps at one a tick, and the two halves add up to the 10,000
+#    within a window derived from the two readouts;
+#  - the control is a **blank** card: the same rig charges nothing and spends nothing;
+#  - a nitro transmitter clamps 2,000,000,000 FE and names `charging 1000000 FE/t, 2000000 FE/t a
+#    side`, `powah:player_transmitters` matches in game, a broken 7,000 FE transmitter carries its
+#    buffer back on its own item, and every transmitter tier drops itself;
+#  - an aerial pearl used on a zombie (survival) gives the player aerial pearl and kills it — the
+#    starter transmitter recipe's ingredient.
+# SELFTEST=transmitter expects the item to have gained nothing (it must FAIL), proving the charging
+# assertion can fail.
 set -euo pipefail
 export LC_ALL=C
 
@@ -402,18 +417,32 @@ fuel_is() { # fuel_is X Y Z ITEM COUNT
 }
 # info X Y Z: this block's status line, after a fresh reply arrives (the t=
 # field makes each reply unique).
+# info X Y Z: one readout, re-asked until its own `t=` is newer than the one read before the command
+# was sent. A chat round trip on a loaded box can take 100 ticks, and the reply to a *previous* call
+# then sits in the 20-line window: accepting it read a block 110 ticks stale and cost this slice two
+# runs (2026-11-23, slices 3's two-cell legs, on a box running five game legs). A readout that never
+# advances is asked again, never accepted; the tick it names is the game's own clock.
 info() { # info X Y Z
-    local out line before
+    local out line before before_t line_t tries
     before=$(ctl messages 20 | jq -r '.chat[]' | grep -E " at $1,$2,$3:" | head -1)
-    say "powah info $1 $2 $3"
-    for _ in $(seq 1 25); do
-        ctl wait 4 >/dev/null
-        out=$(ctl messages 20)
-        line=$(jq -r '.chat[]' <<<"$out" | grep -E " at $1,$2,$3:|No Powah block" | head -1)
-        if [ -n "$line" ] && [ "$line" != "$before" ]; then
-            echo "$line"
-            return
-        fi
+    before_t=$(time_of "$before")
+    for tries in 1 2 3 4 5; do
+        say "powah info $1 $2 $3"
+        for _ in $(seq 1 12); do
+            ctl wait 4 >/dev/null
+            out=$(ctl messages 20)
+            line=$(jq -r '.chat[]' <<<"$out" | grep -E " at $1,$2,$3:|No Powah block" | head -1)
+            [ -n "$line" ] || continue
+            line_t=$(time_of "$line")
+            if [ -n "$line_t" ] && [ -n "$before_t" ]; then
+                [ "$line_t" -gt "$before_t" ] && { echo "$line"; return; }
+            elif [ "$line" != "$before" ]; then
+                echo "$line"
+                return
+            fi
+        done
+        before=$line
+        before_t=$line_t
     done
     echo "NO-INFO $(jq -c '{chat,action_bar}' <<<"$out")"
 }
@@ -578,9 +607,34 @@ chest_energy() { # chest_energy X Y Z SLOT
     sed -nE 's/.*: *(-?[0-9]+).*/\1/p' <<<"$reply"
 }
 
+# inv_energy SLOT: the `energy` this mod's item payload holds in the operator's own inventory slot
+# (`Inventory`'s numbers: hotbar.0 is 0). Read with `@p` because a console command's `@s` is the
+# console, and with the slot path, not `SelectedItem` (one selection stale, measured).
+inv_energy() { # inv_energy SLOT
+    local reply text
+    reply=$(ctl command "data get entity @p Inventory[{Slot:${1}b}].components.\"minecraft:block_entity_data\".energy")
+    echo "  data get entity @p Inventory[{Slot:${1}b}]: $reply" >&2
+    # `ctl command` answers `{"chat":[…]}`; the number is in the reply *text*, not the JSON around it.
+    text=$(jq -r 'try ([.chat[]?] | join(" ")) catch ""' <<<"$reply" 2>/dev/null)
+    [ -n "$text" ] || text=$reply
+    sed -nE 's/.*: *(-?[0-9]+).*/\1/p' <<<"$text"
+}
+# card_bound SLOT: the name on the binding card in the operator's own inventory slot, empty when the
+# card carries no `powah:bound_player` at all (the control's blank card).
+card_bound() { # card_bound SLOT
+    local reply text
+    reply=$(ctl command "data get entity @p Inventory[{Slot:${1}b}].components.\"powah:bound_player\".name")
+    echo "  card bound name: $reply" >&2
+    text=$(jq -r 'try ([.chat[]?] | join(" ")) catch ""' <<<"$reply" 2>/dev/null)
+    [ -n "$text" ] || text=$reply
+    sed -nE 's/.*: *"([^"]*)".*/\1/p' <<<"$text"
+}
+
 cleanup() {
     rc=$?
-    ctl quit >/dev/null 2>&1 || true
+    # A quit that never answers must not hold the seat: the guard's idle timeout would kill the
+    # run after the last assertion (measured 2026-11-23, a 17,689-tick session on a loaded box).
+    timeout 60 "$CTL" --socket "$SOCK" quit >/dev/null 2>&1 || true
     sleep 1
     if [ "$KEEP" = 1 ]; then
         echo "kept scratch: $SCRATCH" >&2
@@ -764,6 +818,19 @@ control_leg() {
     case "$pane" in
         *"Unknown item"*|*"unknown item"*|*"error"*|*"not found"*) ;;
         *) fail "the control game knew powah:photoelectric_pane, so the content did not come from this package" ;;
+    esac
+    # Slice 12: the player transmitter is this package's, and so is the card.
+    transmitter=$(ctl command "setblock 4 100 2 powah:player_transmitter_starter")
+    echo "  transmitter setblock reply: $transmitter"
+    case "$transmitter" in
+        *"Unknown block"*|*"unknown block"*|*"error"*) ;;
+        *) fail "the control game knew powah:player_transmitter_starter, so the content did not come from this package" ;;
+    esac
+    card=$(ctl command "give @s powah:binding_card 1")
+    echo "  card give reply: $card"
+    case "$card" in
+        *"Unknown item"*|*"unknown item"*|*"error"*|*"not found"*) ;;
+        *) fail "the control game knew powah:binding_card, so the content did not come from this package" ;;
     esac
     # Slice 11: the ender cell, the ender gate and the core they are built from are this package's.
     ender_cell=$(ctl command "setblock 9 100 0 powah:ender_cell_starter")
@@ -2236,6 +2303,245 @@ case "$floor_tag" in
     *) fail "the arena floor matched powah:ender_cells: $floor_tag" ;;
 esac
 
+echo "== slice 12: a player transmitter charges the inventory of the player its card binds =="
+# `PlayerTransmitterTile.postTick`: `checkRedstone()`, the card in `inv.getFirst()`, the bound
+# player, `card.isMultiDim() || same dimension`, then `ChargeUtil.chargeItemsInPlayerInv(player,
+# charging_rates.get(variant), energy.getStored())` and `energy.consume(extracted)`. A starter
+# transmitter stores 1,000,000 FE (`devices.player_transmitters` is the battery config) and charges
+# 500 FE a tick (`chargingTransfer`).
+place 16 100 22 powah:player_transmitter_starter
+transmitter_line=$(info 16 100 22)
+echo "  transmitter: $transmitter_line"
+case "$transmitter_line" in
+    *"Player Transmitter at 16,100,22: 0/1000000 FE (comparator 0, bound empty, charging 500 FE/t, 1000 FE/t a side,"*)
+        ;;
+    *) fail "a fresh transmitter must read an empty 1,000,000 FE buffer with no card, got '$transmitter_line'" ;;
+esac
+# The card binds by its own `use` (`BindingCardItem.use`): an unbound card takes the clicking
+# player's UUID and name into the component `powah:bound_player` (`BoundPlayer.CODEC`).
+ctl command "item replace entity @s hotbar.0 with powah:binding_card 1" >/dev/null
+ctl select 1 >/dev/null
+ctl wait 4
+ctl look-at 16 250 22 >/dev/null || true
+ctl use-item >/dev/null
+ctl wait 6
+bound_name=$(card_bound 0)
+echo "  bound name after use-item: '${bound_name}'"
+[ -n "$bound_name" ] ||
+    fail "using an unbound binding card did not write powah:bound_player on it"
+# The card goes into the transmitter's one slot (automation's path, slot 0); the hand is emptied so
+# the player carries only what the assertion is about.
+ctl command "item replace block 16 100 22 container.0 from entity @s weapon.mainhand" >/dev/null
+ctl command "item replace entity @s hotbar.0 with minecraft:air" >/dev/null
+ctl wait 4
+bound_line=$(info 16 100 22)
+echo "  transmitter with its card: $bound_line"
+case "$bound_line" in
+    *"bound ${bound_name},"*) ;;
+    *) fail "the transmitter's readout must name the card's bound player '$bound_name', got '$bound_line'" ;;
+esac
+
+echo "== slice 12: the transmitter spends its buffer on the bound player's item =="
+# The buffer is set before the item arrives: a transmitter with something to charge spends on the
+# tick after the write, so an equality poll on its buffer could never settle. 10,000 FE is twenty
+# 500 FE steps, so the whole buffer goes onto the cell item and stands at exactly 0.
+set_energy 16 100 22 10000
+ctl command "item replace entity @s hotbar.0 with powah:energy_cell_starter 1" >/dev/null
+spent_line=$(info 16 100 22)
+for _ in $(seq 1 20); do
+    [ "$(energy_of "$spent_line")" = 0 ] && break
+    ctl wait 10
+    spent_line=$(info 16 100 22)
+done
+item_spent=$(inv_energy 0)
+echo "  spent: $spent_line (the item holds ${item_spent:-none} FE)"
+[ "$(energy_of "$spent_line")" = 0 ] ||
+    fail "the transmitter must have spent its whole 10,000 on the item in that player's inventory: $spent_line"
+[ -n "${item_spent:-}" ] ||
+    fail "the cell item in the player's inventory carries no energy payload, though the transmitter spent its 10,000"
+if [ "$SELFTEST" = transmitter ]; then
+    echo "  SELFTEST: expecting the item to hold nothing (this must fail)"
+    [ "$item_spent" = 0 ] || fail "SELFTEST flipped: the transmitter charged the item to $item_spent FE, as it should"
+fi
+[ "$item_spent" = 10000 ] ||
+    fail "the transmitter's whole 10,000 must be on the item, not $item_spent"
+[ $((item_spent % 500)) = 0 ] ||
+    fail "the item holds $item_spent FE, not a whole number of 500 FE steps"
+
+echo "== slice 12: the charging rate is the tier's 500 FE a tick =="
+# Measured against the game's own clock, with a buffer big enough not to run out: two readouts `dt`
+# ticks apart must differ by exactly 500 x dt. The pair is re-read when a busy box lands one of the
+# two replies stale (`dt` outside the window the wait asked for), which is a measurement that did
+# not happen, not a verdict.
+ctl command "item replace entity @s hotbar.0 with minecraft:air" >/dev/null
+ctl wait 3
+set_energy 16 100 22 100000
+ctl command "item replace entity @s hotbar.0 with powah:energy_cell_starter 1" >/dev/null
+ctl wait 3
+dt=0
+for _ in $(seq 1 5); do
+    rate_first=$(info 16 100 22)
+    item_first=$(inv_energy 0)
+    ctl wait 20
+    rate_second=$(info 16 100 22)
+    item_second=$(inv_energy 0)
+    t1=$(time_of "$rate_first")
+    t2=$(time_of "$rate_second")
+    dt=$((t2 - t1))
+    [ "$dt" -ge 10 ] && [ "$dt" -le 60 ] && break
+    echo "  dt=$dt is outside the 20-tick window asked for: re-reading"
+done
+b1=$(energy_of "$rate_first")
+b2=$(energy_of "$rate_second")
+spent=$((b1 - b2))
+echo "  rate: $rate_first"
+echo "  rate: $rate_second"
+echo "  dt=$dt ticks, transmitter -$spent FE, item ${item_first:-none} -> ${item_second:-none} FE"
+[ "$dt" -ge 10 ] && [ "$dt" -le 60 ] ||
+    fail "the two readouts were $dt ticks apart, outside the 20-tick window: the game's clock could not be read"
+[ $((spent % 500)) = 0 ] ||
+    fail "the transmitter spent $spent FE over $dt ticks, not a whole number of 500 FE steps"
+[ "$spent" = $((500 * dt)) ] ||
+    fail "the transmitter spent $spent FE over $dt ticks; its tier's 500 FE a tick is $((500 * dt))"
+[ -n "${item_first:-}" ] && [ -n "${item_second:-}" ] ||
+    fail "the cell item in the player's inventory carries no energy payload, though the transmitter charges it"
+steps=$(((item_second - item_first) / 500))
+echo "  item steps: $steps of 500 FE against a $dt-tick window"
+[ $(((item_second - item_first) % 500)) = 0 ] ||
+    fail "the item gained $((item_second - item_first)) FE, not a whole number of 500 FE steps"
+[ "$steps" -ge $((dt - 2)) ] && [ "$steps" -le $((dt + 2)) ] ||
+    fail "the item gained $((item_second - item_first)) FE over a $dt-tick window; at 500 FE a tick that is not one charge a tick"
+# Conservation, with the tolerance derived from the measured window (the hopper's finding: a fixed
+# tolerance flakes on a busy box): the item and the transmitter are read a round trip apart, so what
+# may have moved between the two reads is 500 FE per tick of that window.
+rate_last=$(info 16 100 22)
+t3=$(time_of "$rate_last")
+b3=$(energy_of "$rate_last")
+window_span=$((t3 - t2))
+[ "$window_span" -ge 0 ] || window_span=0
+window=$((500 * window_span))
+unaccounted=$((100000 - item_second - b3))
+echo "  unaccounted: $unaccounted FE (item + transmitter against the 100,000 it held, within 500 x a $window_span-tick window = $window)"
+[ "$unaccounted" -ge $((-window)) ] && [ "$unaccounted" -le "$window" ] ||
+    fail "the item's $item_second FE and the transmitter's $b3 FE do not add up to the 100,000 it held (off by $unaccounted, beyond the $window FE that could have moved in $window_span ticks): $rate_last"
+
+echo "== slice 12: a card with no bound player charges nothing, and spends nothing =="
+# The control: the same transmitter, the same 10,000, the same cell item in the operator's
+# inventory — with a **blank** card in slot 0 (`canInsert` refuses one upstream; a container
+# declaration cannot, so the tick's bound-player test is what leaves it alone here).
+ctl command "item replace entity @s hotbar.0 with minecraft:air" >/dev/null
+ctl wait 3
+set_energy 16 100 22 10000
+ctl command "item replace block 16 100 22 container.0 with powah:blank_card 1" >/dev/null
+ctl wait 4
+blank_line=$(info 16 100 22)
+case "$blank_line" in
+    *"bound none,"*) ;;
+    *) fail "a blank card must read no bound player, got '$blank_line'" ;;
+esac
+ctl command "item replace entity @s hotbar.0 with powah:energy_cell_starter 1" >/dev/null
+ctl wait 40
+blank_after=$(info 16 100 22)
+blank_item=$(inv_energy 0)
+echo "  blank: $blank_after (item at ${blank_item:-none} FE)"
+[ "$(energy_of "$blank_after")" = 10000 ] ||
+    fail "a blank card made the transmitter spend FE: $blank_after"
+[ "${blank_item:-0}" = 0 ] ||
+    fail "a blank card made the transmitter charge the item to $blank_item FE"
+ctl command "item replace entity @s hotbar.0 with minecraft:air" >/dev/null
+ctl wait 3
+
+echo "== slice 12: the transmitter ladder, its tag and its kept buffer =="
+place 18 100 22 powah:player_transmitter_nitro
+set_clamped 18 100 22 2000000000 2000000000
+expect_info 18 100 22 "2000000000/2000000000 FE"
+expect_info 18 100 22 "charging 1000000 FE/t, 2000000 FE/t a side"
+tag_hit=$(ctl command "execute if block 18 100 22 #powah:player_transmitters")
+tag_miss=$(ctl command "execute if block 0 99 3 #powah:player_transmitters")
+echo "  tag(18,100,22) #player_transmitters = $tag_hit"
+echo "  tag(0,99,3)    #player_transmitters = $tag_miss"
+case "$tag_hit" in
+    *"passed"*) ;;
+    *) fail "a player transmitter is not in powah:player_transmitters: $tag_hit" ;;
+esac
+case "$tag_miss" in
+    *"failed"*) ;;
+    *) fail "the arena floor matched powah:player_transmitters: $tag_miss" ;;
+esac
+# `keepEnergy()` is true: the buffer rides the block item back (the hopper's own keep leg's shape).
+floor_under 16 24
+place 16 100 24 powah:player_transmitter_starter
+set_clamped 16 100 24 7000 7000
+ctl command "tp @s 16.5 100 23.5" >/dev/null
+ctl command "gamemode creative @s" >/dev/null
+tool_up
+ctl look-at-block 16 100 24 >/dev/null || true
+broken=$(ctl break 16 100 24) || fail "cannot break the transmitter at 16,100,24"
+echo "$broken" | jq -c '{scenario:"keep", block, drops, picked_up}'
+pickup powah:player_transmitter_starter 16 100 24
+place_item 16 100 24 powah:player_transmitter_starter
+kept_line=$(info 16 100 24)
+echo "  kept: $kept_line"
+[ "$(energy_of "$kept_line")" = 7000 ] ||
+    fail "a broken 7,000 FE transmitter must carry its buffer back, got '$kept_line'"
+ctl command "gamemode creative @s" >/dev/null
+ctl command "clear @s" >/dev/null
+ctl wait 3
+
+echo "== slice 12: the transmitter's loot, every tier =="
+# A drop needs a survival break with the right tool (`needs_iron_tool`).
+tool_up
+for tier in basic hardened blazing niotic spirited nitro; do
+    block="powah:player_transmitter_$tier"
+    place 20 100 24 "$block"
+    ctl look-at-block 20 100 24 >/dev/null || true
+    broken=$(ctl break 20 100 24) || fail "cannot break $block at 20,100,24"
+    echo "$broken" | jq -c '{scenario:"loot", block, drops}'
+    [ "$(echo "$broken" | jq -r '.block')" = "minecraft:air" ] || fail "$block did not break"
+    got=$(echo "$broken" | jq -r --arg id "$block" '.drops[$id] // 0')
+    [ "$got" -ge 1 ] || fail "breaking $block dropped $got of itself, not the block"
+done
+
+echo "== slice 12: an aerial pearl on a zombie makes the transmitter's player aerial pearl =="
+# `AerialPearlItem.interactLivingEntity`: the starter recipe's `p` has no other source.
+# The pearl is spent only outside creative (`if (!player.isCreative()) stack.shrink(1)`), so this
+# leg is a survival one; a peaceful world removes a summoned monster, so the difficulty is easy
+# while it stands.
+ctl command "clear @s" >/dev/null
+ctl command "gamemode survival @s" >/dev/null
+ctl command "difficulty easy" >/dev/null
+# Back on the arena floor, inside the ~3-block interaction reach of the zombie below.
+ctl command "tp @s 0.5 100 3.5" >/dev/null
+ctl wait 4
+ctl command "kill @e[type=minecraft:zombie]" >/dev/null
+ctl command "summon minecraft:zombie 1.5 100 4.5" >/dev/null
+ctl wait 4
+zombie_id=$(ctl entities 32 minecraft:zombie | jq -r '.entities[0].id // empty')
+echo "  zombie: $zombie_id"
+[ -n "$zombie_id" ] || fail "cannot find the zombie the pearl leg summons"
+ctl command "item replace entity @s hotbar.0 with powah:aerial_pearl 2" >/dev/null
+ctl select 1 >/dev/null
+ctl wait 4
+ctl look-at-entity "$zombie_id" >/dev/null || true
+interact_reply=$(ctl interact-entity "$zombie_id" 2>&1) ||
+    fail "the aerial pearl could not be used on the zombie $zombie_id: $interact_reply"
+echo "  interact: $interact_reply"
+ctl wait 6
+pearls=$(inv_count powah:player_aerial_pearl)
+left=$(inv_count powah:aerial_pearl)
+echo "  after the pearl: player aerial pearls $pearls, aerial pearls left $left"
+[ "$pearls" -ge 1 ] ||
+    fail "an aerial pearl used on a zombie must give a player aerial pearl, none arrived"
+[ "$left" = 1 ] ||
+    fail "the pearl must spend exactly one of the two it held, $left left"
+zombie_left=$(ctl entities 32 minecraft:zombie | jq -r --argjson id "$zombie_id" '[.entities[] | select(.id == $id)] | length')
+echo "  the zombie $zombie_id left: $zombie_left"
+[ "$zombie_left" = 0 ] || fail "the zombie the pearl was used on must be killed, entity $zombie_id still stands"
+ctl command "difficulty peaceful" >/dev/null
+ctl command "gamemode creative @s" >/dev/null
+ctl command "clear @s" >/dev/null
+ctl wait 3
+
 echo "== slice 2: the six dielectric/capacitor items are real items =="
 for item in powah:dielectric_paste powah:dielectric_rod powah:dielectric_rod_horizontal \
             powah:dielectric_casing powah:capacitor_basic powah:capacitor_basic_tiny \
@@ -2385,4 +2691,4 @@ ctl command "gamemode creative @s" >/dev/null
 ctl command "clear @s" >/dev/null
 ctl wait 3
 
-echo "PASS: a fuelled furnator made FE, the cable carried it into the cell, an unfuelled furnator made nothing, a cell without a cable stayed empty, a full cell stayed full, a charged cell drained through a cable into an empty one, a three-cable network carried a charge across its run with the two cells' sum unchanged and a cell off the network empty, the six material items exist, every material and machine recipe crafted its declared output and consumed its ingredients, each machine dropped itself, every energy cell tier clamped 2,000,000,000 FE at its own capacity and carried its own transfer, two adjacent cells swapped within their own transfer cap without creating FE, every cell tier dropped itself, a starter rod filled the orb to exactly its recipe's 10,000 FE and stood at 0, an orb with no rod and an orb with no recipe produced nothing while its rod kept its charge, a nitro rod made a blazing crystal at exactly 120,000 FE and kept the other 80,000, the blaze-rod blazing recipe, the niotic, spirited and nitro crystals all energised, every new block and item exists, every carried recipe including the five previously blocked cells crafts its declared output and consumes its ingredients, every furnator tier clamped 2,000,000,000 FE at its own generation capacity, a nitro furnator made exactly 40,000 FE in one tick of a coal and a starter furnator kept energy + carbon at 48,000 while filling slowly, every cable tier read back its own rate, a basic network refused to relay through a starter cable and delivered once that cable was basic, every new furnator, cable and discharger tier dropped itself, a starter furnator charged the item in its charge slot at exactly min(transfer, stored, room) with the FE coming out of its own buffer and left an item with no buffer alone, a cell charged two slots out of one budget, a 5,000 FE furnator and a 4,000 FE cell broken in survival carried their buffers on their own items and gave them back on placement while their spilled stacks did not, an item doctored to 2,000,000,000 FE clamped to its tier's 20,000 on placement and a fresh item placed an empty machine, a starter hopper spent exactly 500 FE a tick on the cell item in the chest it faced and the two halves of the 5,000 it held added up, a hopper facing away from the chest charged nothing and a stone in the chest took nothing, every hopper tier dropped itself, a 7,000 FE hopper carried its buffer back on its own item, a starter solar panel under an open noon sky generated exactly 20 FE a tick measured against the game clock and filled its last 20 of room without overflowing, a stone above it and midnight each left it at exactly 5,000 for 60 ticks, a cell under a panel charged while a cell beside it stayed empty and the panel took no fill, a nitro panel clamped 2,000,000,000 FE at 40,000,000 and named its 2,000 FE/t, every solar panel tier dropped itself, the photoelectric pane and all seven panels crafted, two ender cells on one channel held and showed the same 100,000 FE while a cell on another channel read 0, a cell moved to the fresh channel read 0 while its peer kept exactly 100,000 and moving it back found the channel's FE again, an ender cell's extender item gave its channel 4,000,000 FE of capacity and its charge slot took 1,000 a tick out of the channel, the channel gave its tier's 4,000 a tick and lost exactly what the sink gained, an ender gate fed only the hopper on its facing side at the cable row's 500 a tick, the nitro ender cell and gate named 12 channels and their 2,000,000/1,000,000 FE a tick, both ender tags matched in game, every ender cell and gate tier dropped itself, and every guessed id is unknown without the package"
+echo "PASS: a fuelled furnator made FE, the cable carried it into the cell, an unfuelled furnator made nothing, a cell without a cable stayed empty, a full cell stayed full, a charged cell drained through a cable into an empty one, a three-cable network carried a charge across its run with the two cells' sum unchanged and a cell off the network empty, the six material items exist, every material and machine recipe crafted its declared output and consumed its ingredients, each machine dropped itself, every energy cell tier clamped 2,000,000,000 FE at its own capacity and carried its own transfer, two adjacent cells swapped within their own transfer cap without creating FE, every cell tier dropped itself, a starter rod filled the orb to exactly its recipe's 10,000 FE and stood at 0, an orb with no rod and an orb with no recipe produced nothing while its rod kept its charge, a nitro rod made a blazing crystal at exactly 120,000 FE and kept the other 80,000, the blaze-rod blazing recipe, the niotic, spirited and nitro crystals all energised, every new block and item exists, every carried recipe including the five previously blocked cells crafts its declared output and consumes its ingredients, every furnator tier clamped 2,000,000,000 FE at its own generation capacity, a nitro furnator made exactly 40,000 FE in one tick of a coal and a starter furnator kept energy + carbon at 48,000 while filling slowly, every cable tier read back its own rate, a basic network refused to relay through a starter cable and delivered once that cable was basic, every new furnator, cable and discharger tier dropped itself, a starter furnator charged the item in its charge slot at exactly min(transfer, stored, room) with the FE coming out of its own buffer and left an item with no buffer alone, a cell charged two slots out of one budget, a 5,000 FE furnator and a 4,000 FE cell broken in survival carried their buffers on their own items and gave them back on placement while their spilled stacks did not, an item doctored to 2,000,000,000 FE clamped to its tier's 20,000 on placement and a fresh item placed an empty machine, a starter hopper spent exactly 500 FE a tick on the cell item in the chest it faced and the two halves of the 5,000 it held added up, a hopper facing away from the chest charged nothing and a stone in the chest took nothing, every hopper tier dropped itself, a 7,000 FE hopper carried its buffer back on its own item, a starter solar panel under an open noon sky generated exactly 20 FE a tick measured against the game clock and filled its last 20 of room without overflowing, a stone above it and midnight each left it at exactly 5,000 for 60 ticks, a cell under a panel charged while a cell beside it stayed empty and the panel took no fill, a nitro panel clamped 2,000,000,000 FE at 40,000,000 and named its 2,000 FE/t, every solar panel tier dropped itself, the photoelectric pane and all seven panels crafted, two ender cells on one channel held and showed the same 100,000 FE while a cell on another channel read 0, a cell moved to the fresh channel read 0 while its peer kept exactly 100,000 and moving it back found the channel's FE again, an ender cell's extender item gave its channel 4,000,000 FE of capacity and its charge slot took 1,000 a tick out of the channel, the channel gave its tier's 4,000 a tick and lost exactly what the sink gained, an ender gate fed only the hopper on its facing side at the cable row's 500 a tick, the nitro ender cell and gate named 12 channels and their 2,000,000/1,000,000 FE a tick, both ender tags matched in game, every ender cell and gate tier dropped itself, a starter player transmitter read its slot empty with no card, a card bound to the operator by its own use named them in the transmitter's readout, the transmitter spent exactly 500 FE a tick out of its 10,000 on the cell item in that player's inventory and the item gained whole 500 FE steps with the two halves adding up, a blank card charged nothing and spent nothing, a nitro transmitter clamped 2,000,000,000 FE and named its 1,000,000 FE/t charging rate, powah:player_transmitters matched in game, a broken 7,000 FE transmitter carried its buffer back on its own item, every transmitter tier dropped itself, an aerial pearl used on a zombie gave the player aerial pearl and killed it, and every guessed id is unknown without the package"

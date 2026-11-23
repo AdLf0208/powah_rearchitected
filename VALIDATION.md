@@ -1,4 +1,35 @@
-# Validation — Powah slices 1 to 11
+# Validation — Powah slices 1 to 12
+
+> **0.2.12 (slice 12, the Player Transmitter and its Binding Card)** is recorded in
+> [`notes.md`](notes.md#slice-12--the-player-transmitter-and-its-binding-card-2026-11-23): the slice
+> and the gap lines it comes from (slice 11's coverage row and its own "Next slice"), the upstream
+> facts it is built on (`devices.player_transmitters` = `ChargingConfig(batteryCapacity,
+> batteryTransfer, chargingTransfer)` — 1M/1,000/500 at starter; `PlayerTransmitterTile.postTick`'s
+> card test and `ChargeUtil.chargeItemsInPlayerInv` over `Player.invStacks`' 41 slots;
+> `canInsert` = a card with `BOUND_PLAYER`; `keepEnergy()` true; `BindingCardItem.use`'s
+> `powah:bound_player`; `AerialPearlItem` on a zombie as the starter recipe's `p`), the red proof
+> (two `todo!()` rules, 84 passed / 2 failed, quoted verbatim; the three glue tests against
+> mutations; the relay's ping-pong `left: [Transfer { from: 1, to: 0, amount: 500 }] right: []`; the
+> item-place slot numbering; and four in-game runs before the green one), the ladder at pin
+> `0a875da` (**91 tests**, clippy 0 warnings, `fmt --check` clean, two `cmp`-identical builds of
+> **525,573 B**, `check`, `fits` against the pin **and** against `0b14f8a`, gate 1/1 with **860
+> entries**, `check-recipe-types` `powah: ok`) and the in-game legs (main `PASS`+`EXIT:0`; the
+> control game knowing none of the ids; `SELFTEST=1` and `SELFTEST=transmitter` at `EXIT:1`; the log
+> gate 50/50 `--strict`). Package: `powah.hmod`, 525,573 B, sha256
+> `8b264c5d2e9a3da6073c9dc17229cd474d625ed63aabb56d6900922df5be951a` (the in-game legs ran the
+> launcher build of the same sources, `native-0a875da-2174565b7b48`; the delivered archive was rebuilt
+> from the final tree afterwards, differing in `README.md` alone). Launcher build: `Compiling powah (1 of 1)`,
+> `native-0a875da-2174565b7b48`, instance `powah-e2e`. What it proves: a fresh transmitter reads an
+> empty 1,000,000 FE buffer with no card; a card used from the hand binds to the operator by
+> `powah:bound_player`; `/powah set 10000` and a cell item in that player's inventory spend the whole
+> 10,000 onto the item; with 100,000 in the buffer the transmitter spends exactly **500 × dt**
+> (14,500 over 29 ticks) while the item gains 29 whole 500 FE steps and the two add up within the
+> read window; a **blank** card charges nothing and spends nothing; the nitro tier clamps
+> 2,000,000,000 and names its 1,000,000 FE/t; the tag, the kept buffer and every tier's drop are
+> asserted; and an aerial pearl on a zombie makes the starter recipe's player aerial pearl. It also
+> **fixes a pre-existing defect**: a cable network rotated its starting port, so two cells on one
+> cable ping-ponged the same 500 FE and never equalized — a storage now gives only to a smaller
+> storage, a provider always gives (see `notes.md` "upstream defects fixed").
 
 > **0.2.11 (slice 11, the Ender Cell and Ender Gate)** is recorded in
 > [`notes.md`](notes.md#slice-11--the-ender-cell-and-the-ender-gate-2026-11-23): the slice and the

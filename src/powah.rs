@@ -19,9 +19,11 @@ use mod_api::{
     self, AttachmentCodec, AttachmentError, AttachmentType, BlockDropsEvent, BlockEntityPart,
     BlockEntityTickEvent, BlockEntityTickReply, BlockEntityTicksEvent, BlockEntityTypeKey,
     BlockFace, BlockPart, BlockSide, Command, CommandArgumentValue, Component, ComponentId,
-    Compound, Direction, ENERGY, EnergyHandler, Flow, Holder, Host, HostTransaction, Identifier,
-    ItemComponentHandler, ItemKey, ItemPart, ItemPlace, LevelHost, LevelRef, ModContainer,
-    ModEnergyBuffer, OnBlockPlacedByEvent, Registrar, ServerHost, Tag, Transaction, move_energy,
+    Compound, Direction, ENERGY, EnergyHandler, Flow, Hand, Holder, Host, HostSide,
+    HostTransaction, Identifier, InteractionResult, ItemComponentHandler, ItemInteractMobEvent,
+    ItemKey, ItemPart, ItemPlace, LevelHost, LevelRef, ModContainer, ModEnergyBuffer,
+    OnBlockPlacedByEvent, PlayerRef, Registrar, ServerHost, Tag, Transaction, UseItemEvent,
+    move_energy,
 };
 
 use crate::runtime::{
@@ -29,8 +31,9 @@ use crate::runtime::{
     DischargerTier, ENDER_TIER_COUNT, EnderTier, EnergizingRecipe, FURNATOR_TIER_COUNT, Furnator,
     FurnatorTier, HOPPER_TIER_COUNT, HopperTier, MAX_CHANNELS, Neighbour, ORB_MAX_ENERGY,
     ORB_OUTPUT_SLOT, ORB_SLOTS, ROD_TIER_COUNT, RodTier, SOLAR_TIER_COUNT, Sky, SolarTier,
-    cable_tier, cell_tier, clamp_energy, comparator_strength, discharger_tier, ender_cell_tier,
-    ender_gate_tier, furnator_tier, network_moves, push_amount, rod_tier,
+    TRANSMITTER_TIER_COUNT, cable_tier, cell_tier, clamp_energy, comparator_strength,
+    discharger_tier, ender_cell_tier, ender_gate_tier, furnator_tier, network_moves, push_amount,
+    rod_tier,
 };
 
 /// The energizing orb block and its item.
@@ -171,6 +174,54 @@ pub(crate) const ENDER_GATES: [(&str, &str); ENDER_TIER_COUNT] = [
     ("powah:ender_gate_nitro", "ender_gate_nitro"),
 ];
 
+/// Every player transmitter tier's block id and block entity type name, in the ladder's order (the
+/// index [`transmitter_tier`](crate::runtime::transmitter_tier) takes).
+pub(crate) const TRANSMITTERS: [(&str, &str); TRANSMITTER_TIER_COUNT] = [
+    (
+        "powah:player_transmitter_starter",
+        "player_transmitter_starter",
+    ),
+    ("powah:player_transmitter_basic", "player_transmitter_basic"),
+    (
+        "powah:player_transmitter_hardened",
+        "player_transmitter_hardened",
+    ),
+    (
+        "powah:player_transmitter_blazing",
+        "player_transmitter_blazing",
+    ),
+    (
+        "powah:player_transmitter_niotic",
+        "player_transmitter_niotic",
+    ),
+    (
+        "powah:player_transmitter_spirited",
+        "player_transmitter_spirited",
+    ),
+    ("powah:player_transmitter_nitro", "player_transmitter_nitro"),
+];
+
+/// The binding card a transmitter's one slot takes (`Itms.BINDING_CARD`).
+pub(crate) const BINDING_CARD: &str = "powah:binding_card";
+/// The aerial pearl, and the pearl an `AerialPearlItem` makes of a zombie (`Itms.PLAYER_AERIAL_PEARL`):
+/// the starter transmitter recipe's `p`.
+pub(crate) const AERIAL_PEARL: &str = "powah:aerial_pearl";
+pub(crate) const PLAYER_AERIAL_PEARL: &str = "powah:player_aerial_pearl";
+
+/// The component upstream registers for a card's bound player (`PowahComponents.BOUND_PLAYER`):
+/// `{gameProfileId: [I; 4], name: "..."}`, as its `BoundPlayer.CODEC` writes it.
+pub(crate) const BOUND_PLAYER: &str = "powah:bound_player";
+
+/// A player transmitter's one slot (`PlayerTransmitterTile`'s `inv.add(1)`): the binding card.
+const TRANSMITTER_SLOTS: usize = 1;
+/// The slot the card sits in (`inv.getFirst()`).
+const TRANSMITTER_CARD_SLOT: usize = 0;
+/// The slots `Player.invStacks` walks: the main inventory (0..36), the armour (36..40) and the off
+/// hand (40), in `Inventory`'s own numbers — the `ENTITY_ITEMS` indices a player answers.
+pub(crate) const PLAYER_SLOTS: usize = 41;
+/// The off hand's `Inventory` number (40), which a `Hand::Off` bind writes.
+const OFF_HAND_SLOT: usize = 40;
+
 /// The furnator's fuel slot: upstream's slot 1 of 2, and the charge slot is 0.
 const FUEL_SLOT: usize = 1;
 /// The charge slot: upstream's slot 0 of the furnator, and the first of a cell's two.
@@ -249,6 +300,13 @@ pub(crate) fn item_buffer(block: &str) -> Option<ItemBuffer> {
             max_insert: tier.transfer,
             max_extract: tier.transfer,
         }),
+        // A transmitter keeps its buffer (`keepEnergy()` true) and is an `AbstractEnergyStorage`
+        // with the default `Transfer.ALL`: its own item both gives and takes at its transfer.
+        Kind::Transmitter(tier) => Some(ItemBuffer {
+            capacity: tier.capacity,
+            max_insert: tier.transfer,
+            max_extract: tier.transfer,
+        }),
         Kind::Orb | Kind::Cable(_) => None,
     }
 }
@@ -270,6 +328,9 @@ pub(crate) fn kind_item_slots(kind: Kind) -> usize {
         // `AbstractEnderTile.postTick`'s `chargeItems(1, 3)`: an ender cell and an ender gate each
         // charge the two slots after the extender.
         Kind::EnderCell(_) | Kind::EnderGate(_) => ENDER_CHARGE_SLOTS,
+        // A transmitter's one slot holds a binding card, not an energy item: the pass over it is
+        // the bound player's inventory (`postTick`), so it charges no slot of its own.
+        Kind::Transmitter(_) => 0,
         Kind::Orb | Kind::Cable(_) | Kind::Rod(_) => 0,
     }
 }
@@ -290,6 +351,8 @@ pub(crate) fn keep_capacity(block: &str) -> Option<i32> {
         Kind::Hopper(tier) => Some(tier.capacity),
         Kind::Solar(tier) => Some(tier.capacity),
         Kind::Rod(tier) => Some(tier.capacity),
+        // `PlayerTransmitterTile.keepEnergy()` is true: the buffer rides the block item.
+        Kind::Transmitter(tier) => Some(tier.capacity),
         // Upstream's `keepEnergy()` is false for both ender blocks: the FE is in the owner's
         // channel, not in the tile, so the item carries nothing and keeps nothing.
         Kind::EnderCell(_) | Kind::EnderGate(_) => None,
@@ -476,6 +539,8 @@ pub(crate) enum Kind {
     EnderCell(EnderTier),
     /// An ender gate, carrying its tier's transfer and channel count.
     EnderGate(EnderTier),
+    /// A player transmitter, carrying its tier's capacity, transfer and charging rate.
+    Transmitter(crate::runtime::TransmitterTier),
 }
 
 impl Kind {
@@ -492,7 +557,8 @@ impl Kind {
                 .or_else(|| hopper_of(block).map(Kind::Hopper))
                 .or_else(|| solar_of(block).map(Kind::Solar))
                 .or_else(|| ender_cell_of(block).map(Kind::EnderCell))
-                .or_else(|| ender_gate_of(block).map(Kind::EnderGate)),
+                .or_else(|| ender_gate_of(block).map(Kind::EnderGate))
+                .or_else(|| transmitter_of(block).map(Kind::Transmitter)),
         }
     }
 }
@@ -551,6 +617,13 @@ pub(crate) fn ender_cell_of(block: &str) -> Option<EnderTier> {
 pub(crate) fn ender_gate_of(block: &str) -> Option<EnderTier> {
     let index = ENDER_GATES.iter().position(|(id, _)| *id == block)?;
     ender_gate_tier(index)
+}
+
+/// The player transmitter a block id names, with its tier's numbers; `None` for any other block.
+/// The ids are the content's own (`data/powah/horizon/block/player_transmitter_*`).
+pub(crate) fn transmitter_of(block: &str) -> Option<crate::runtime::TransmitterTier> {
+    let index = TRANSMITTERS.iter().position(|(id, _)| *id == block)?;
+    crate::runtime::transmitter_tier(index)
 }
 
 /// What `/powah set` did, so the command can answer honestly.
@@ -635,6 +708,7 @@ pub(crate) fn battery_of(block: &str) -> Option<ModEnergyBuffer> {
         Some(Kind::Solar(tier)) => Some(solar_battery(tier)),
         Some(Kind::Orb) => Some(orb_battery()),
         Some(Kind::Rod(tier)) => Some(rod_battery(tier)),
+        Some(Kind::Transmitter(tier)) => Some(transmitter_battery(tier)),
         _ => None,
     }
 }
@@ -680,6 +754,109 @@ pub(crate) fn ender_container() -> ModContainer {
         outputs: slots,
         menu: None,
     }
+}
+
+/// A player transmitter's buffer (`AbstractEnergyStorage` over `ChargingConfig` with the default
+/// `Transfer.ALL`): the tier's capacity, giving and taking its transfer on every face.
+pub(crate) fn transmitter_battery(tier: crate::runtime::TransmitterTier) -> ModEnergyBuffer {
+    ModEnergyBuffer {
+        capacity: tier.capacity,
+        max_insert: tier.transfer,
+        max_extract: tier.transfer,
+        insert_faces: [true; 6],
+        extract_faces: [true; 6],
+    }
+}
+
+/// A player transmitter's container: upstream's one slot (`PlayerTransmitterTile`'s `inv.add(1)`,
+/// slot limit 1, a card with a bound player only), every face reaching it, no menu. Upstream's
+/// per-slot `canInsert` cannot be expressed by a container declaration at this pin, so a card
+/// without a bound player may sit there and the tick simply charges nothing.
+pub(crate) fn transmitter_container() -> ModContainer {
+    let slots: Vec<usize> = (0..TRANSMITTER_SLOTS).collect();
+    ModContainer {
+        slots: TRANSMITTER_SLOTS,
+        faces: std::array::from_fn(|_| slots.clone()),
+        inputs: slots.clone(),
+        outputs: slots,
+        menu: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The binding card: the player a transmitter charges
+// ---------------------------------------------------------------------------
+
+/// The player a binding card is bound to (`BoundPlayer`): the profile's UUID and the name shown
+/// for them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BoundPlayerValue {
+    /// The player's UUID.
+    pub uuid: u128,
+    /// The player's display name, as it was when the card was bound.
+    pub name: String,
+}
+
+/// `powah:bound_player`, as upstream's `BoundPlayer.CODEC` writes it: `gameProfileId` is the
+/// UUID as four ints (`UUIDUtil.CODEC`) and `name` a string.
+pub(crate) struct BoundPlayerComponent;
+
+impl Component for BoundPlayerComponent {
+    type Value = BoundPlayerValue;
+
+    fn id(&self) -> &str {
+        BOUND_PLAYER
+    }
+
+    fn decode(&self, value: &Tag) -> Option<BoundPlayerValue> {
+        let Tag::Compound(data) = value else {
+            return None;
+        };
+        let Tag::IntArray(id) = data.get(&"gameProfileId".into())? else {
+            return None;
+        };
+        // `UUIDUtil.CODEC` is exactly four ints; a shorter or longer array is not a bound player.
+        let id: [i32; 4] = id.as_slice().try_into().ok()?;
+        let Tag::String(name) = data.get(&"name".into())? else {
+            return None;
+        };
+        Some(BoundPlayerValue {
+            uuid: uuid_of(id),
+            name: name.to_string_lossy(),
+        })
+    }
+
+    fn encode(&self, value: BoundPlayerValue) -> Tag {
+        let mut data = Compound::new();
+        data.insert(
+            "gameProfileId".into(),
+            Tag::IntArray(uuid_ints(value.uuid).to_vec()),
+        );
+        data.insert("name".into(), Tag::String(value.name.as_str().into()));
+        Tag::Compound(data)
+    }
+}
+
+/// A UUID as `UUIDUtil` writes it: most significant int first.
+fn uuid_ints(uuid: u128) -> [i32; 4] {
+    [
+        (uuid >> 96) as i32,
+        (uuid >> 64) as i32,
+        (uuid >> 32) as i32,
+        uuid as i32,
+    ]
+}
+
+/// The UUID four ints hold, most significant first.
+fn uuid_of(ints: [i32; 4]) -> u128 {
+    let [a, b, c, d] = ints.map(|part| u128::from(part as u32));
+    (a << 96) | (b << 64) | (c << 32) | d
+}
+
+/// The player the card `stack` is bound to, `None` for a blank card or one whose component is not
+/// a bound player.
+pub(crate) fn bound_player_of(stack: &mod_api::ItemStack) -> Option<BoundPlayerValue> {
+    stack.get(&BoundPlayerComponent)
 }
 
 // ---------------------------------------------------------------------------
@@ -1495,7 +1672,51 @@ pub(crate) fn status_line(
         }
         Kind::Orb => orb_line(pos, energy, None, 0, time),
         Kind::Rod(tier) => rod_line(pos, energy, tier, None, time),
+        // A transmitter's readout names the card and the player it is bound to, which only
+        // [`info_line`] can read from the slot; this arm is the type's exhaustiveness.
+        Kind::Transmitter(tier) => transmitter_line(pos, energy, tier, CardReadout::Unknown, time),
     }
+}
+
+/// What a player transmitter's one slot holds, as its readout names it: the three states the tick
+/// tells apart (`inv.getFirst()` empty, a card with no bound player, a card bound to someone).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CardReadout<'a> {
+    /// No block entity was read (the exhaustiveness arm of [`status_line`]).
+    Unknown,
+    /// No card in the slot.
+    Empty,
+    /// A card with no bound player: the control, which charges nothing.
+    Blank,
+    /// A card bound to this player.
+    Bound(&'a BoundPlayerValue),
+}
+
+/// A player transmitter's readout: its buffer, the player its card is bound to (`empty` for no
+/// card, `none` for a card with no bound player, `unknown` when no block entity was read) and its
+/// tier's charging rate and per-side transfer.
+pub(crate) fn transmitter_line(
+    pos: [i32; 3],
+    energy: i32,
+    tier: crate::runtime::TransmitterTier,
+    card: CardReadout<'_>,
+    time: i64,
+) -> String {
+    let [x, y, z] = pos;
+    let bound = match card {
+        CardReadout::Bound(player) => player.name.as_str(),
+        CardReadout::Blank => "none",
+        CardReadout::Empty => "empty",
+        CardReadout::Unknown => "unknown",
+    };
+    format!(
+        "Player Transmitter at {x},{y},{z}: {energy}/{} FE (comparator {}, bound {bound}, \
+         charging {} FE/t, {} FE/t a side, t={time})",
+        tier.capacity,
+        comparator_strength(energy, tier.capacity),
+        tier.charging_rate,
+        tier.transfer,
+    )
 }
 
 /// An energy hopper's readout: its buffer, the face it charges through, its tier's charging rate
@@ -1994,6 +2215,29 @@ pub(crate) fn info_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> Option<Stri
                 time,
             ));
         }
+        Kind::Transmitter(tier) => {
+            let entity = host.block_entity(level, pos)?;
+            let saved = Tag::Compound(entity.data(&*host)?);
+            // The card in the slot: no card, a card with no bound player (the control's blank
+            // one), or a bound one — the three states the tick tells apart.
+            let stack = entity
+                .item_slot(&*host, TRANSMITTER_CARD_SLOT as u32)
+                .ok()
+                .flatten();
+            let bound = stack.as_ref().and_then(bound_player_of);
+            let card = match (&stack, &bound) {
+                (None, _) => CardReadout::Empty,
+                (Some(_), Some(player)) => CardReadout::Bound(player),
+                (Some(_), None) => CardReadout::Blank,
+            };
+            return Some(transmitter_line(
+                pos,
+                clamp_energy(int(&saved, KEY_ENERGY), tier.capacity),
+                tier,
+                card,
+                time,
+            ));
+        }
     };
     let fuel = fuel.as_ref().map(|(item, count)| (item.as_str(), *count));
     let charge: Vec<ChargeReadout<'_>> = charge
@@ -2042,6 +2286,7 @@ pub(crate) fn set_energy(host: &mut dyn ServerHost, pos: [i32; 3], amount: i32) 
         Some(Kind::Hopper(tier)) => tier.capacity,
         Some(Kind::Solar(tier)) => tier.capacity,
         Some(Kind::Rod(tier)) => tier.capacity,
+        Some(Kind::Transmitter(tier)) => tier.capacity,
         // The orb's buffer is the recipe's own energy: with no recipe it stores
         // nothing, exactly as upstream's `onSlotChanged` leaves it.
         Some(Kind::Orb) => read_orb(host, level, pos)
@@ -2325,6 +2570,234 @@ fn solar_tick(
         event.entity.nbt = nbt;
     }
     resized || charged > 0 || produced > 0
+}
+
+/// A player transmitter tier: a block entity with one slot (the binding card) that charges the
+/// bound player's inventory out of its own buffer, at its tier's rate.
+pub(crate) struct TransmitterPart {
+    tier: crate::runtime::TransmitterTier,
+}
+
+impl TransmitterPart {
+    pub(crate) fn new(tier: crate::runtime::TransmitterTier) -> TransmitterPart {
+        TransmitterPart { tier }
+    }
+}
+
+#[mod_api::horizon_part]
+impl BlockPart for TransmitterPart {}
+
+#[mod_api::horizon_part]
+impl BlockEntityPart for TransmitterPart {
+    fn block_entity_ticks(&self, _host: &dyn Host, event: &mut BlockEntityTicksEvent<'_>) {
+        event.ticks = true;
+    }
+
+    /// `PlayerTransmitterTile.postTick`: clamp the buffer into the tier, then spend the tier's
+    /// rate on the inventory of the player the card in slot 0 names, out of that buffer.
+    fn block_entity_tick(&self, host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
+        let mut saved = Tag::Compound(std::mem::take(&mut event.entity.nbt));
+        let before = int(&saved, KEY_ENERGY);
+        let mut energy = crate::runtime::clamp_energy(before, self.tier.capacity);
+        let card = event
+            .entity
+            .items
+            .get(TRANSMITTER_CARD_SLOT)
+            .and_then(Option::as_ref);
+        let charged = charge_bound_player(host, self.tier, energy, card);
+        energy -= charged;
+        let changed = energy != before;
+        if changed {
+            write_int(&mut saved, KEY_ENERGY, energy);
+        }
+        if let Tag::Compound(nbt) = saved {
+            event.entity.nbt = nbt;
+        }
+        if !changed {
+            *event.reply = BlockEntityTickReply::Unchanged;
+        }
+    }
+}
+
+/// The pass a transmitter's tick runs, in the block entity's own tick: `postTick`'s card test, the
+/// bound player's lookup and `ChargeUtil.chargeItemsInPlayerInv(player, getChargingSpeed(variant),
+/// energy.getStored())`. Answers the FE that left the buffer.
+///
+/// Upstream's `card.isMultiDim(stack) || player.level().dimensionType().equals(world.dimensionType())`
+/// is the same-level test here: the dimensional card (`binding_card_dim`) is not carried, so a card
+/// only charges a player who is in the level the transmitter is in.
+fn charge_bound_player(
+    host: &mut dyn ServerHost,
+    tier: crate::runtime::TransmitterTier,
+    stored: i32,
+    card: Option<&mod_api::ItemStack>,
+) -> i32 {
+    let Some(card) = card else {
+        return 0;
+    };
+    if card.item().id(&*host) != BINDING_CARD {
+        return 0;
+    }
+    let Some(bound) = bound_player_of(card) else {
+        return 0;
+    };
+    // `card.getPlayer(level, stack)`: the profile's player, online on this server.
+    let Some(player) = host.player(bound.uuid) else {
+        return 0;
+    };
+    let Some(level) = level_now(host) else {
+        return 0;
+    };
+    if player.level(&*host) != Some(level) {
+        return 0;
+    }
+    charge_player_inventory(host, player, tier, stored)
+}
+
+/// `ChargeUtil.chargeItemsInPlayerInv` over `Player.invStacks` (the main inventory, the armour and
+/// the off hand, `PLAYER_SLOTS` slots in `Inventory`'s numbers): each item is asked for
+/// `min(the tier's rate, what is left of the buffer, its own room)` and takes it through its own
+/// `Capabilities.EnergyStorage.ITEM` handler in a transaction, so this mod's cell item is charged by
+/// [`MachineEnergy::insert`] and a foreign battery answers for itself. Answers the FE that moved.
+fn charge_player_inventory(
+    host: &mut dyn ServerHost,
+    player: PlayerRef,
+    tier: crate::runtime::TransmitterTier,
+    stored: i32,
+) -> i32 {
+    let uuid = player.uuid();
+    let mut rooms = Vec::with_capacity(PLAYER_SLOTS);
+    for inventory_slot in 0..PLAYER_SLOTS {
+        // `Player.invStacks`' `Inventory` numbers, read through the item place's own numbers
+        // (`ItemAccess.forPlayerSlot`): 0..36 main, 100..=103 the armour, -106 the off hand.
+        let Some(place) = crate::runtime::player_slot(inventory_slot)
+            .map(|slot| ItemPlace::PlayerSlot { player: uuid, slot })
+        else {
+            continue;
+        };
+        let room = place
+            .capability(host, &mod_api::ITEM_ENERGY)
+            .map_or(0, |item| {
+                let held = i32::try_from(item.amount(host)).unwrap_or(i32::MAX);
+                let capacity = i32::try_from(item.capacity(host)).unwrap_or(i32::MAX);
+                capacity.saturating_sub(held).max(0)
+            });
+        rooms.push(room);
+    }
+    let mut charged = 0;
+    for (inventory_slot, asked) in
+        crate::runtime::player_charges(stored, tier.charging_rate, &rooms)
+            .into_iter()
+            .enumerate()
+    {
+        let asked = u32::try_from(asked).unwrap_or(0);
+        if asked == 0 {
+            continue;
+        }
+        let Some(place) = crate::runtime::player_slot(inventory_slot)
+            .map(|slot| ItemPlace::PlayerSlot { player: uuid, slot })
+        else {
+            continue;
+        };
+        let Some(item) = place.capability(host, &mod_api::ITEM_ENERGY) else {
+            continue;
+        };
+        let moved = host
+            .transaction(|host, tx| -> Result<u32, ()> { Ok(item.insert(host, tx, asked)) })
+            .unwrap_or(0);
+        charged += i32::try_from(moved.min(asked)).unwrap_or(0);
+    }
+    charged
+}
+
+/// The binding card: `BindingCardItem.use` binds an unbound card to the player who clicked it with
+/// it in hand.
+pub(crate) struct CardPart;
+
+#[mod_api::horizon_part]
+impl ItemPart for CardPart {
+    /// `use`: an unbound card takes the clicking player's UUID and name; a bound one is upstream's
+    /// `PASS` (it does nothing, and one clicked by someone else answers `FAIL` there — this port
+    /// has no chat line for it, see `notes.md`).
+    fn use_item(&self, host: HostSide, event: &mut UseItemEvent<'_>) -> Option<InteractionResult> {
+        let HostSide::Server(host) = host else {
+            return None;
+        };
+        if bound_player_of(event.stack).is_some() {
+            return Some(InteractionResult::Pass);
+        }
+        let player = host.player(event.player)?;
+        let name = player.name(&*host)?;
+        let slot = hand_slot(&*host, player, event.hand)?;
+        let mut bound = event.stack.clone();
+        bound
+            .set(
+                &BoundPlayerComponent,
+                BoundPlayerValue {
+                    uuid: event.player,
+                    name,
+                },
+            )
+            .ok()?;
+        player.set_inventory_slot(host, slot, Some(bound)).ok()?;
+        Some(InteractionResult::Success)
+    }
+}
+
+/// The `Inventory` slot `hand` holds its stack in: the selected hotbar slot for the main hand and
+/// the off hand's own number (`Player.invStacks` reaches both).
+fn hand_slot(host: &dyn Host, player: PlayerRef, hand: Hand) -> Option<u32> {
+    match hand {
+        Hand::Main => u32::try_from(player.selected_slot(host)?).ok(),
+        Hand::Off => u32::try_from(OFF_HAND_SLOT).ok(),
+    }
+}
+
+/// The aerial pearl: `AerialPearlItem.interactLivingEntity` — a pearl used on a zombie, a husk or a
+/// zombie villager gives the player a player aerial pearl and kills it, which is the starter
+/// transmitter recipe's `p`.
+pub(crate) struct PearlPart;
+
+#[mod_api::horizon_part]
+impl ItemPart for PearlPart {
+    fn item_interact_mob(
+        &self,
+        host: HostSide,
+        event: &mut ItemInteractMobEvent<'_>,
+    ) -> Option<InteractionResult> {
+        let HostSide::Server(host) = host else {
+            return None;
+        };
+        // Upstream's test is class equality: a zombie, a husk or a zombie villager.
+        if !matches!(
+            event.kind,
+            "minecraft:zombie" | "minecraft:husk" | "minecraft:zombie_villager"
+        ) {
+            return None;
+        }
+        let player = host.players().acting_player()?;
+        let entity = u32::try_from(event.entity)
+            .ok()
+            .and_then(|id| host.entity(id))?;
+        let pearl = mod_api::ItemStack::of(item_of(PLAYER_AERIAL_PEARL)?);
+        player.give_stack(host, pearl).ok()?;
+        // `target.remove(Entity.RemovalReason.KILLED)`: the death sound is not played (no sound
+        // calls in this port, as every earlier slice records).
+        let _ = entity.remove(host, mod_api::RemovalReason::Killed);
+        // `if (!player.isCreative()) stack.shrink(1)`: the pearl is spent.
+        if !player.is_creative(&*host).unwrap_or(false) {
+            let slot = hand_slot(&*host, player, event.hand)?;
+            let count = event.stack.count().saturating_sub(1);
+            if count == 0 {
+                player.set_inventory_slot(host, slot, None).ok()?;
+            } else {
+                let mut rest = event.stack.clone();
+                rest.set_count(count).ok()?;
+                player.set_inventory_slot(host, slot, Some(rest)).ok()?;
+            }
+        }
+        Some(InteractionResult::Success)
+    }
 }
 
 /// The orb: a block entity with the seven slots and the recipe-gated buffer, which
@@ -2839,6 +3312,10 @@ pub(crate) fn on_level_tick_post(
                 push_out_on(host, level, pos, tier.transfer, &[Direction::Down]);
             }
             Kind::Orb => {}
+            // A transmitter never pushes on its own (`postTick` has no `extractFromSides`): its
+            // buffer leaves through the faces a neighbour pulls on, and into the player its card
+            // names inside its own tick.
+            Kind::Transmitter(_) => {}
             // An ender cell gives on every face; an ender gate only on its `facing` one, exactly
             // the face its capability answers on (`EnderGateTile.isEnergyPresent`).
             Kind::EnderCell(tier) => push_out(host, level, pos, tier.transfer),
@@ -3065,7 +3542,7 @@ const NETWORK_MAX_CABLES: usize = 1024;
 /// One external energy side of a cable network: the block the relay reaches and
 /// the side of the network cable it hangs off, so the face the capability is read
 /// and moved on is `cable_side.opposite()`.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct Port {
     pos: [i32; 3],
     cable_side: Direction,
@@ -3892,6 +4369,146 @@ mod tests {
             "the orb's seven slots are a recipe, not a charger"
         );
         assert_eq!(item_slots("powah:energizing_rod_starter"), 0);
+    }
+
+    #[test]
+    fn a_player_transmitter_declares_one_card_slot_a_buffer_and_its_kept_energy() {
+        // `PlayerTransmitterTile`: `inv.add(1)` (slot limit 1, `canInsert` a card with a bound
+        // player), `keepEnergy()` true, and a `ChargingConfig` buffer — so the transmitter is the
+        // hopper's storage row with the slot a card sits in instead of a container it faces.
+        for (index, (block, _)) in TRANSMITTERS.into_iter().enumerate() {
+            let tier = crate::runtime::transmitter_tier(index)
+                .unwrap_or_else(|| panic!("tier {index} is on the ladder"));
+            assert_eq!(
+                Kind::of(block),
+                Some(Kind::Transmitter(tier)),
+                "{block} is the transmitter of its tier"
+            );
+            assert_eq!(
+                item_slots(block),
+                0,
+                "{block} charges no slot of its own: its slot holds the card"
+            );
+            assert_eq!(
+                keep_capacity(block),
+                Some(tier.capacity),
+                "{block} keeps its buffer on its own item"
+            );
+            assert_eq!(
+                item_buffer(block),
+                Some(ItemBuffer {
+                    capacity: tier.capacity,
+                    max_insert: tier.transfer,
+                    max_extract: tier.transfer,
+                }),
+                "{block}'s item takes and gives at its tier's transfer"
+            );
+            assert_eq!(
+                battery_of(block),
+                Some(ModEnergyBuffer {
+                    capacity: tier.capacity,
+                    max_insert: tier.transfer,
+                    max_extract: tier.transfer,
+                    insert_faces: [true; 6],
+                    extract_faces: [true; 6],
+                }),
+                "{block}'s buffer answers every face both ways"
+            );
+        }
+        assert_eq!(
+            kind_item_slots(Kind::Transmitter(
+                crate::runtime::transmitter_tier(0).expect("the starter tier")
+            )),
+            0,
+            "a transmitter's pass is the bound player's inventory, not its own slot"
+        );
+        let container = transmitter_container();
+        assert_eq!(container.slots, 1, "one slot: the binding card");
+        assert_eq!(container.inputs, vec![0]);
+        assert_eq!(container.outputs, vec![0]);
+        assert!(container.faces.iter().all(|face| face == &vec![0]));
+        assert_eq!(
+            transmitter_of("powah:player_transmitter_nitro").map(|tier| tier.capacity),
+            Some(2_000_000_000),
+            "the nitro transmitter holds its own 2,000,000,000 FE"
+        );
+        assert_eq!(transmitter_of("powah:player_transmitter_typox"), None);
+    }
+
+    #[test]
+    fn a_player_transmitter_reads_its_buffer_and_the_player_its_card_binds() {
+        let tier = crate::runtime::transmitter_tier(0).expect("the starter tier");
+        let bound = BoundPlayerValue {
+            uuid: 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef,
+            name: "AdLf0208".to_owned(),
+        };
+        assert_eq!(
+            transmitter_line([3, 100, 5], 5_000, tier, CardReadout::Bound(&bound), 1_234),
+            "Player Transmitter at 3,100,5: 5000/1000000 FE (comparator 0, bound AdLf0208, \
+             charging 500 FE/t, 1000 FE/t a side, t=1234)",
+            "a bound card names the player the tick charges"
+        );
+        assert_eq!(
+            transmitter_line([3, 100, 5], 5_000, tier, CardReadout::Blank, 1_234),
+            "Player Transmitter at 3,100,5: 5000/1000000 FE (comparator 0, bound none, \
+             charging 500 FE/t, 1000 FE/t a side, t=1234)",
+            "a blank card is the control: nothing is bound, so nothing is charged"
+        );
+        assert_eq!(
+            transmitter_line([3, 100, 5], 0, tier, CardReadout::Empty, 0),
+            "Player Transmitter at 3,100,5: 0/1000000 FE (comparator 0, bound empty, \
+             charging 500 FE/t, 1000 FE/t a side, t=0)",
+            "an empty slot is not a blank card, so the readout says so"
+        );
+        assert!(
+            transmitter_line([3, 100, 5], 0, tier, CardReadout::Unknown, 0)
+                .contains("bound unknown"),
+            "no block entity read is the exhaustiveness arm, not a claim"
+        );
+    }
+
+    #[test]
+    fn a_binding_card_component_is_the_uuid_and_the_name_and_nothing_else_is_a_player() {
+        // `BoundPlayer.CODEC`: `gameProfileId` as `UUIDUtil`'s four ints, and `name`.
+        let player = BoundPlayerValue {
+            uuid: 0xffff_ffff_0000_0000_7fff_ffff_0000_0001,
+            name: "Technici4n".to_owned(),
+        };
+        let encoded = BoundPlayerComponent.encode(player.clone());
+        assert_eq!(
+            encoded,
+            Tag::compound([
+                (
+                    "gameProfileId",
+                    Tag::IntArray(vec![-1, 0, 2_147_483_647, 1])
+                ),
+                ("name", Tag::String("Technici4n".into())),
+            ]),
+            "the component is upstream's own compound"
+        );
+        assert_eq!(
+            BoundPlayerComponent.decode(&encoded),
+            Some(player),
+            "the UUID and the name round trip"
+        );
+        assert_eq!(
+            BoundPlayerComponent.decode(&Tag::compound([("name", Tag::String("nobody".into()))])),
+            None,
+            "a payload without a profile id is no bound player"
+        );
+        assert_eq!(
+            BoundPlayerComponent.decode(&Tag::compound([(
+                "gameProfileId",
+                Tag::IntArray(vec![1, 2, 3])
+            )])),
+            None,
+            "a profile id that is not four ints is no bound player"
+        );
+        assert_eq!(
+            uuid_of(uuid_ints(0x0123_4567_89ab_cdef_fedc_ba98_7654_3210)),
+            0x0123_4567_89ab_cdef_fedc_ba98_7654_3210,
+            "the four ints are the UUID's own halves"
+        );
     }
 
     #[test]

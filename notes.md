@@ -3043,3 +3043,257 @@ Version: **0.2.10 → 0.2.11** (one patch). The published `[[versions]]` record 
 gains 0.2.11 at publish time — this port does not touch the registry entry.
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+
+## Slice 12 — the Player Transmitter and its Binding Card (2026-11-23)
+
+### The slice, quoted from this port's own gaps
+
+`notes.md` slice 11's coverage row named the family:
+
+> the creative cell, the generators, the reactors, the ender gates, the player transmitter, the
+> batteries | `not ported` — the reactors stay `blocked(uraninite-worldgen)`; the generators need a
+> mod fluid tank and sky visibility
+
+slice 11's closing list:
+
+> **Still open:** the creative cell, the Magmator and Thermo Generator …, the reactors
+> (`blocked(uraninite-worldgen)`), the player transmitter, the batteries
+
+and the 0.2.11 report's own "Next slice", which named it:
+
+> the Player Transmitter (`powah:player_transmitter_*`, seven tiers) with its binding card
+> (`powah:binding_card`, a `BOUND_PLAYER` component) — the last item-energy family: a block entity
+> with a declared FE buffer, one slot holding a card that names a player, `keepEnergy()` true, and a
+> tick that charges that player's inventory at `chargingTransfer` out of its own buffer.
+
+**Chosen:** the **Player Transmitter** — all seven tiers — and the **Binding Card** it takes, with
+the three items its recipes are built from (`blank_card`, `aerial_pearl`, `player_aerial_pearl`).
+
+**Why it fits `machines`:** a block entity with a declared block energy buffer (a `ChargingConfig`
+over `AbstractEnergyStorage`), one slot whose item is a card, a `keepEnergy` payload and a tick that
+charges another *inventory*'s items through each item's own energy handler. No renderer, no GUI, no
+entity, no worldgen, no fluid tank.
+
+**Not chosen (and why):** the Magmator and Thermo Generator need a mod block entity fluid tank the
+pin cannot fill, the reactors stay `blocked(uraninite-worldgen)`, and the creative cell is a source,
+not a tier. The **creative cell** was the fallback the brief named if the card's bind step turned out
+to be more than one slice; it is not: the bind is one `use_item` hook plus one registered component,
+both of which this pin has (measured before the slice started).
+
+### What upstream does (read from tag `v6.2.10`, commit `a5a8f25`)
+
+| Fact | Where |
+|---|---|
+| `devices.player_transmitters = new ChargingConfig(batteryCapacity(), batteryTransfer(), chargingTransfer())`: the energy cell's storage row and `chargingTransfer` (= `cableTransfer`, `baseScaling * 500`) as the charge rate — starter **1,000,000 FE / 1,000 a side / 500 a tick**, nitro 2,000,000,000 / 2,000,000 / 1,000,000 | `config/v2/PowahConfig.java:114-117`, `config/v2/DefaultEnergies.java` |
+| `postTick`: `checkRedstone()`; `stack = inv.getFirst()`; if it is a `BindingCardItem` and `card.getPlayer(level, stack)` finds the bound `ServerPlayer`, and `card.isMultiDim() || player.level().dimensionType().equals(world.dimensionType())`, then `ChargeUtil.chargeItemsInPlayerInv(player, getChargingSpeed(variant), energy.getStored())` and `energy.consume(extracted)` | `block/transmitter/PlayerTransmitterTile.java:47-63` |
+| `ChargeUtil.chargeItemsInPlayerInv` = `transferSlotList` over `Player.invStacks` (`inventory.items` 36 + `armor` 4 + `offhand` 1 = **41 slots**), each item's `Capabilities.EnergyStorage.ITEM.receiveEnergy(min(rate, total - charged))` | `util/ChargeUtil.java:27-33`, `util/Player.java:48-53` |
+| `getSlotLimit(0) = 1`, `canInsert(slot, stack) = stack.has(BOUND_PLAYER)`, `canExtract` true, `keepEnergy()` true | `PlayerTransmitterTile.java:65-79` |
+| The block is `Properties.metalNoSolid(2.0, 20.0)` with a `top` state and a second, decorative block above; the block entity exists only in the bottom half (`newBlockEntity` returns `null` for `top`) | `block/Blcks.java:52`, `PlayerTransmitterBlock.java` |
+| `BindingCardItem.use`: unbound → `stack.set(BOUND_PLAYER, new BoundPlayer(uuid, displayName))`; bound to someone else → a chat line and `FAIL`; on an EnderMan/Endermite it becomes `binding_card_dim` | `item/BindingCardItem.java:52-72` |
+| `BoundPlayer.CODEC`: `{gameProfileId: [I;4] (UUIDUtil.CODEC), name: String}` under the registered component `powah:bound_player` | `components/BoundPlayer.java`, `components/PowahComponents.java:39` |
+| `AerialPearlItem.interactLivingEntity`: an aerial pearl on a Zombie/Husk/ZombieVillager gives the player a `player_aerial_pearl` and kills it — the starter transmitter recipe's `p` | `item/AerialPearlItem.java:23-45` |
+
+### What it ships
+
+Rust:
+
+| File | Change |
+|---|---|
+| `src/runtime.rs` | `TRANSMITTER_TIER_COUNT`, `TransmitterTier` (= `HopperTier`, the same three rows), `transmitter_tier`, `PLAYER_INVENTORY_SLOTS`, `player_slot` (the `ItemAccess.forPlayerSlot` numbers), `player_charges`; **3 tests** |
+| `src/powah.rs` | `TRANSMITTERS`, `BINDING_CARD`, `AERIAL_PEARL`, `PLAYER_AERIAL_PEARL`, `BOUND_PLAYER`, `PLAYER_SLOTS`; `Kind::Transmitter`; `item_buffer`/`kind_item_slots`/`keep_capacity`/`battery_of` arms; `transmitter_battery`, `transmitter_container`; the `BoundPlayerComponent` (`powah:bound_player`); `CardPart` (`use_item`), `PearlPart` (`item_interact_mob`); `TransmitterPart` with `charge_bound_player` + `charge_player_inventory`; `CardReadout`, `transmitter_line`, the `/powah info` and `/powah set` arms; **4 tests** |
+| `src/lib.rs` | seven transmitters (a container, a buffer, a type, a Part and a machine item each), the card's `item_part`, the pearl's `item_part` and the pearl item key, and `component_types` registering `powah:bound_player` |
+| `src/runtime.rs` (network) | the relay's plan now moves FE only from the fuller **storage** to the emptier one; a **provider** (`can_insert` false: a furnator, a solar panel, a discharger) always gives — see "upstream defects fixed" |
+| `tools/carry_slice12.py` | 7 block definitions/blockstates/models/textures/loot/recipes/tags, the transmitter's shared body, the card, blank card, aerial pearl and player aerial pearl, the creative tab and the mineable tags — 93 files, `--check` green |
+| `tools/craft_check.py` | the ten new recipes (7 transmitters, binding card, blank card, aerial pearl) |
+| `tools/e2e.sh` | the transmitter phase, its blank-card control, the ladder/tag/keep/loot legs, the aerial-pearl leg and `SELFTEST=transmitter`; plus three harness fixes (below) |
+
+Content (93 files, all reproducible with `python3 tools/carry_slice12.py --check`): the seven
+`player_transmitter_*` blocks (metal, 2.0/20.0, stack 1) and their items, models, textures, loot and
+`powah:player_transmitters` block and item tags; `powah:binding_card` (stack 1), `powah:blank_card`,
+`powah:aerial_pearl` and `powah:player_aerial_pearl`; the ten recipes (the jar's own
+`player_tranmitter_*` spelling kept) and their unlock advancements.
+
+### The red proof
+
+**1. The family's rules, before any of them existed** (`cargo test`, 84 passed / 2 failed):
+
+```
+---- runtime::tests::every_player_transmitter_tier_is_the_battery_config_with_its_own_charging_rate stdout ----
+thread '...' panicked at src/runtime.rs:202:5:
+not yet implemented: slice 12: the player transmitter tier
+
+---- runtime::tests::a_player_pass_charges_each_inventory_item_at_its_rate_within_one_budget stdout ----
+thread '...' panicked at src/runtime.rs:213:5:
+not yet implemented: slice 12: the transmitter's pass over a player's inventory
+
+test result: FAILED. 84 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+```
+
+**2. The glue's three tests**, against a plausible wrong implementation each (the tests were written
+with the glue; each was then run against a mutation and failed, then the mutation reverted):
+
+```
+assertion `left == right` failed: powah:player_transmitter_starter keeps its buffer on its own item
+  left: None
+ right: Some(1000000)
+
+assertion `left == right` failed: a bound card names the player the tick charges
+  left: "Player Transmitter at 3,100,5: 5000/1000000 FE (comparator 0, bound AdLf0208, charging 1000 FE/t, 1000 FE/t a side, t=1234)"
+ right: "Player Transmitter at 3,100,5: 5000/1000000 FE (comparator 0, bound AdLf0208, charging 500 FE/t, 1000 FE/t a side, t=1234)"
+
+test powah::tests::a_binding_card_component_is_the_uuid_and_the_name_and_nothing_else_is_a_player ... FAILED
+```
+
+**3. The relay's ping-pong, before the fix** (`a_network_equalizes_two_storages_and_never_takes_back_what_it_gave`):
+
+```
+thread '...' panicked at src/runtime.rs:1314:9:
+assertion `left == right` failed: the rotation starts at the receiver; a network never takes back what it gave
+  left: [Transfer { from: 1, to: 0, amount: 500 }]
+ right: []
+```
+
+**4. The item-place slot numbering** (`a_player_slot_number_is_the_item_places_not_the_inventorys`):
+
+```
+thread '...' panicked at src/runtime.rs:218:5:
+not yet implemented: slice 12: the item place's player slot number
+```
+
+**5. In game**, four runs before the green one, each catching a real defect (logs kept):
+
+| Run | Verbatim |
+|---|---|
+| `e2e-0.2.12h-glue-before-player-slot.log` | `FAIL: the transmitter must have spent its whole 10,000 on the item in that player's inventory: Player Transmitter at 16,100,22: 10000/1000000 FE (comparator 0, bound Player10726, …)` — the inventory slot was read through `ItemPlace::EntitySlot`, which does not resolve a player; `PlayerSlot` (and its own numbering) is what the pin reads |
+| `e2e-0.2.12j-recipes-wrong-grid.log` | `FAIL: blank card + 2 redstone + rotten flesh -> a binding card: expected 1 powah:binding_card, got None xNone` — a 2×2 pattern sits at the grid's top left (100/101, 103/104), not at 101/106/107 |
+| `e2e-0.2.12e.log` (earlier) | `FAIL: using an unbound binding card did not write powah:bound_player on it` — `ctl command` answers `{"chat":[…]}`; the reader took the JSON, not the reply text |
+
+### Green
+
+| Check | Result |
+|---|---|
+| `cargo test --offline` | **91 passed, 0 failed** (`sdk-test.log`) |
+| `cargo clippy --all-targets --offline -- -D warnings` | 0 warnings, `CLIPPY_EXIT:0` (`slice12-clippy-fmt.log`) |
+| `cargo fmt --check` | clean, `FMT_EXIT:0` |
+| two builds | `BUILD1_EXIT:0`, `BUILD2_EXIT:0`, **byte-identical**, 525,573 B, 860 entries, `version = "0.2.12"`, no packed `Cargo.lock`, the packed `README.md` byte-identical to the tree's (`slice12-build-twice.log`) |
+| `cargo horizon-mod check powah.hmod` | `powah 0.2.12 (native-mod, format native-1/0a875da…/e59da909…, for 26.3)` · `525573 bytes, SHA-256 8b264c5d2e9a3da6073c9dc17229cd474d625ed63aabb56d6900922df5be951a`, `CHECK_EXIT:0` |
+| `cargo horizon-mod fits powah.hmod --build 0a875da` | `Powah:` / `0a875da  made for` (`FITS_PIN_EXIT:0`) |
+| `cargo horizon-mod fits powah.hmod --build 0b14f8a` | `Powah:` / `0b14f8a  fits` (`FITS_OTHER_EXIT:0`) |
+| `python3 ports/tools/check-recipe-types.py powah` | `powah: ok`, exit 0 |
+| `python3 ports/tools/verify-sdk-package.py powah` | **1/1**, 860 entries, every packed file the tree's bytes (`slice12-check-fits.log`) |
+| launcher build | `Compiling powah (1 of 1)`, `native-0a875da-2174565b7b48`, instance `powah-e2e` (`launcher-build-0.2.12.log`) |
+| in-game main leg | `PASS` + `EXIT:0` (`e2e-launcher-0.2.12.log`); the control game (the same Nightly without the package) knows none of the ids, the transmitter's included |
+| `SELFTEST=1` | `EXIT:1` — `FAIL: SELFTEST flipped: the unfuelled furnator made no FE, as it should` |
+| `SELFTEST=transmitter` | `EXIT:1` — `FAIL: SELFTEST flipped: the transmitter charged the item to 10000 FE, as it should` |
+| `check-e2e-logs.py powah-e2e --strict` | `logs=50  ok=50  missing-exit=0  bad-exit=0` |
+
+What the in-game leg proves, in order: a fresh transmitter reads
+`Player Transmitter at 16,100,22: 0/1000000 FE (comparator 0, bound empty, charging 500 FE/t, 1000 FE/t a side)`;
+a card held and used (`ctl use-item`) gains `powah:bound_player` naming the operator; moved into the
+slot it makes the readout say `bound Player35726`; `/powah set 10000` then a `powah:energy_cell_starter`
+in the operator's own inventory spends the whole 10,000 onto that item and leaves the transmitter at
+exactly 0; with 100,000 in the buffer two readouts 29 ticks apart differ by exactly **14,500 = 500 × 29**
+while the item gains **29 whole 500 FE steps** (`5500 → 20000`), and item + buffer add up to the
+100,000 within the 4,000 FE window the 8-tick read gap allows; a **blank** card in the slot reads `bound none` and
+spends nothing while the item stays at 0; the nitro tier clamps 2,000,000,000 FE and names
+`charging 1000000 FE/t, 2000000 FE/t a side`; `powah:player_transmitters` passes on a transmitter and
+fails on the arena floor; a 7,000 FE transmitter broken in survival carries its buffer back on its own
+item; every tier drops itself; and an aerial pearl used on a zombie turns into a player aerial pearl,
+spends exactly one of the two carried, and kills the zombie.
+
+### Coverage (parity rule, the family this slice adds)
+
+| Family (from the jar) | Status |
+|---|---|
+| the seven `player_transmitter_*` blocks and items | **tested** — the starter and the nitro placed and read back, `/powah set 2000000000` clamped at the nitro's 2,000,000,000, both readouts naming their own charging rate and transfer; the control game knows neither the block nor the card |
+| the buffer (`ChargingConfig` = `batteryCapacity`/`batteryTransfer`) | **tested** — the starter reads `0/1000000`, `/powah set 10000` holds, the nitro clamps at 2,000,000,000; the tier table pinned per tier against the cell's storage row (rule test) |
+| the tick (`ChargeUtil.chargeItemsInPlayerInv`) | **tested** — 10,000 FE of buffer lands on the cell item in the bound player's inventory (transmitter at exactly 0), and at 500 × dt against the game's clock (14,500 over 29 ticks) with whole 500 FE steps and conservation |
+| the card, its `use` and its component (`BoundPlayer.CODEC`) | **tested** — `ctl use-item` on a held card writes `powah:bound_player` (name read back = the operator's), the readout names them, and the component round-trips the UUID as four ints (rule test) |
+| `canInsert` only a bound card (slot limit 1) | **tested in game as the control** — a blank card sits in the slot (a container declaration cannot refuse it), the tick charges nothing and spends nothing |
+| `keepEnergy()` | **tested** — a 7,000 FE transmitter broken in survival and placed again reads 7,000/1,000,000 |
+| the ten recipes (7 transmitters, binding card, blank card, aerial pearl) | **tested** — `craft_check.py` crafts all ten in a real table: output id + count, every ingredient consumed |
+| `AerialPearlItem.interactLivingEntity` (the starter recipe's `p`) | **tested** — an aerial pearl on a zombie gives a player aerial pearl, spends one of two and kills the zombie |
+| the `powah:player_transmitters` block and item tags | **tested in game** — passes on a transmitter, fails on the arena floor |
+| loot | **tested** — all seven tiers mined in survival, each dropping itself |
+| the decorative `top` half of the block | `not ported` — one block (see deviations); it is a shape and a model, no behaviour |
+| `binding_card_dim` and its EnderMan/Endermite upgrade | `not ported` — the dimensional card bypasses the same-dimension test, which with no dim card is always applied |
+| the `powah:bound` item model property (`binding_card_bound`) | `not ported` — a client model property, not a machine behaviour; a bound card keeps the plain model |
+| the GUI, the JEI page and the sounds | `not ported` — slice 1's GUI gap; the ender-eye and zombie-death sounds are not played (this port has no sound calls) |
+
+### Deviations and upstream defects this slice records
+
+1. **The transmitter is one block, not two.** Upstream's block has a `top` state and places a second,
+   decorative block above the one holding the block entity (`PlayerTransmitterBlock.onPlace`), with
+   `updateShape` removing both when either goes. This slice carries the **bottom** block only: its
+   model, its state-less definition and its shape. A user sees a shorter device in the world than
+   upstream's; the behaviour is untouched. (Carrying the top would need `updateShape`/neighbour
+   removal hooks and a two-block break path, which is shape work, not machine work.)
+2. **`powah:bound_player` is an NBT component, not a typed one.** The pin registers component *names*
+   (`Hooks::component_types`) and reads/writes them as NBT; there is no typed codec registry. The
+   value is upstream's own compound (`{gameProfileId: [I;4], name}`), so a card written here reads in
+   upstream's codec and vice versa.
+3. **A blank card may sit in the slot.** Upstream's per-slot `canInsert` refuses a card without
+   `BOUND_PLAYER`; a container declaration cannot express a per-slot rule at this pin, so the tick's
+   bound-player test is what leaves it alone (and the in-game control proves it spends nothing).
+4. **The dimensional card is not carried**, so the same-dimension test is always applied. Upstream's
+   `card.isMultiDim() ||` arm has no counterpart to bypass.
+5. **The card's bound look is not drawn.** The `powah:bound` item model property is client-side and
+   not registered; a bound card keeps the unbound model (`binding_card_bound` is not carried).
+6. **No chat line for a card bound to someone else** (`chat.powah.no.binding`): the `use` answer is
+   upstream's `FAIL` but this port sends no message (no client text channel is opened here).
+7. **The player-slot numbering is the item place's, not `Inventory`'s.** `Player.invStacks` walks
+   `Inventory`'s numbers (36 main, the armour at 36–39, the off hand at 40); the pin's
+   `ItemPlace::PlayerSlot` takes `ItemAccess.forPlayerSlot`'s (0–35, the armour at 100–103, the off
+   hand at −106). `runtime::player_slot` is that map, and the first in-game run proved it matters
+   (the `EntitySlot` form read nothing at all).
+
+**Upstream defects fixed: one, in the cable network (a pre-existing behaviour, not this slice's
+family).** A network's plan rotated its starting port, so two **storage** blocks on one cable — both
+of which answer an extract — ping-ponged the same 500 FE: the receiver gave back next tick what it
+had just been given, and the pair never equalized. Measured in game on 2026-11-23 with a trace:
+`move 0→1 want=500 got=Ok(500)` then `move 1→0 want=500 got=Ok(500)`, alternating for hundreds of
+ticks, with a cell source holding 100,000 and its peer never keeping a charge. The rule is now
+upstream's: **a storage gives only to a storage that holds less; a provider (`can_insert` false — a
+furnator, a solar panel, a discharger) always gives**, because its buffer is filled by its own tick
+and not by the network. Two cells on a cable now equalize, a furnator still feeds a cell through a
+run of three cables, and the two cells' sum never changes. This also removed the flake the slice-3
+leg had carried since 0.2.3: that leg read the sink on whichever tick its chat reply landed, and the
+sink held 500 on one tick and 0 on the next (`e2e-0.2.12f.log`: sink `t=672` at 0 while the source
+held 100,000; `e2e-launcher-0.2.11.log`: sink 500).
+
+### Harness findings this slice measured (for the next port)
+
+1. **`ctl command` answers `{"chat":[…]}`.** A `data get` reply is inside the JSON, with the quotes
+   escaped, so a `sed` over the raw output reads nothing (it cost this slice a run). Extract with
+   `jq -r '[.chat[]?] | join(" ")'` first.
+2. **A chat reply can be 100+ ticks late on a busy box, and the 20-line window then holds the
+   *previous* answer.** `info` accepted the stale line and read a machine 110 ticks back (slices 3's
+   two-cell legs failed on three different runs for that reason alone). It now re-asks until the
+   readout's own ` t=` is **newer** than the one read before the command, and gives up with `NO-INFO`
+   rather than a number.
+3. **A cell-to-cell relay needs the sink read on a real tick, not a lucky one.** See the defect
+   above: the assertion was `> 0` on a value that alternated 500/0, so the leg's pass depended on the
+   parity of the command's tick.
+4. **A player's inventory slot is `ItemPlace::PlayerSlot`, not `ItemPlace::EntitySlot`.** The latter
+   resolves a chest minecart or a chested mount, and silently reads nothing for a player (the first
+   run's 10,000 stayed in the buffer).
+5. **`/data get entity @p Inventory[{Slot:0b}]…` is the stable read of an item the player carries.**
+   `@p` is the console's nearest player (the only one in this harness); `@s` on the console path is
+   the console, and `SelectedItem` is one selection stale.
+6. **A chat reply is not a place to put backticks.** A `read \`bound empty\`` inside the PASS string
+   ran a command substitution (`bound: command not found`) — the symptom was a PASS line with a hole
+   in it and a hang in `cleanup`.
+7. **`ctl quit` can hang on a long session.** After a 17,689-tick run on a loaded box the guard
+   killed the leg at its 900 s idle timeout, *after* the PASS line, and the log reported `EXIT:124`.
+   `cleanup` now bounds the quit with `timeout 60`.
+8. **A two-row pattern sits at the grid's top left** (`100,101 / 103,104`), not one row down; a case
+   written as `101/106/107` crafts nothing and reports `got None xNone`.
+
+The in-game legs ran the launcher build of the same sources (`native-0a875da-2174565b7b48`) while
+the delivered archive was rebuilt from the final tree after this section's `README.md` prose landed;
+the two differ in `README.md` alone, which is not in the game.
+
+Version: **0.2.11 → 0.2.12** (one patch). The published `[[versions]]` record keeps 0.2.11 and gains
+0.2.12 at publish time — this port does not touch the registry entry.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices

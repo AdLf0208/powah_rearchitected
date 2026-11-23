@@ -184,6 +184,54 @@ pub fn hopper_tier(index: usize) -> Option<HopperTier> {
     })
 }
 
+/// The tiers a player transmitter has, in `Tier.getNormalVariants` order: starter, basic, hardened,
+/// blazing, niotic, spirited, nitro (upstream's `Tier.getNormalVariants`, which
+/// `Blcks.PLAYER_TRANSMITTER` uses).
+pub const TRANSMITTER_TIER_COUNT: usize = 7;
+
+/// One player transmitter tier's numbers (`PowahConfig.EnergyDevices.player_transmitters`, a
+/// `ChargingConfig`): `batteryCapacity`/`batteryTransfer` for its buffer and its faces and
+/// `chargingTransfer` for the most it spends on one item of the bound player's inventory — the same
+/// three rows `hoppers` reads, so a tier's transmitter and hopper are the same numbers.
+pub type TransmitterTier = HopperTier;
+
+/// The player transmitter tier at `index` (0 = starter … 6 = nitro), `None` past the ladder.
+#[must_use]
+pub fn transmitter_tier(index: usize) -> Option<TransmitterTier> {
+    if index >= TRANSMITTER_TIER_COUNT {
+        return None;
+    }
+    hopper_tier(index)
+}
+
+/// How many of a player's inventory slots `Player.invStacks` walks: 36 main (0..36), the armour
+/// (36..40) and the off hand (40), in `Inventory`'s own numbers.
+pub const PLAYER_INVENTORY_SLOTS: usize = 41;
+
+/// The `ItemPlace::PlayerSlot` number of a slot `Inventory` numbers `slot` (`Player.invStacks`):
+/// `Inventory`'s 0..36 are the same, the armour's 36..40 (feet to head) are the item place's
+/// 100..=103, and the off hand's 40 is -106 — the numbering NeoForge's `ItemAccess.forPlayerSlot`
+/// takes, not `Inventory`'s. `None` past the inventory.
+#[must_use]
+pub fn player_slot(slot: usize) -> Option<i32> {
+    match slot {
+        0..=35 => i32::try_from(slot).ok(),
+        36..=39 => i32::try_from(100 + (slot - 36)).ok(),
+        40 => Some(-106),
+        _ => None,
+    }
+}
+
+/// One pass over a bound player's inventory (`ChargeUtil.chargeItemsInPlayerInv(player,
+/// charging_rates.get(variant), energy.getStored())`): the hopper's pass over 41 slots instead of a
+/// container's — `Player.invStacks` is the main inventory, the armour and the off hand, so
+/// `rooms[slot]` is one of those slots' rooms and `0` for an empty slot or an item with no energy
+/// buffer.
+#[must_use]
+pub fn player_charges(stored: i32, charging_rate: i32, rooms: &[i32]) -> Vec<i32> {
+    charge_slots(stored, charging_rate, rooms)
+}
+
 /// One pass over the container an energy hopper faces
 /// (`ChargeUtil.chargeItemsInContainer(container, charging_rates.get(variant), energy.getStored())`):
 /// each slot is asked for `min(the tier's charging rate, what is left of the buffer, the slot's own
@@ -616,6 +664,15 @@ fn plan(sides: &[Option<Neighbour>], transfer: i32, rotation: usize) -> Vec<Tran
             let Some(target) = sink[to] else {
                 continue;
             };
+            // A network only runs from the fuller store to the emptier one: a storage would
+            // otherwise give back what it received on the next tick, because the rotation picks
+            // the receiver as a source as soon as it holds a step (measured in game 2026-11-23:
+            // two cells on one cable ping-ponged 500/0 for a hundred ticks). A provider — a
+            // furnator, a solar panel, a discharger, whose `can_insert` is false — always gives:
+            // its buffer is filled by its own tick, not by the network.
+            if source.can_insert && target.can_insert && source.energy <= target.energy {
+                continue;
+            }
             let amount = available
                 .min(target.space())
                 .min(target.max_insert.max(0))
@@ -1261,6 +1318,103 @@ mod tests {
     }
 
     #[test]
+    fn a_player_slot_number_is_the_item_places_not_the_inventorys() {
+        // `Player.invStacks` walks `Inventory`'s numbers; `ItemPlace::PlayerSlot` takes
+        // `ItemAccess.forPlayerSlot`'s: the main inventory as itself, the armour 100..=103 and the
+        // off hand -106.
+        assert_eq!(player_slot(0), Some(0), "hotbar slot 0 is the same number");
+        assert_eq!(player_slot(8), Some(8), "hotbar slot 8 is the same number");
+        assert_eq!(player_slot(9), Some(9), "the main inventory continues at 9");
+        assert_eq!(player_slot(35), Some(35), "the last main slot");
+        assert_eq!(
+            player_slot(36),
+            Some(100),
+            "Inventory's 36 (feet) is the item place's 100"
+        );
+        assert_eq!(
+            player_slot(39),
+            Some(103),
+            "Inventory's 39 (head) is the item place's 103"
+        );
+        assert_eq!(
+            player_slot(40),
+            Some(-106),
+            "Inventory's 40 (off hand) is -106"
+        );
+        assert_eq!(player_slot(41), None, "there is no 42nd slot");
+        assert_eq!(
+            (0..PLAYER_INVENTORY_SLOTS).filter_map(player_slot).count(),
+            PLAYER_INVENTORY_SLOTS,
+            "every slot `Player.invStacks` walks has an item place number"
+        );
+    }
+
+    #[test]
+    fn a_network_equalizes_two_storages_and_never_takes_back_what_it_gave() {
+        // Two energy cells on one cable are both storages: each answers an extract (1,000 a call)
+        // and an insert (1,000 a call), so a plan that rotates its start lets the receiver give
+        // the same 500 back on the next tick and the pair ping-pongs instead of equalizing
+        // (measured 2026-11-23: the slice-3 leg read 0 or 500 depending on which tick the read
+        // landed on). Upstream's tiles give through `extractFromSides` into a neighbour's
+        // `receiveEnergy`, so a network only ever runs from the fuller store to the emptier one.
+        let full = buffer(100_000, 1_000_000, 1_000, 1_000);
+        let empty_cell = buffer(0, 1_000_000, 1_000, 1_000);
+        assert_eq!(
+            network_moves(&[full, empty_cell], 500, 0),
+            vec![Transfer {
+                from: 0,
+                to: 1,
+                amount: 500
+            }],
+            "the fuller storage gives the emptier its step"
+        );
+        let after = [
+            buffer(99_500, 1_000_000, 1_000, 1_000),
+            buffer(500, 1_000_000, 1_000, 1_000),
+        ];
+        assert_eq!(
+            network_moves(&after, 500, 1),
+            vec![Transfer {
+                from: 0,
+                to: 1,
+                amount: 500
+            }],
+            "the rotation starts at the receiver, and the receiver still does not give back: \
+             the fuller store is the one that moves"
+        );
+        assert_eq!(
+            network_moves(&after, 500, 0),
+            vec![Transfer {
+                from: 0,
+                to: 1,
+                amount: 500
+            }],
+            "the fuller storage keeps giving until the two are level"
+        );
+        let level = [
+            buffer(500, 1_000_000, 1_000, 1_000),
+            buffer(500, 1_000_000, 1_000, 1_000),
+        ];
+        assert_eq!(
+            network_moves(&level, 500, 0),
+            Vec::new(),
+            "two level storages have nothing to move"
+        );
+        // A generator is not a storage: its buffer is filled by its own tick, so it gives whatever
+        // it holds, however little (a furnator holding 20 FE into a cell holding 500).
+        let generator = buffer(20, 20_000, 0, 80);
+        assert_eq!(
+            network_moves(&[generator, buffer(500, 1_000_000, 1_000, 1_000)], 500, 1),
+            vec![Transfer {
+                from: 0,
+                to: 1,
+                amount: 20
+            }],
+            "a provider gives its whole buffer, fuller or not"
+        );
+    }
+
+    #[test]
     fn one_cable_is_the_same_plan_as_its_six_sides() {
         let mut sides = empty();
         sides[0] = Some(buffer(1_000, 20_000, 0, 80));
@@ -1820,6 +1974,78 @@ mod tests {
             hopper_charges(5_000, 500, &[]),
             Vec::<i32>::new(),
             "a container with no slots is a pass that does nothing"
+        );
+    }
+
+    #[test]
+    fn every_player_transmitter_tier_is_the_battery_config_with_its_own_charging_rate() {
+        // `PowahConfig.EnergyDevices`: `player_transmitters = new ChargingConfig(batteryCapacity(),
+        // batteryTransfer(), chargingTransfer())` — the cell's storage row and `cableTransfer`
+        // (`baseScaling * 500`) as the per-item charge rate: 500 FE a tick at starter, 1,000,000 at
+        // nitro.
+        let expected = [
+            (1_000_000, 1_000, 500),
+            (4_000_000, 4_000, 2_000),
+            (10_000_000, 10_000, 5_000),
+            (40_000_000, 40_000, 20_000),
+            (100_000_000, 100_000, 50_000),
+            (400_000_000, 400_000, 200_000),
+            (2_000_000_000, 2_000_000, 1_000_000),
+        ];
+        for (index, (capacity, transfer, charging_rate)) in expected.into_iter().enumerate() {
+            let tier = transmitter_tier(index)
+                .unwrap_or_else(|| panic!("tier {index} is on the transmitter ladder"));
+            assert_eq!(
+                (tier.capacity, tier.transfer, tier.charging_rate),
+                (capacity, transfer, charging_rate),
+                "player transmitter tier {index}'s numbers"
+            );
+            assert_eq!(
+                cell_tier(index).map(|cell| (cell.capacity, cell.transfer)),
+                Some((capacity, transfer)),
+                "tier {index} stores what the cell of that tier stores: the battery config"
+            );
+            assert_eq!(
+                hopper_tier(index).map(|hopper| hopper.charging_rate),
+                Some(charging_rate),
+                "tier {index} charges at the hopper's rate: upstream gives both `chargingTransfer`"
+            );
+        }
+        assert_eq!(
+            transmitter_tier(TRANSMITTER_TIER_COUNT),
+            None,
+            "there is no eighth player transmitter tier"
+        );
+    }
+
+    #[test]
+    fn a_player_pass_charges_each_inventory_item_at_its_rate_within_one_budget() {
+        // `ChargeUtil.chargeItemsInPlayerInv` is the container pass over `Player.invStacks`: the
+        // main inventory, the armour and the off hand, one `min(rate, budget, room)` step each.
+        assert_eq!(
+            player_charges(1_200, 500, &[10_000, 10_000, 10_000]),
+            vec![500, 500, 200],
+            "the pass spends the tier's rate a slot, then only what the buffer has left"
+        );
+        assert_eq!(
+            player_charges(100_000, 500, &[10_000; 41]),
+            vec![500; 41],
+            "a full inventory of roomy items takes the rate in every one of the 41 slots"
+        );
+        assert_eq!(
+            player_charges(1_200, 500, &[0, 10_000, 0, 100]),
+            vec![0, 500, 0, 100],
+            "empty slots and items with no energy buffer are left alone and cost no budget"
+        );
+        assert_eq!(
+            player_charges(0, 500, &[10_000]),
+            vec![0],
+            "a transmitter with an empty buffer charges nothing"
+        );
+        assert_eq!(
+            player_charges(-5, 500, &[10_000]),
+            vec![0],
+            "nothing negative is charged"
         );
     }
 
