@@ -176,6 +176,36 @@ behaviour on break, the rod's `keepEnergy` (the block item carries its buffer),
 the wrench link, the side-config gate on a rod's energy face, and the client
 renderers (`EnergizingOrbRenderer`, `EnergizingRodRenderer`).
 
+## Slice 9 — the Energy Hopper, read 2026-11-23
+
+Same clone, tag `v6.2.10` (commit `a5a8f25`). Files read:
+
+| Area | Files |
+|---|---|
+| hopper | `block/hopper/EnergyHopperTile.java`, `EnergyHopperBlock.java` |
+| machine core | `lib/block/AbstractEnergyStorage.java` (`chargeItems`), `lib/block/AbstractTickableTile.java` (`postTick`), `lib/block/AbstractBlock.java` (`Facing.ALL`, placement) |
+| item charging | `util/ChargeUtil.java` (`chargeItemsInContainer`, `transferSlotList`) |
+| numbers | `config/v2/PowahConfig.java` (`devices.hoppers`), `config/v2/DefaultEnergies.java`, `block/Blcks.java` |
+
+**Behaviour extracted.**
+
+- `devices.hoppers = new ChargingConfig(batteryCapacity(), batteryTransfer(), chargingTransfer())`:
+  the tier's capacity and per-face transfer are the **cell** row (starter 1,000,000 FE / 1,000 FE a
+  side), and `chargingTransfer` is the cable's `baseScaling × 500` — **500 FE a tick at starter**.
+- `postTick` reads `state.facing`, takes `level.getBlockEntity(pos.relative(side))`, and when it is a
+  `Container` runs `ChargeUtil.chargeItemsInContainer(container, charging_rates.get(variant),
+  energy.getStored())` and then `energy.consume(extracted)`. It has **no `extractFromSides`**: a
+  hopper never pushes.
+- `chargeItemsInContainer` is one pass over `0..containerSize`; an empty slot is skipped, and each
+  stack's `Capabilities.EnergyStorage.ITEM.receiveEnergy(min(rate, total - charged))` — a stone (no
+  handler) is asked for nothing.
+- `keepEnergy()` is true and `getSlotLimit(0)`/`canInsert`/`canExtract` are false: the block has
+  **no slots of its own** (its GUI is empty) and its item carries the buffer.
+- `getTransferType()` is `AbstractEnergyBlock`'s default `Transfer.ALL`: the buffer takes and gives
+  its transfer on every face.
+- `Blcks.ENERGY_HOPPER` is `Properties.metalNoSolid(2.0, 20.0)` with `Facing.ALL` (six values,
+  default `north`), `Tier.getNormalVariants()` (seven tiers), stack 1.
+
 ## Slice 1 boundary
 
 Implemented: the starter **Furnator** (fuel → FE), the starter **Energy Cell**

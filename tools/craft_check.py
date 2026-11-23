@@ -19,8 +19,9 @@ The cases are the eight material recipes slice 2 adds, the three machine recipes
 slice 1 carried but could not craft, slice 4's basic energy cell, slice 5's
 twenty-one (the energizing orb, the seven rods, the large capacitor and its five
 tiers, the five cell recipes that needed the orb's materials, and the blazing
-crystal block both ways), and slice 6's eighteen: the six furnator tiers and both
-of the jar's cable recipes for the six cable tiers. A wrong id or count exits 1
+crystal block both ways), slice 6's eighteen (the six furnator tiers and both
+of the jar's cable recipes for the six cable tiers), slice 8's seven dischargers
+and slice 9's seven hoppers. A wrong id or count exits 1
 with the observed slot and three off-pattern grids (a stick where the casing goes
 on the furnator's and the orb's shapes, and where the capacitor goes on the
 cable's) must leave the result empty. `SELFTEST=1` expects the first output one
@@ -136,6 +137,16 @@ def discharger(capacitor_id):
     return {"powah:dielectric_paste": [100, 102, 103, 105, 106, 108],
             capacitor_id: [101, 107],
             "powah:dielectric_casing": [104]}
+
+
+def hopper(capacitor_id, below):
+    """`ppp/cdc/php`: five dielectric paste, the tier's capacitor beside the
+    casing, and either a vanilla hopper (the starter) or the previous tier's
+    hopper in the bottom middle (the jar's `energy_hopper_<tier>` shape)."""
+    return {"powah:dielectric_paste": [100, 101, 102, 106, 108],
+            capacitor_id: [103, 105],
+            "powah:dielectric_casing": [104],
+            below: [107]}
 
 
 def shaped(label, pattern, out, out_count):
@@ -333,6 +344,28 @@ CASES = [
     shaped("6 paste + 2 nitro capacitors + casing -> a nitro discharger",
            discharger("powah:capacitor_nitro"),
            "powah:energy_discharger_nitro", 1),
+    # --- slice 9: the hopper ladder -----------------------------------------
+    shaped("5 paste + 2 tiny capacitors + casing + 2 hoppers -> a starter hopper",
+           hopper("powah:capacitor_basic_tiny", "minecraft:hopper"),
+           "powah:energy_hopper_starter", 1),
+    shaped("5 paste + 2 basic capacitors + casing + starter hopper -> a basic hopper",
+           hopper("powah:capacitor_basic", "powah:energy_hopper_starter"),
+           "powah:energy_hopper_basic", 1),
+    shaped("5 paste + 2 hardened capacitors + casing + basic hopper -> a hardened hopper",
+           hopper("powah:capacitor_hardened", "powah:energy_hopper_basic"),
+           "powah:energy_hopper_hardened", 1),
+    shaped("5 paste + 2 blazing capacitors + casing + hardened hopper -> a blazing hopper",
+           hopper("powah:capacitor_blazing", "powah:energy_hopper_hardened"),
+           "powah:energy_hopper_blazing", 1),
+    shaped("5 paste + 2 niotic capacitors + casing + blazing hopper -> a niotic hopper",
+           hopper("powah:capacitor_niotic", "powah:energy_hopper_blazing"),
+           "powah:energy_hopper_niotic", 1),
+    shaped("5 paste + 2 spirited capacitors + casing + niotic hopper -> a spirited hopper",
+           hopper("powah:capacitor_spirited", "powah:energy_hopper_niotic"),
+           "powah:energy_hopper_spirited", 1),
+    shaped("5 paste + 2 nitro capacitors + casing + spirited hopper -> a nitro hopper",
+           hopper("powah:capacitor_nitro", "powah:energy_hopper_spirited"),
+           "powah:energy_hopper_nitro", 1),
 ]
 
 

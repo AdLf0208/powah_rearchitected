@@ -107,6 +107,21 @@
 # SELFTEST=drain expects the item to keep its 5,000 (it must FAIL), proving the
 # drain assertion can fail.
 #
+# Slice 9 (the energy hopper, the charging half of that family) adds:
+#  - a starter hopper (1,000,000 FE, 1,000 FE/t a side, 500 FE/t charging) facing a
+#    chest whose slot 0 holds a `powah:energy_cell_starter` at 0, set to 5,000: the
+#    buffer falls exactly 500 FE a tick measured against the game's clock, the item
+#    ends holding the whole difference, and the two halves add up to the 5,000;
+#  - a second hopper facing away from its chest (`facing=north`) charges nothing and
+#    spends nothing, so the face is what selects the container;
+#  - a stone in the chest takes nothing;
+#  - a nitro hopper clamps at 2,000,000,000 FE and names `charging 1000000 FE/t,
+#    2000000 FE/t a side`, the block is in `powah:energy_hoppers`, and a broken
+#    7,000 FE hopper carries its buffer back;
+#  - and every hopper tier mined in survival drops itself.
+# SELFTEST=hopper expects the chest's item to read 0 (it must FAIL), proving the
+# charging assertion can fail.
+#
 # Slice 5 (the five cell recipes' `blocked(energizing-orb)` gate) adds the
 # Energizing Orb, its seven rods and the five materials they make:
 #  - a starter rod beside an orb holding iron and gold fills it to exactly its
@@ -241,7 +256,7 @@ pickup() { # pickup ITEM X Y Z
     local tries=0 drop slot main k dx dy dz
     ctl wait 10
     while [ "$tries" -lt 4 ] && [ "$(inv_count "$1")" -lt 1 ]; do
-        drop=$(ctl entities 12 item |
+        drop=$(ctl entities 32 item |
             jq -r --arg id "$1" '[.entities[] | select(.item.item == $id) | .pos] | first // empty | @csv')
         if [ -n "$drop" ]; then
             IFS=, read -r dx dy dz <<<"$drop"
@@ -254,7 +269,7 @@ pickup() { # pickup ITEM X Y Z
         tries=$((tries + 1))
     done
     [ "$(inv_count "$1")" -ge 1 ] ||
-        fail "$1 did not reach the inventory after the break: $(ctl inventory | jq -c '{counts, hotbar}' | head -c 400)"
+        fail "$1 did not reach the inventory after the break: $(ctl inventory | jq -c '{counts, hotbar}' | head -c 400) nearby items: $(ctl entities 32 item | jq -c '[.entities[] | {item: .item.item, pos}]' | head -c 400)"
     slot=$(ctl inventory | jq -r --arg i "$1" '[.hotbar[] | select(.item == $i) | .slot] | .[0] // ""')
     if [ -z "$slot" ]; then
         main=$(ctl inventory | jq -r --arg i "$1" '[.main[] | select(.item == $i) | .slot] | .[0] // ""')
@@ -485,6 +500,19 @@ energy_of() { sed -nE 's/.* at [-0-9]+,[-0-9]+,[-0-9]+: ([0-9]+)\/[0-9]+ FE.*/\1
 carbon_of() { sed -nE 's/.*carbon ([0-9]+).*/\1/p' <<<"$1"; }
 burning_of() { sed -nE 's/.*burning (true|false).*/\1/p' <<<"$1"; }
 
+# --- slice 9: a container's item, read in place ---------------------------------
+
+# chest_energy X Y Z SLOT: the `energy` this mod's item payload holds on the stack in a
+# container's slot. The read is the server's own NBT path (no move, so it never disturbs the
+# machine that is charging the item, and no `data get entity SelectedItem`, which is one
+# selection stale); empty when the stack carries no payload at all (a stone, a fresh item).
+chest_energy() { # chest_energy X Y Z SLOT
+    local reply
+    reply=$(ctl command "data get block $1 $2 $3 Items[$4].components.\"minecraft:block_entity_data\".energy")
+    echo "  data get block($1,$2,$3) Items[$4]: $reply" >&2
+    sed -nE 's/.*: *(-?[0-9]+).*/\1/p' <<<"$reply"
+}
+
 cleanup() {
     rc=$?
     ctl quit >/dev/null 2>&1 || true
@@ -520,6 +548,7 @@ arena() {
     ctl wait 20
     ctl command "fill -8 99 -8 24 99 24 minecraft:stone" >/dev/null
     ctl command "fill -8 100 -8 24 110 24 minecraft:air" >/dev/null
+    ctl command "difficulty peaceful" >/dev/null
     ctl command "kill @e[type=!player]" >/dev/null
     ctl tp 0.5 100 3.5 >/dev/null
     ctl wait 20
@@ -540,6 +569,17 @@ place() { # place X Y Z ID
     got=$(ctl block "$1" "$2" "$3" | jq -r '.name // .block // empty')
     echo "  block($1,$2,$3) = $got"
     [ "$got" = "$4" ] || fail "expected $4 at $1,$2,$3, got '$got'"
+}
+
+# floor_under X Z: a stone platform at y=99 from one block behind (X, 100, Z) to two in front. The
+# arena floor spans -8..24, and a `keepEnergy` leg stands its machine on y=100 outside that: without
+# a platform, the item a break drops falls into the world and the *player* does too (`pickup` tp's
+# to y=100 beside the block, and the fall is ~35 blocks), so the pickup's entity read then sees the
+# ambient drops at y=63 instead of the machine (measured 2026-11-22, two runs; the 0.2.8 run won
+# the race). The platform covers the standing spot a pickup and a `place_item` use, not the whole
+# arena: it must not erase a neighbouring phase's block.
+floor_under() { # floor_under X Z
+    ctl command "fill $(($1 - 1)) 99 $(($2 - 1)) $(($1 + 1)) 99 $(($2 + 2)) minecraft:stone" >/dev/null
 }
 
 # The negative control: an unmodified client of the same build. The block id must
@@ -620,6 +660,18 @@ control_leg() {
     case "$discharger_item" in
         *"Unknown item"*|*"unknown item"*|*"error"*|*"not found"*) ;;
         *) fail "the control game knew powah:energy_discharger_nitro, so the content did not come from this package" ;;
+    esac
+    hopper=$(ctl command "setblock 7 100 0 powah:energy_hopper_starter")
+    echo "  hopper setblock reply: $hopper"
+    case "$hopper" in
+        *"Unknown block"*|*"unknown block"*|*"error"*) ;;
+        *) fail "the control game knew powah:energy_hopper_starter, so the content did not come from this package" ;;
+    esac
+    hopper_item=$(ctl command "give @s powah:energy_hopper_nitro 1")
+    echo "  hopper give reply: $hopper_item"
+    case "$hopper_item" in
+        *"Unknown item"*|*"unknown item"*|*"error"*|*"not found"*) ;;
+        *) fail "the control game knew powah:energy_hopper_nitro, so the content did not come from this package" ;;
     esac
     name=$(ctl block 4 100 0 | jq -r '.name // .block // "unknown"')
     [ "$name" = "minecraft:air" ] || fail "the control game holds $name, so the block id was known"
@@ -1095,6 +1147,7 @@ echo "== slice 7: a broken machine's own item carries its buffer =="
 # read 5,000 — a package without the drop hook reads 0 (0.2.6 did).
 ctl command "tp @s 32.5 100 35.5" >/dev/null
 tool_up
+floor_under 32 36
 place 32 100 36 powah:furnator_starter
 set_clamped 32 100 36 5000 5000
 ctl look-at-block 32 100 36 >/dev/null || true
@@ -1178,6 +1231,7 @@ echo "  plain item: $plain_line"
 [ "$(energy_of "$plain_line")" = 0 ] ||
     fail "a freshly given furnator placed a machine holding $(energy_of "$plain_line") FE: $plain_line"
 # Every keepEnergy machine counts, not just the furnator: a starter cell at 4,000.
+floor_under 38 36
 place 38 100 36 powah:energy_cell_starter
 set_clamped 38 100 36 4000 4000
 tool_up
@@ -1468,6 +1522,7 @@ case "$tag_miss" in
 esac
 # `keepEnergy()` is true for a discharger too: 7,000 FE broken in survival and placed
 # again reads 7,000 (the shared payload code, proved on this family).
+floor_under 36 40
 place 36 100 40 powah:energy_discharger_starter
 set_clamped 36 100 40 7000 7000
 ctl command "tp @s 36.5 100 39.5" >/dev/null
@@ -1500,6 +1555,174 @@ echo "  cell:       $feed_source"
     fail "a discharger took FE through a face: $feed_line"
 [ "$(energy_of "$feed_source")" = 50000 ] ||
     fail "the cell beside the discharger lost FE: $feed_source"
+
+echo "== slice 9: a hopper charges the container on the face its facing names =="
+# `EnergyHopperTile.postTick`: `side = state.facing`, the block entity there must be a
+# `Container`, and `ChargeUtil.chargeItemsInContainer(container, charging_rates.get(variant),
+# energy.getStored())` spends the tier's rate on each item out of the hopper's own buffer. A starter
+# hopper stores 1,000,000 FE (`devices.hoppers` is the battery config) and charges 500 FE a tick
+# (`chargingTransfer`). It has no slots of its own: the item lives in the chest it faces.
+place 6 100 20 minecraft:chest
+ctl command "setblock 6 100 19 powah:energy_hopper_starter[facing=south]" >/dev/null
+ctl wait 4
+hopper_at=$(ctl block 6 100 19 | jq -r '.name // .block // empty')
+echo "  block(6,100,19) = $hopper_at"
+[ "$hopper_at" = powah:energy_hopper_starter ] ||
+    fail "expected powah:energy_hopper_starter at 6,100,19, got '$hopper_at'"
+hopper_line=$(info 6 100 19)
+echo "  hopper: $hopper_line"
+case "$hopper_line" in
+    *"Energy Hopper at 6,100,19: 0/1000000 FE (comparator 0, facing south, charging 500 FE/t, 1000 FE/t a side,"*)
+        ;;
+    *) fail "a fresh hopper must read an empty 1,000,000 FE buffer facing south at 500 FE/t charging, got '$hopper_line'" ;;
+esac
+# The buffer is set while the chest is empty: a hopper with an item to charge spends on the tick
+# after the write, so an equality poll could never settle (measured: it read 4000). Setting it first
+# is also what makes 5,000 a whole — the item starts at 0 and takes every FE the hopper loses.
+set_energy 6 100 19 5000
+ctl command "item replace block 6 100 20 container.0 with powah:energy_cell_starter 1" >/dev/null
+# 5,000 at 500 FE a tick is ten charges, so the hopper empties and the item holds the whole of it:
+# `500 x dt` against the hopper's own `t=` clock, with the hopper at `5000 - 500 x dt`.
+spent_line=$(info 6 100 19)
+for _ in $(seq 1 30); do
+    [ "$(energy_of "$spent_line")" = 0 ] && break
+    ctl wait 10
+    spent_line=$(info 6 100 19)
+done
+echo "  spent: $spent_line"
+[ "$(energy_of "$spent_line")" = 0 ] ||
+    fail "the hopper must have spent its whole 5,000 on the item in the chest: $spent_line"
+hopper_item_energy=$(chest_energy 6 100 20 0)
+echo "  hopper at 0, the chest's item at ${hopper_item_energy:-none} FE: 5000 - 500 x 10 = 0"
+[ -n "$hopper_item_energy" ] ||
+    fail "the cell item in the chest carries no energy payload, though the hopper spent its 5,000"
+want_item=$hopper_item_energy
+if [ "$SELFTEST" = hopper ]; then
+    want_item=0
+    echo "  SELFTEST: expecting the chest's item at 0 (this must fail)"
+fi
+[ "$hopper_item_energy" = "$want_item" ] ||
+    fail "the chest's item must read $want_item FE, got $hopper_item_energy"
+[ "$hopper_item_energy" = 5000 ] ||
+    fail "the hopper's whole 5,000 must be on the item, not $hopper_item_energy"
+[ $((hopper_item_energy % 500)) = 0 ] ||
+    fail "the chest's item holds $hopper_item_energy FE, not a whole number of 500 FE steps"
+
+echo "== slice 9: the charging rate is the tier's 500 FE a tick =="
+# Measured against the game's own clock: a bigger buffer (100,000 FE is 200 charges) so one chat
+# round trip is a fraction of it, and two readouts `dt` ticks apart must differ by exactly
+# 500 x dt. The item's own charge is the same number: what the hopper lost is what the item gained.
+# The charged item is cleared first, because a hopper with anything to charge spends on the tick
+# after the write and a 100,000 equality poll would never settle (measured: it read 99500).
+ctl command "item replace block 6 100 20 container.0 with minecraft:air" >/dev/null
+ctl wait 3
+set_energy 6 100 19 100000
+ctl command "item replace block 6 100 20 container.0 with powah:energy_cell_starter 1" >/dev/null
+ctl wait 3
+rate_first=$(info 6 100 19)
+rate_second=$(info 6 100 19)
+echo "  rate: $rate_first"
+echo "  rate: $rate_second"
+t1=$(time_of "$rate_first")
+t2=$(time_of "$rate_second")
+b1=$(energy_of "$rate_first")
+b2=$(energy_of "$rate_second")
+dt=$((t2 - t1))
+db=$((b1 - b2))
+echo "  dt=$dt ticks, hopper -$db FE"
+[ "$dt" -ge 2 ] || fail "the two readouts were $dt ticks apart, too close to measure a rate"
+[ $((db % 500)) = 0 ] ||
+    fail "the hopper spent $db FE over $dt ticks, not a whole number of 500 FE charging steps"
+steps=$((db / 500))
+[ "$steps" -ge $((dt - 1)) ] && [ "$steps" -le $((dt + 1)) ] ||
+    fail "the hopper spent $db FE over $dt ticks; at 500 FE a tick that is not one charge a tick (expected $((dt * 500)) +- 500)"
+rate_energy=$(chest_energy 6 100 20 0)
+rate_stopped=$(info 6 100 19)
+rate_left=$(energy_of "$rate_stopped")
+echo "  item at ${rate_energy:-none}, hopper at $rate_left of the 100,000 it held"
+[ -n "$rate_energy" ] || fail "the cell item took nothing from the hopper"
+[ $((rate_energy % 500)) = 0 ] ||
+    fail "the item holds $rate_energy FE, not a whole number of 500 FE steps"
+[ $((rate_energy > 500)) = 1 ] ||
+    fail "a 100,000 FE buffer at 500 a tick must have charged the item far past $rate_energy FE"
+# The two reads are a tick or two apart, so the sum is the whole within one step either way:
+# an item that never took the FE, or a hopper that spent it elsewhere, is thousands short.
+unaccounted=$((100000 - rate_energy - rate_left))
+echo "  unaccounted: $unaccounted FE (item + hopper against the 100,000)"
+[ "$unaccounted" -ge -1500 ] && [ "$unaccounted" -le 1500 ] ||
+    fail "the item's $rate_energy FE and the hopper's $rate_left FE do not add up to the 100,000 it held (off by $unaccounted): $rate_stopped"
+
+echo "== slice 9: a hopper facing away leaves the container alone =="
+# The counterfactual for the charging above: the same hopper, the same chest, the same 5,000 — with
+# `facing=north`, so the block it reads is not the chest. Nothing is charged and nothing is spent.
+place 8 100 20 minecraft:chest
+ctl command "setblock 8 100 19 powah:energy_hopper_starter[facing=north]" >/dev/null
+ctl wait 4
+set_energy 8 100 19 5000
+ctl command "item replace block 8 100 20 container.0 with powah:energy_cell_starter 1" >/dev/null
+ctl wait 40
+away_line=$(info 8 100 19)
+echo "  away: $away_line"
+[ "$(energy_of "$away_line")" = 5000 ] ||
+    fail "a hopper facing north, away from the chest beside it, spent FE: $away_line"
+away_item=$(chest_energy 8 100 20 0)
+echo "  away chest item: ${away_item:-no payload}"
+[ -z "$away_item" ] ||
+    fail "a hopper facing away charged the chest's item to $away_item FE"
+
+echo "== slice 9: an item with no buffer takes nothing from the hopper =="
+# A stone has no energy handler, so `chargeItemsInContainer` asks it for nothing: the buffer stays
+# exactly where `/powah set` put it, as the discharger's stone leg is this family's mirror.
+# The rate phase's cell item is cleared first for the same reason: an item that takes FE makes an
+# equality poll on the buffer impossible.
+ctl command "item replace block 6 100 20 container.0 with minecraft:air" >/dev/null
+ctl wait 3
+set_energy 6 100 19 5000
+ctl command "item replace block 6 100 20 container.0 with minecraft:stone 1" >/dev/null
+ctl wait 40
+stone_line=$(info 6 100 19)
+echo "  stone: $stone_line"
+[ "$(energy_of "$stone_line")" = 5000 ] ||
+    fail "a stone in the chest made the hopper spend FE: $stone_line"
+
+echo "== slice 9: the hopper ladder, its tags and its kept buffer =="
+# A nitro hopper clamps `/powah set` at 2,000,000,000 FE, and its own row is the cell's plus a
+# 1,000,000 FE/t charging rate (`chargingTransfer` at nitro).
+place 10 100 18 powah:energy_hopper_nitro
+set_clamped 10 100 18 2000000000 2000000000
+expect_info 10 100 18 "2000000000/2000000000 FE"
+expect_info 10 100 18 "charging 1000000 FE/t, 2000000 FE/t a side"
+hopper_tag=$(ctl command "execute if block 6 100 19 #powah:energy_hoppers")
+hopper_tag_miss=$(ctl command "execute if block 0 99 3 #powah:energy_hoppers")
+echo "  tag(6,100,19) = $hopper_tag"
+echo "  tag(0,99,3)    = $hopper_tag_miss"
+case "$hopper_tag" in
+    *"passed"*) ;;
+    *) fail "a hopper is not in powah:energy_hoppers: $hopper_tag" ;;
+esac
+case "$hopper_tag_miss" in
+    *"failed"*) ;;
+    *) fail "the arena floor matched powah:energy_hoppers: $hopper_tag_miss" ;;
+esac
+# `keepEnergy()` is true for a hopper too: 7,000 FE broken in survival and placed again reads 7,000.
+floor_under 12 18
+place 12 100 18 powah:energy_hopper_starter
+set_clamped 12 100 18 7000 7000
+ctl command "tp @s 12.5 100 17.5" >/dev/null
+ctl command "gamemode creative @s" >/dev/null
+tool_up
+ctl look-at-block 12 100 18 >/dev/null || true
+hopper_broken=$(ctl break 12 100 18) || fail "cannot break the hopper at 12,100,18"
+echo "$hopper_broken" | jq -c '{scenario:"hopper-keep-energy", block, drops, picked_up}'
+pickup powah:energy_hopper_starter 12 100 18
+place_item 12 100 18 powah:energy_hopper_starter
+hopper_kept=$(info 12 100 18)
+echo "  hopper placed again: $hopper_kept"
+[ "$(energy_of "$hopper_kept")" = 7000 ] ||
+    fail "a hopper placed from its own drop read $(energy_of "$hopper_kept")/1000000 FE, not the 7000 it was broken with: $hopper_kept"
+ctl command "gamemode creative @s" >/dev/null
+ctl command "clear @s" >/dev/null
+ctl wait 4
 
 echo "== slice 2: the six dielectric/capacitor items are real items =="
 for item in powah:dielectric_paste powah:dielectric_rod powah:dielectric_rod_horizontal \
@@ -1610,8 +1833,19 @@ for tier in starter basic hardened blazing niotic spirited nitro; do
     got=$(echo "$broken" | jq -r --arg id "$block" '.drops[$id] // 0')
     [ "$got" -ge 1 ] || fail "breaking $block dropped $got of itself, not the block"
 done
+# Slice 9: every hopper tier drops itself.
+for tier in starter basic hardened blazing niotic spirited nitro; do
+    block="powah:energy_hopper_$tier"
+    place 6 100 0 "$block"
+    ctl look-at-block 6 100 0 >/dev/null || true
+    broken=$(ctl break 6 100 0) || fail "cannot break $block at 6,100,0"
+    echo "$broken" | jq -c '{scenario:"loot", block, drops}'
+    [ "$(echo "$broken" | jq -r '.block')" = "minecraft:air" ] || fail "$block did not break"
+    got=$(echo "$broken" | jq -r --arg id "$block" '.drops[$id] // 0')
+    [ "$got" -ge 1 ] || fail "breaking $block dropped $got of itself, not the block"
+done
 ctl command "gamemode creative @s" >/dev/null
 ctl command "clear @s" >/dev/null
 ctl wait 3
 
-echo "PASS: a fuelled furnator made FE, the cable carried it into the cell, an unfuelled furnator made nothing, a cell without a cable stayed empty, a full cell stayed full, a charged cell drained through a cable into an empty one, a three-cable network carried a charge across its run with the two cells' sum unchanged and a cell off the network empty, the six material items exist, every material and machine recipe crafted its declared output and consumed its ingredients, each machine dropped itself, every energy cell tier clamped 2,000,000,000 FE at its own capacity and carried its own transfer, two adjacent cells swapped within their own transfer cap without creating FE, every cell tier dropped itself, a starter rod filled the orb to exactly its recipe's 10,000 FE and stood at 0, an orb with no rod and an orb with no recipe produced nothing while its rod kept its charge, a nitro rod made a blazing crystal at exactly 120,000 FE and kept the other 80,000, the blaze-rod blazing recipe, the niotic, spirited and nitro crystals all energised, every new block and item exists, every carried recipe including the five previously blocked cells crafts its declared output and consumes its ingredients, every furnator tier clamped 2,000,000,000 FE at its own generation capacity, a nitro furnator made exactly 40,000 FE in one tick of a coal and a starter furnator kept energy + carbon at 48,000 while filling slowly, every cable tier read back its own rate, a basic network refused to relay through a starter cable and delivered once that cable was basic, every new furnator, cable and discharger tier dropped itself, a starter furnator charged the item in its charge slot at exactly min(transfer, stored, room) with the FE coming out of its own buffer and left an item with no buffer alone, a cell charged two slots out of one budget, a 5,000 FE furnator and a 4,000 FE cell broken in survival carried their buffers on their own items and gave them back on placement while their spilled stacks did not, an item doctored to 2,000,000,000 FE clamped to its tier's 20,000 on placement and a fresh item placed an empty machine, and every guessed id is unknown without the package"
+echo "PASS: a fuelled furnator made FE, the cable carried it into the cell, an unfuelled furnator made nothing, a cell without a cable stayed empty, a full cell stayed full, a charged cell drained through a cable into an empty one, a three-cable network carried a charge across its run with the two cells' sum unchanged and a cell off the network empty, the six material items exist, every material and machine recipe crafted its declared output and consumed its ingredients, each machine dropped itself, every energy cell tier clamped 2,000,000,000 FE at its own capacity and carried its own transfer, two adjacent cells swapped within their own transfer cap without creating FE, every cell tier dropped itself, a starter rod filled the orb to exactly its recipe's 10,000 FE and stood at 0, an orb with no rod and an orb with no recipe produced nothing while its rod kept its charge, a nitro rod made a blazing crystal at exactly 120,000 FE and kept the other 80,000, the blaze-rod blazing recipe, the niotic, spirited and nitro crystals all energised, every new block and item exists, every carried recipe including the five previously blocked cells crafts its declared output and consumes its ingredients, every furnator tier clamped 2,000,000,000 FE at its own generation capacity, a nitro furnator made exactly 40,000 FE in one tick of a coal and a starter furnator kept energy + carbon at 48,000 while filling slowly, every cable tier read back its own rate, a basic network refused to relay through a starter cable and delivered once that cable was basic, every new furnator, cable and discharger tier dropped itself, a starter furnator charged the item in its charge slot at exactly min(transfer, stored, room) with the FE coming out of its own buffer and left an item with no buffer alone, a cell charged two slots out of one budget, a 5,000 FE furnator and a 4,000 FE cell broken in survival carried their buffers on their own items and gave them back on placement while their spilled stacks did not, an item doctored to 2,000,000,000 FE clamped to its tier's 20,000 on placement and a fresh item placed an empty machine, a starter hopper spent exactly 500 FE a tick on the cell item in the chest it faced and the two halves of the 5,000 it held added up, a hopper facing away from the chest charged nothing and a stone in the chest took nothing, every hopper tier dropped itself, a 7,000 FE hopper carried its buffer back on its own item, and every guessed id is unknown without the package"

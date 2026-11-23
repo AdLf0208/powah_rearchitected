@@ -1,4 +1,4 @@
-# Powah for Horizon — slices 1–8
+# Powah for Horizon — slices 1–9
 
 A clean-room Rust rewrite of **Powah! (Rearchitected) 6.2.10** (`Technici4n/Powah`,
 **LGPL-3.0-only**) for Horizon 26.3, as one flat SDK package (`api = "0.2"`): the
@@ -57,9 +57,18 @@ face (`Transfer.EXTRACT`) and fills from the energy items in its seven slots —
 own `Capabilities.Energy.ITEM` handler, so a cell item placed there gives up its charge
 and a stone gives nothing. It keeps its buffer on its item like the other machines.
 
+Slice 9 is the **Energy Hopper**, the discharger's charging mirror: seven tiers
+(1,000,000 FE / 500 FE a tick charging up to 2,000,000,000 / 1,000,000) with **no slots
+of its own** — its tick reads the container on the face its `facing` names and spends
+`min(the tier's charging rate, the buffer's balance, the item's own room)` on each
+stack through that item's `Capabilities.Energy.ITEM` handler, then debits its own
+buffer by exactly what went out. It never pushes through a face (`postTick` has no
+`extractFromSides`), it takes and gives its tier's transfer on every face, a stone
+takes nothing, and it keeps its buffer on its item like the other machines.
+
 Every machine declares a real `Capabilities.Energy.BLOCK` buffer (the amount is the int
 `energy` in the block entity's saved compound), so other machines can fill and drain a
-furnator, a cell or a discharger; a cable is a pure relay.
+furnator, a cell, a discharger or a hopper; a cable is a pure relay.
 
 - Scope, behaviour table, the hook table, deviations and the gap list:
   [`notes.md`](notes.md); upstream analysis: [`FINDINGS.md`](FINDINGS.md);
@@ -127,6 +136,7 @@ SELFTEST=orb GAME=<that game> tools/e2e.sh                         # the rod's e
 SELFTEST=furnator GAME=<that game> tools/e2e.sh                    # the furnator tier clamp
 SELFTEST=furnator-rate GAME=<that game> tools/e2e.sh               # the nitro furnator's exact tick
 SELFTEST=drain GAME=<that game> tools/e2e.sh                       # the discharger's drain
+SELFTEST=hopper GAME=<that game> tools/e2e.sh                      # the hopper's charge rate
 ```
 
 Give the port **its own launcher instance** (e.g. `--instance powah-e2e`, and the

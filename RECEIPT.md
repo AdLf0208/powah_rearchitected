@@ -1,11 +1,11 @@
-# Package receipt — powah 0.2.8
+# Package receipt — powah 0.2.9
 
 | field | value |
 |---|---|
-| version | `0.2.8` |
+| version | `0.2.9` |
 | file | `powah.hmod` |
-| bytes | 330,025 |
-| sha256 | `d152d396ff809f291b8bee6043f78ac1f1a23771a1b44dcfb6fb00c6f3b43950` |
+| bytes | 356,866 |
+| sha256 | `387259ea8a3b6ce0975279cd4f4d67620d8c2fc11d1c634a76cc8113e32045f3` |
 | source | this tag — the tree here is the source that produced the archive |
 | game | 26.3 |
 | horizon | `0a875da91dbb0fdcb7ba8c42c11341aa229af51a` |

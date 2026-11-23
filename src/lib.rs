@@ -155,6 +155,21 @@ impl Hooks for Mod {
             );
             declare_item(registrar, block);
         }
+        // Every energy hopper tier: a buffer with the tier's own capacity, transfer and charging
+        // rate and **no slots of its own** — it charges the container on the face its `facing`
+        // names (upstream's `devices.hoppers`, a `ChargingConfig`, over `AbstractEnergyBlock`'s
+        // default `Transfer.ALL`).
+        for (index, (block, name)) in powah::HOPPERS.into_iter().enumerate() {
+            let tier = runtime::hopper_tier(index).expect("every hopper id is on the ladder");
+            let hopper = registrar.block_key(block);
+            registrar.block_energy(&hopper, powah::hopper_battery(tier));
+            let kind = powah::declare(registrar, name);
+            let part = powah::HopperPart::new(Arc::clone(&self.queue), tier);
+            if let Err(error) = registrar.block_entity_part(&kind, part) {
+                context.refuse(&error.to_string());
+            }
+            declare_item(registrar, block);
+        }
         // The energizing orb: the seven slots and the insert-only buffer a rod fills.
         let orb = registrar.block_key(powah::ORB);
         registrar.block_container(&orb, powah::orb_container());

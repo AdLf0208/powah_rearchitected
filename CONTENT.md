@@ -166,6 +166,28 @@ The cell's mirror, seven tiers of it, with the jar's own recipes.
 recipe is craftable from carried items (the capacitor tiers come from slice 5's materials), so
 all seven are carried and all seven are crafted in the recipe leg.
 
+## Slice 9 — the energy hopper ladder (2026-11-23)
+
+The discharger's mirror: seven tiers of a storage block that charges the container it faces. No
+asset or model is invented; the carry's own blockstate already draws all six facings.
+
+| Family | Files |
+|---|---|
+| blocks (7) | `data/powah/horizon/block/energy_hopper_<tier>.json` — the plain `minecraft:iron_block` template with upstream's numbers (`Properties.metalNoSolid(2.0, 20.0)`), a six-value `facing` enum and default `north`, item stack 1 |
+| blockstates (7) | `assets/powah/blockstates/energy_hopper_<tier>.json`, carried byte-for-byte (six facings, each with its model rotation) |
+| block models (8) | `assets/powah/models/block/energy_hopper.json` (the jar's base model, parent `block/block`) and the seven tiers' `<tier>_ov` overlays |
+| item models (7) + item definitions (7) | `assets/powah/models/item/…`, `assets/powah/items/…` |
+| textures (3) | `energy_hopper_side.png`, `energy_hopper_back.png`, `energy_hopper_pointer.png` (the tiers' `<tier>_ov.png` were already carried) |
+| loot tables (7) | `data/powah/loot_table/blocks/energy_hopper_<tier>.json` |
+| recipes (7) + advancements (7) | `data/powah/recipe/crafting/energy_hopper_<tier>.json`, read from the jar in the pin's string form — starter `ppp/cdc/php` (three paste, two tiny capacitors, a casing, a vanilla hopper); each tier upgrades the previous tier's hopper |
+| tags | the jar's `powah:energy_hoppers` block and item tags; the seven join `minecraft:mineable/pickaxe` and `minecraft:needs_iron_tool` |
+| creative tab | the seven join `data/powah/horizon/creative_tab/machines.json`, after the discharger row |
+| lang | unchanged: the carry's `en_us.json` already has `block.powah.energy_hopper_<tier>` |
+
+`tools/carry_slice9.py` reproduces the slice's 65 files from the raw carry and the jar and
+`--check` verifies the tree still matches. Every recipe is craftable from carried items, so all
+seven are carried and all seven are crafted in the recipe leg.
+
 ## Where this content lives now (0.2.0)
 
 Since the SDK migration the carried tree **is the package root**: `assets/powah/` and

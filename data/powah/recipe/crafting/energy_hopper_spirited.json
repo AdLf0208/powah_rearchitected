@@ -1,0 +1,19 @@
+{
+  "category": "misc",
+  "type": "minecraft:crafting_shaped",
+  "key": {
+    "c": "powah:capacitor_spirited",
+    "d": "powah:dielectric_casing",
+    "h": "powah:energy_hopper_niotic",
+    "p": "powah:dielectric_paste"
+  },
+  "pattern": [
+    "ppp",
+    "cdc",
+    "php"
+  ],
+  "result": {
+    "count": 1,
+    "id": "powah:energy_hopper_spirited"
+  }
+}

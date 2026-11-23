@@ -268,8 +268,9 @@ round trip in this environment is ~2 s, far longer than a tick).
 11. **The other 6 tiers, the creative cell and ~15 machines** are unported. — the
     **energy cell** tiers are closed by [`## Slice 4 — the energy cell ladder`](#slice-4--the-energy-cell-ladder-2026-11-21)
     and the **furnator and cable** tiers by [`## Slice 6 — the Furnator and Energy Cable tier
-    ladders`](#slice-6--the-furnator-and-energy-cable-tier-ladders-2026-11-21); the creative
-    cell and the machines remain (the reactors are `blocked(uraninite-worldgen)`).
+    ladders`](#slice-6--the-furnator-and-energy-cable-tier-ladders-2026-11-21); the **discharger** by
+    slice 8 and the **hopper** by slice 9; the creative cell, the generators, the reactors (which are
+    `blocked(uraninite-worldgen)`), the ender gates, the player transmitter and the batteries remain.
 12. **`/powah set` is a harness control**, not upstream gameplay (same precedent
     as `/mekanism energy`).
 
@@ -2199,3 +2200,258 @@ Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven
 | `recipe:minecraft:crafting_shapeless` | tested | same leg, 8 cases; the paste's lava bucket leaves its bucket |
 | `tag:item` | tested | `powah:energizing_rods`, `powah:furnators`, `powah:energy_cables` and `powah:energy_dischargers` name their seven members |
 | `tag:block` | tested | the cable's `powah:energy_cable_connects` visual-arms tag and `powah:energy_dischargers` (read by `execute if block` in game); the pickaxe/needs-iron tags are what makes the loot leg's drops real |
+
+## Slice 9 — the Energy Hopper (2026-11-23)
+
+### The slice, quoted from this port's own gaps
+
+`## Deviations and gaps (slice 1)`, item 11 — the notes' own next-slice authority:
+
+> **11. The other 6 tiers, the creative cell and ~15 machines** are unported.
+
+and `FINDINGS.md` §"Slice 1 boundary", which names the machine:
+
+> Discharger/**Hopper**/Player Transmitter; item charging (`item_energy_buffer`) and
+> energy-carrying block items; side-config GUI and redstone modes (defaults only);
+
+and the 0.2.8 section's own "Not chosen", which named it as the next slice:
+
+> the Energy Hopper (`ChargingConfig`, a charging station over a container) is the other
+> half of the same family and is left for the next slice
+
+**Chosen:** the **Energy Hopper**, all seven tiers — the charging half of the item-energy family, the
+mirror of slice 8's discharger: a storage block with a keep-reserve and **no slots of its own** whose
+tick takes the container on the face its `facing` names and charges the items in it.
+
+**Why it fits `machines`:** it is a block entity with a declared block energy buffer (two-way), a
+`keepEnergy` payload on its item, no container of its own, and one tick that reads the block state's
+`facing`, the neighbour's `ITEMS` capability and each item's `ITEM_ENERGY` handler. No renderer, no
+GUI, no entity, no worldgen.
+
+**Not chosen (and why):** the creative cell (a source, not a tier) and the generators (a mod block
+entity fluid tank the pin cannot fill) remain out; the reactors stay `blocked(uraninite-worldgen)`;
+side config, redstone modes and the GUIs stay slice 1's recorded gaps.
+
+### What upstream does (read from tag `v6.2.10`, commit `a5a8f25`)
+
+| Fact | Where |
+|---|---|
+| `devices.hoppers = new ChargingConfig(batteryCapacity(), batteryTransfer(), chargingTransfer())`: the **cell** ladder for storage (starter 1,000,000 FE / 1,000 FE a side) | `config/v2/PowahConfig.java:95`, `DefaultEnergies` |
+| `chargingTransfer() = cableTransfer() = baseScaling * 500` — **500 FE a tick at starter**, 1,000,000 at nitro | `config/v2/DefaultEnergies.java` |
+| `postTick`: `side = state.facing`; the block entity there must be a `Container`; `ChargeUtil.chargeItemsInContainer(container, charging_rates.get(variant), energy.getStored())`, then `energy.consume(extracted)`; **no `extractFromSides`** | `block/hopper/EnergyHopperTile.java:29-40` |
+| `chargeItemsInContainer` is one pass over `0..containerSize`, an empty slot skipped, each stack taking `min(rate, total - charged)` through its own `Capabilities.EnergyStorage.ITEM` | `util/ChargeUtil.java:60-80` |
+| `keepEnergy()` true; `getSlotLimit(0)`, `canInsert` and `canExtract` false — **no slots of its own** | `EnergyHopperTile.java:44-56` |
+| `getTransferType()` is `AbstractEnergyBlock`'s default `Transfer.ALL`: takes and gives its transfer on every face | `lib/block/AbstractEnergyBlock.java:75` |
+| `Blcks.ENERGY_HOPPER`: `Properties.metalNoSolid(2.0, 20.0)`, `Facing.ALL` (six values, default `north`), seven tiers, stack 1 | `block/Blcks.java`, `lib/block/AbstractBlock.java` |
+
+### What it ships
+
+Rust:
+
+| File | Change |
+|---|---|
+| `src/runtime.rs` | `HOPPER_TIER_COUNT`, `HopperTier { capacity, transfer, charging_rate }`, `hopper_tier(index)` (the cell row × the cable's 500), `hopper_charges(stored, rate, rooms)` (one pass, one budget); 2 tests |
+| `src/powah.rs` | `HOPPERS`, `Kind::Hopper(tier)`, `hopper_of`, `hopper_battery` (`Transfer.ALL`), the two-way `ItemBuffer`, `keep_capacity`, `item_slots` = 0, the `/powah set` clamp, `hopper_line`, `HopperPart` (queue + clamp), `charge_container` at `level_tick_post`, placement sets `facing` from the clicked face, the `/powah info` arm; 3 tests |
+| `src/lib.rs` | one buffer, one block entity type and one machine item per hopper tier |
+
+Content: see [`CONTENT.md`](CONTENT.md) §"Slice 9" — 7 blocks, 7 blockstates, a base model and
+seven tier overlays, 7 item models and 26.3 item definitions, 3 textures, 7 loot tables, 7 recipes
+with their advancements, the `powah:energy_hoppers` block and item tags, the pickaxe/needs-iron
+entries and the creative tab; `tools/carry_slice9.py` reproduces the **65** files from the raw carry
+and the jar (`--check` green).
+
+### The readouts this slice adds
+
+```text
+Energy Hopper at 6,100,19: 0/1000000 FE (comparator 0, facing south, charging 500 FE/t, 1000 FE/t a side, t=3232)
+Energy Hopper at 10,100,18: 2000000000/2000000000 FE (comparator 15, facing north, charging 1000000 FE/t, 2000000 FE/t a side, t=3447)
+Energy Hopper at 12,100,18: 7000/1000000 FE (comparator 0, facing up, charging 500 FE/t, 1000 FE/t a side, t=3575)
+```
+
+The line names the face the hopper charges through and the tier's charging rate beside its buffer and
+per-side transfer. A hopper's own container is empty by design, so there is no `charge` field; the
+container it faces is read with `/data get block`.
+
+### TDD: the red proof, quoted
+
+`hopper_tier`, `hopper_charges`, `hopper_of` and `hopper_line` were declared unfinished (`todo!()`,
+or the readout's arm absent) and the tests were written against them before any glue
+(`ports/_shared/evidence/powah/slice9-test-red.log`):
+
+```text
+---- powah::tests::every_hopper_tier_is_one_of_the_ladder_with_a_two_way_buffer_and_no_slots stdout ----
+
+thread 'powah::tests::every_hopper_tier_is_one_of_the_ladder_with_a_two_way_buffer_and_no_slots' (3802252) panicked at src/runtime.rs:171:5:
+not yet implemented: the hopper ladder
+
+---- powah::tests::the_hopper_readout_names_its_buffer_its_facing_and_its_charging_rate stdout ----
+
+thread 'powah::tests::the_hopper_readout_names_its_buffer_its_facing_and_its_charging_rate' (3802260) panicked at src/runtime.rs:171:5:
+not yet implemented: the hopper ladder
+
+---- runtime::tests::a_hopper_pass_charges_each_item_at_its_rate_within_one_budget stdout ----
+
+thread 'runtime::tests::a_hopper_pass_charges_each_item_at_its_rate_within_one_budget' (3802275) panicked at src/runtime.rs:181:5:
+not yet implemented: the hopper charge pass
+
+---- runtime::tests::the_hopper_ladder_is_the_battery_config_with_its_own_charging_rate stdout ----
+
+thread 'runtime::tests::the_hopper_ladder_is_the_battery_config_with_its_own_charging_rate' (3802299) panicked at src/runtime.rs:171:5:
+not yet implemented: the hopper ladder
+
+test result: FAILED. 64 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+(The red run was taken while the crate still read `0.2.8` — the version bump came with the packaging
+step.) After the implementation: **68 passed, 0 failed** (`slice9-test-green.log`, the same 68 in
+`sdk-test.log`; 63 slice-1…8 tests plus the five).
+
+### Ladder (0.2.9, pin `0a875da`)
+
+Every compile step ran in `ports/powah`, `CARGO_INCREMENTAL=0`, inside a
+`ports/tools/build-slot.sh run --job W1-powah --port ports/powah --step …` lease with
+`BUILD_LOCAL=1`; logs in `ports/_shared/evidence/powah/`.
+
+| Step | Command | Result |
+|---|---|---|
+| unit tests | `cargo test --offline` | **68 passed**, 0 failed (`sdk-test.log`) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`slice9-clippy-fmt.log`) |
+| formatting | `cargo fmt --check` | exit 0, empty (`slice9-clippy-fmt.log`) |
+| package, twice | `rm -f Cargo.lock; cargo horizon-mod build` ×2, `cmp` | **byte-identical, 356,866 B**, sha256 `387259ea8a3b6ce0975279cd4f4d67620d8c2fc11d1c634a76cc8113e32045f3` (`slice9-build-twice.log`) |
+| registry check | `cargo horizon-mod check powah.hmod` | **exit 0**, `powah 0.2.9 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, `356866 bytes, SHA-256 387259ea…32045f3, unsigned` (`slice9-check-fits.log`) |
+| fits the pin | `cargo horizon-mod fits powah.hmod --build 0a875da` | `0a875da  made for`, exit 0 (`slice9-check-fits.log`) |
+| fits **another** build | `cargo horizon-mod fits powah.hmod --build 0b14f8a` | `0b14f8a  fits`, exit 0 (`slice9-check-fits.log`) |
+| dialect | `python3 ports/tools/check_261_dialect.py powah.hmod` | exit 0: **174** recipe/loot files in the 26.3 dialect (`slice9-check-fits.log`) |
+| carried content | `python3 tools/carry_slice9.py --check` | 65 files match |
+| package gate | `python3 ports/tools/verify-sdk-package.py powah` | **1/1**, runtime byte-identical (`25359ccdb7d4`), no packed `Cargo.lock`, **545 entries** (`sdk-verify.log`) |
+
+### In-game legs
+
+Launcher build `Compiling powah (1 of 1)`, `native-0a875da-6653b4fc239a`, instance `powah-e2e`
+(`evidence/powah-e2e/launcher-build-0.2.9.log`); logs in `ports/_shared/evidence/powah-e2e/`.
+
+| Leg | Command | Result |
+|---|---|---|
+| main | `launcher-game.sh build powah` + `build-slot.sh run --step e2e` | **PASS** + `EXIT:0` (`e2e-launcher-0.2.9.log`) |
+| control (whole scenario, no package) | `GAME=$CONTROL_GAME …` | `FAIL: expected powah:furnator_starter at 0,100,0, got 'minecraft:air'` + `EXIT:1`; the control pre-check says `Unknown block type 'powah:energy_hopper_starter'` (`e2e-control-0.2.9.log`) |
+| selftest (this slice's flip) | `SELFTEST=hopper …` | `FAIL: the chest's item must read 0 FE, got 5000` + `EXIT:1` (`e2e-selftest-hopper.log`) |
+| **the previous package** (0.2.8, the parity rule's red) | the 0.2.8 game + the same scenario | `FAIL: expected powah:energy_hopper_starter at 6,100,19, got 'minecraft:air'` + `EXIT:1`, after every slice 1–8 phase passed (`e2e-oldpackage-0.2.8.log`) |
+| log gate | `check-e2e-logs.py powah-e2e --strict` | `logs=28 ok=28 missing-exit=0 bad-exit=0`, exit 0 |
+
+Quoted from `e2e-launcher-0.2.9.log` (the family's own assertions):
+
+```text
+== slice 9: a hopper charges the container on the face its facing names ==
+  block(6,100,20) = minecraft:chest
+  block(6,100,19) = powah:energy_hopper_starter
+  hopper: Energy Hopper at 6,100,19: 0/1000000 FE (comparator 0, facing south, charging 500 FE/t, 1000 FE/t a side, t=3232)
+  set(6,100,19) = Energy Hopper at 6,100,19: 5000/1000000 FE (comparator 0, facing south, charging 500 FE/t, 1000 FE/t a side, t=3239)
+  spent: Energy Hopper at 6,100,19: 0/1000000 FE (comparator 0, facing south, charging 500 FE/t, 1000 FE/t a side, t=3263)
+  data get block(6,100,20) Items[0]: {"chat":["6, 100, 20 has the following block data: 5000"],"ok":true}
+  hopper at 0, the chest's item at 5000 FE: 5000 - 500 x 10 = 0
+== slice 9: the charging rate is the tier's 500 FE a tick ==
+  set(6,100,19) = Energy Hopper at 6,100,19: 100000/1000000 FE (comparator 1, facing south, charging 500 FE/t, 1000 FE/t a side, t=3277)
+  rate: Energy Hopper at 6,100,19: 97500/1000000 FE (comparator 1, facing south, charging 500 FE/t, 1000 FE/t a side, t=3287)
+  rate: Energy Hopper at 6,100,19: 94000/1000000 FE (comparator 1, facing south, charging 500 FE/t, 1000 FE/t a side, t=3294)
+  dt=7 ticks, hopper -3500 FE
+  data get block(6,100,20) Items[0]: {"chat":["6, 100, 20 has the following block data: 8500"],"ok":true}
+  item at 8500, hopper at 90500 of the 100,000 it held
+  unaccounted: 1000 FE (item + hopper against the 100,000)
+== slice 9: a hopper facing away leaves the container alone ==
+  block(8,100,20) = minecraft:chest
+  set(8,100,19) = Energy Hopper at 8,100,19: 5000/1000000 FE (comparator 0, facing north, charging 500 FE/t, 1000 FE/t a side, t=3322)
+  away: Energy Hopper at 8,100,19: 5000/1000000 FE (comparator 0, facing north, charging 500 FE/t, 1000 FE/t a side, t=3374)
+  data get block(8,100,20) Items[0]: {"chat":["Found no elements matching Items[0].components"],"ok":true}
+  away chest item: no payload
+== slice 9: an item with no buffer takes nothing from the hopper ==
+  set(6,100,19) = Energy Hopper at 6,100,19: 5000/1000000 FE (comparator 0, facing south, charging 500 FE/t, 1000 FE/t a side, t=3387)
+  stone: Energy Hopper at 6,100,19: 5000/1000000 FE (comparator 0, facing south, charging 500 FE/t, 1000 FE/t a side, t=3434)
+== slice 9: the hopper ladder, its tags and its kept buffer ==
+  block(10,100,18) = powah:energy_hopper_nitro
+  set(10,100,18) = Energy Hopper at 10,100,18: 2000000000/2000000000 FE (comparator 15, facing north, charging 1000000 FE/t, 2000000 FE/t a side, t=3447)
+  tag(6,100,19) = {"chat":["Test passed"],"ok":true}
+  tag(0,99,3)    = {"chat":["Test failed"],"ok":true}
+  block(12,100,18) = powah:energy_hopper_starter
+  set(12,100,18) = Energy Hopper at 12,100,18: 7000/1000000 FE (comparator 0, facing north, charging 500 FE/t, 1000 FE/t a side, t=3477)
+  {"scenario":"hopper-keep-energy","block":"minecraft:air","drops":{"powah:energy_hopper_starter":1},"picked_up":{"powah:energy_hopper_starter":1}}
+  placed powah:energy_hopper_starter at 12,100,18
+  hopper placed again: Energy Hopper at 12,100,18: 7000/1000000 FE (comparator 0, facing up, charging 500 FE/t, 1000 FE/t a side, t=3575)
+```
+
+Every number is exact and its leg can fail: the 5,000 set on the hopper ends **at 0** while the cell
+item in the chest it faces ends **at exactly 5,000** (10 charges of 500; the `SELFTEST=hopper` run
+expects 0 on the item and fails), `dt=7` against the hopper's own `t=` clock costs exactly
+**3,500 = 7 × 500** (a 40-FE or a per-slot-multiplied rate fails the whole-step test), the facing-away
+control spends **nothing** and leaves the chest item without a payload, a stone leaves the buffer at
+**5,000**, the nitro tier clamps 2,000,000,000 at its own capacity and names `charging 1000000 FE/t,
+2000000 FE/t a side`, the tag passes on a hopper and fails on the arena floor, and a 7,000 FE hopper
+broken in survival and placed again reads **7,000** (its placement also set `facing up` from the
+clicked face). The conservation sum of the item's charge and the hopper's balance is the 100,000 it
+held within **1,000 FE** — two ticks of lag between the item read and the hopper read, the tolerance
+the leg documents.
+
+### Coverage (parity rule, the family this slice adds)
+
+| Family (from the jar) | Status |
+|---|---|
+| the seven `energy_hopper_*` blocks and items | **tested** — the starter and the nitro placed and read back, `/powah set 2000000000` clamped at the nitro tier's 2,000,000,000, each readout naming its buffer, face, charging rate and per-side transfer; the 0.2.8 package red at the starter's own id; the control game knows neither id |
+| `chargeItemsInContainer` (hopper → the faced container's items) | **tested** — a cell item in a chest at 0 ends at exactly 5,000 while the hopper falls 5,000 → 0; the rate is 500 FE a tick measured against the game clock (`3,500` over `dt=7`, whole 500 steps) |
+| the face rule (`state.facing` picks the container) | **tested** — the same hopper at `facing=north` beside a chest at its south spends nothing and charges the item to nothing; placement from an item sets `facing` from the clicked face (read back `facing up`) |
+| an item with no energy buffer | **tested** — a stone in the faced chest leaves the hopper at exactly 5,000 |
+| `keepEnergy` on a hopper | **tested** — a 7,000 FE hopper broken in survival and placed again reads 7,000/1,000,000 |
+| `Transfer.ALL` on every face | **rule-tested** — `hopper_battery`/`item_buffer` are pinned per tier by `every_hopper_tier_is_one_of_the_ladder_with_a_two_way_buffer_and_no_slots`; the hopper never pushes in its tick (`postTick` has no `extractFromSides`) |
+| **no slots of its own** | **rule-tested and observed** — `item_slots` = 0 per tier; the readout has no `charge` field and the e2e only ever fills the chest |
+| the seven recipes + advancements | **tested** — `craft_check.py` crafts all seven (output id + count, every ingredient consumed) |
+| the `powah:energy_hoppers` block/item tags | **tested in game** — `execute if block … #powah:energy_hoppers` passes on a hopper and fails on the arena floor |
+| loot | **tested** — the loot leg mines all seven tiers in survival and asserts each drops itself |
+| the hopper GUI, its side-config/redstone modes | `not ported` — slice 1's GUI/side-config gaps |
+| the creative cell, the generators, the reactors, the ender gates, the player transmitter, the batteries | `not ported` — the reactors stay `blocked(uraninite-worldgen)`; the generators need a mod fluid tank and sky visibility |
+
+### Deviations and upstream defects this slice records
+
+1. **The charge pass runs at the level tick's end, not inside the block entity's own tick.** A block
+   entity is out of the world during its tick, so the neighbour's `ITEMS` capability and each item's
+   `ITEM_ENERGY` handler are read in the queue phase (`level_tick_post`), the same deviation slice 8
+   records for the drain.
+2. **`facing` on placement is the clicked face.** `getStateForPlacement` uses
+   `getNearestLookingDirection().getOpposite()`; the pin exposes no player rotation, so the face the
+   engine reports on placement is used — identical for every face-aligned placement. A hopper a
+   dispenser places keeps `north`.
+3. **No per-slot gate on the faced container.** A container declaration cannot express upstream's
+   `canInsert`; the pass decides instead: a slot whose item answers no `ITEM_ENERGY` handler is left
+   alone (measured: a stone gives nothing and the buffer stays 5,000). The same shape slices 7/8
+   record for their own slots.
+4. **The hopper's readout names its face and charging rate, not the container it faces.** The
+   container's stacks are read with `/data get block … Items[N]` in the leg; `/powah info` prints the
+   hopper's own state (`Energy Hopper at …: 0/1000000 FE (comparator 0, facing south, charging 500
+   FE/t, 1000 FE/t a side, t=…)`).
+5. **The tier clamp runs on the hopper's own tick** (the shared clamp in `HopperPart`), so a doctored
+   `/data merge block` cannot leave a buffer above the tier.
+
+**Upstream defects fixed:** none — the hopper's numbers (`ChargingConfig` over the battery row, the
+cable's rate for charging), the face rule and the item pass are internally consistent. The only
+mismatch found while measuring was in **this slice's first harness shape**: an equality poll on the
+buffer can never settle while an item with room sits in the faced chest (measured: it read 4,000
+instead of 5,000 after the set), so the leg clears the slot, sets the buffer, then inserts the item —
+the same ordering slice 8 recorded.
+
+### Harness findings this slice measured (for the next machine port)
+
+1. **A chest's item energy is read with the path form.** `/data get block X Y Z
+   Items[0].components."minecraft:block_entity_data".energy` answers the exact int (the same
+   component slice 7 writes on a machine's own item); it is the only read of an item's charge that
+   does not need the item in hand.
+2. **`setblock … [facing=south]` sets the state the tick reads**, and a hopper placed from its own
+   item takes the clicked face (read back `facing up` when placed on the floor) — so both placement
+   paths are observable through `/powah info`.
+3. **`execute if block <pos> #tag` is a reliable block-tag assertion for the new tag too** (`"Test
+   passed"` / `"Test failed"`), and a tag miss on the arena floor is the negative half.
+4. **A hopper's buffer cannot be polled for equality while it has something to charge** (the spend
+   starts the tick after the write): clear the faced slot, write the buffer, then insert the item.
+5. `/powah set` stays an operator-only (level 2) harness control; it clamps a hopper at its tier's
+   capacity because the buffer *is* the tier's.
+
+Version: **0.2.8 → 0.2.9** (one patch). The published `[[versions]]` record keeps 0.2.8 and gains
+0.2.9 at publish time — this port does not touch the registry entry.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices

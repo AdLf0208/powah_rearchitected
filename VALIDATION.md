@@ -1,5 +1,25 @@
-# Validation — Powah slices 1 to 8
+# Validation — Powah slices 1 to 9
 
+> **0.2.9 (slice 9, the Energy Hopper)** is recorded in
+> [`notes.md`](notes.md#slice-9--the-energy-hopper-2026-11-23): the slice and the gap lines it comes
+> from (item 11's unported machines, `FINDINGS.md`'s "Discharger/Hopper/Player Transmitter" and the
+> 0.2.8 section's own "left for the next slice"), the upstream facts it is built on
+> (`devices.hoppers` = `batteryCapacity`/`batteryTransfer`/`chargingTransfer(500)`, no slots of its
+> own, `postTick` = `chargeItemsInContainer` on `state.facing`, `Transfer.ALL`, `keepEnergy`), the red
+> proof (four `todo!()` rules, 64 passed / 4 failed, quoted verbatim), the ladder at pin `0a875da`
+> (68 tests, clippy 0 warnings, `fmt --check` clean, two `cmp`-identical builds of **356,866 B**,
+> `check`, `fits` against the pin **and** against `0b14f8a`, gate 1/1 with **545 entries**, dialect
+> 174/174) and the in-game legs (main `PASS`+`EXIT:0`; control and `SELFTEST=hopper` at `EXIT:1`; the
+> **0.2.8 package red** at the slice's own block id after every earlier phase passed; the log gate
+> 28/28). Package: `powah.hmod`, 356,866 B, sha256
+> `387259ea8a3b6ce0975279cd4f4d67620d8c2fc11d1c634a76cc8113e32045f3`. Launcher build:
+> `Compiling powah (1 of 1)`, `native-0a875da-6653b4fc239a`, instance `powah-e2e`. What it proves: a
+> starter hopper with a cell item at 0 in the chest it faces spends exactly its 5,000 and leaves the
+> item at 5,000 (10 charges of 500); the rate is 500 FE a tick measured against the game's clock
+> (`3,500` over `dt=7`, whole 500 steps); a hopper facing away from the chest spends nothing and a
+> stone in the chest takes nothing; the nitro hopper clamps 2,000,000,000 FE and names
+> `charging 1000000 FE/t, 2000000 FE/t a side`; `powah:energy_hoppers` matches in game; a broken 7,000
+> FE hopper carries its buffer back on its own item; and every hopper tier drops itself.
 > **0.2.8 (slice 8, the Energy Discharger)** is recorded in
 > [`notes.md`](notes.md#slice-8--the-energy-discharger-2026-11-22): the slice and the gap lines it comes
 > from (item 11's unported machines and `FINDINGS.md`'s "Discharger", named as the item-energy family's

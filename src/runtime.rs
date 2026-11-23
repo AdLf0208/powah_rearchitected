@@ -147,6 +147,60 @@ pub fn discharger_tier(index: usize) -> Option<DischargerTier> {
     cell_tier(index)
 }
 
+/// The tiers an energy hopper has, in `Tier.getNormalVariants` order: starter, basic, hardened,
+/// blazing, niotic, spirited, nitro (upstream's `Tier.getNormalVariants`, which
+/// `Blcks.ENERGY_HOPPER` uses).
+pub const HOPPER_TIER_COUNT: usize = 7;
+
+/// One energy hopper tier's numbers (`PowahConfig.EnergyDevices.hoppers`, a `ChargingConfig`):
+/// `batteryCapacity` and `batteryTransfer` for its buffer and its faces, and `chargingTransfer`
+/// for the most it spends on one item in the container it faces.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HopperTier {
+    /// The tier's buffer (`batteryCapacity`), the same row as the energy cell's.
+    pub capacity: i32,
+    /// The tier's per-side transfer (`batteryTransfer`), both ways (`Transfer.ALL`).
+    pub transfer: i32,
+    /// The tier's per-item charging rate (`chargingTransfer`).
+    pub charging_rate: i32,
+}
+
+/// The energy hopper tier at `index` (0 = starter … 6 = nitro), `None` past the ladder.
+#[must_use]
+pub fn hopper_tier(index: usize) -> Option<HopperTier> {
+    /// `DefaultEnergies.baseScaling`, in `Tier.getNormalVariants` order.
+    const BASE_SCALING: [i32; HOPPER_TIER_COUNT] = [1, 4, 10, 40, 100, 400, 2_000];
+    /// `batteryCapacity` = `reactorProduction * 4000` = `baseScaling * 1_000_000`.
+    const CAPACITY_PER_SCALING: i32 = 1_000_000;
+    /// `batteryTransfer` = `cableTransfer * 2` = `baseScaling * 1_000`.
+    const TRANSFER_PER_SCALING: i32 = 1_000;
+    /// `chargingTransfer` = `cableTransfer` = `baseScaling * 500`, the per-item charge rate.
+    const CHARGING_PER_SCALING: i32 = 500;
+    let scaling = *BASE_SCALING.get(index)?;
+    Some(HopperTier {
+        capacity: scaling * CAPACITY_PER_SCALING,
+        transfer: scaling * TRANSFER_PER_SCALING,
+        charging_rate: scaling * CHARGING_PER_SCALING,
+    })
+}
+
+/// One pass over the container an energy hopper faces
+/// (`ChargeUtil.chargeItemsInContainer(container, charging_rates.get(variant), energy.getStored())`):
+/// each slot is asked for `min(the tier's charging rate, what is left of the buffer, the slot's own
+/// room)`, the buffer's budget shrinking by what the pass has asked for so far. `rooms[slot]` is
+/// that slot's room — `0` for an empty slot or an item with no energy buffer, which is left alone.
+#[must_use]
+pub fn hopper_charges(stored: i32, charging_rate: i32, rooms: &[i32]) -> Vec<i32> {
+    let mut budget = stored.max(0);
+    let mut planned = Vec::with_capacity(rooms.len());
+    for room in rooms {
+        let asked = charge_step(budget, charging_rate, *room);
+        budget -= asked;
+        planned.push(asked);
+    }
+    planned
+}
+
 /// Energy clamped into a buffer.
 #[must_use]
 pub fn clamp_energy(energy: i32, capacity: i32) -> i32 {
@@ -1460,6 +1514,92 @@ mod tests {
             restored_energy(5_000, 0),
             0,
             "a buffer of capacity 0 holds nothing"
+        );
+    }
+
+    #[test]
+    fn the_hopper_ladder_is_the_battery_config_with_its_own_charging_rate() {
+        // `PowahConfig.EnergyDevices`: `hoppers = new ChargingConfig(batteryCapacity(),
+        // batteryTransfer(), chargingTransfer())` — the cell's storage row, and a charge rate of
+        // `cableTransfer` (`baseScaling * 500`): 500 FE a tick at starter, 1,000,000 at nitro.
+        let expected = [
+            (1_000_000, 1_000, 500),
+            (4_000_000, 4_000, 2_000),
+            (10_000_000, 10_000, 5_000),
+            (40_000_000, 40_000, 20_000),
+            (100_000_000, 100_000, 50_000),
+            (400_000_000, 400_000, 200_000),
+            (2_000_000_000, 2_000_000, 1_000_000),
+        ];
+        for (index, (capacity, transfer, charging_rate)) in expected.into_iter().enumerate() {
+            let tier =
+                hopper_tier(index).unwrap_or_else(|| panic!("tier {index} is on the ladder"));
+            assert_eq!(
+                (tier.capacity, tier.transfer, tier.charging_rate),
+                (capacity, transfer, charging_rate),
+                "hopper tier {index}'s numbers"
+            );
+            assert_eq!(
+                cell_tier(index).map(|cell| (cell.capacity, cell.transfer)),
+                Some((capacity, transfer)),
+                "tier {index} stores what the cell of that tier stores: the battery config"
+            );
+            assert_eq!(
+                cable_tier(index).map(|cable| cable.transfer),
+                Some(charging_rate),
+                "tier {index} charges at its cable's transfer: `chargingTransfer`"
+            );
+        }
+        assert_eq!(
+            hopper_tier(HOPPER_TIER_COUNT),
+            None,
+            "there is no eighth hopper tier"
+        );
+    }
+
+    #[test]
+    fn a_hopper_pass_charges_each_item_at_its_rate_within_one_budget() {
+        // `ChargeUtil.transferSlotList`: `min(maxPerStack, maxTotal - charged)` per slot, in slot
+        // order. 500 a slot at starter, out of one 1,200 budget: two full steps and a remainder.
+        assert_eq!(
+            hopper_charges(1_200, 500, &[10_000, 10_000, 10_000]),
+            vec![500, 500, 200],
+            "the pass spends the tier's rate a slot, then only what the buffer has left"
+        );
+        assert_eq!(
+            hopper_charges(5_000, 500, &[10_000, 10_000]),
+            vec![500, 500],
+            "a buffer with plenty charges every item its full rate"
+        );
+        assert_eq!(
+            hopper_charges(1_200, 500, &[100, 10_000]),
+            vec![100, 500],
+            "an item with 100 of room takes 100, and the next still gets its rate"
+        );
+        assert_eq!(
+            hopper_charges(1_200, 500, &[0, 10_000]),
+            vec![0, 500],
+            "an empty slot, or an item with no energy buffer, is left alone and costs no budget"
+        );
+        assert_eq!(
+            hopper_charges(0, 500, &[10_000]),
+            vec![0],
+            "an empty buffer charges nothing"
+        );
+        assert_eq!(
+            hopper_charges(5_000, 0, &[10_000]),
+            vec![0],
+            "a tier with no charging rate charges nothing"
+        );
+        assert_eq!(
+            hopper_charges(-5, 500, &[10_000]),
+            vec![0],
+            "nothing negative is charged"
+        );
+        assert_eq!(
+            hopper_charges(5_000, 500, &[]),
+            Vec::<i32>::new(),
+            "a container with no slots is a pass that does nothing"
         );
     }
 }

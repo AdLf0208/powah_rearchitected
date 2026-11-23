@@ -14,20 +14,22 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
+use mod_api::HostBlockStates;
 use mod_api::{
     self, BlockDropsEvent, BlockEntityPart, BlockEntityTickEvent, BlockEntityTickReply,
-    BlockEntityTicksEvent, BlockEntityTypeKey, BlockPart, Command, CommandArgumentValue, Component,
-    ComponentId, Compound, Direction, ENERGY, EnergyHandler, Flow, Host, HostTransaction,
-    Identifier, ItemComponentHandler, ItemKey, ItemPart, ItemPlace, LevelHost, LevelRef,
-    ModContainer, ModEnergyBuffer, OnBlockPlacedByEvent, Registrar, ServerHost, Tag, Transaction,
-    move_energy,
+    BlockEntityTicksEvent, BlockEntityTypeKey, BlockFace, BlockPart, Command, CommandArgumentValue,
+    Component, ComponentId, Compound, Direction, ENERGY, EnergyHandler, Flow, Host,
+    HostTransaction, Identifier, ItemComponentHandler, ItemKey, ItemPart, ItemPlace, LevelHost,
+    LevelRef, ModContainer, ModEnergyBuffer, OnBlockPlacedByEvent, Registrar, ServerHost, Tag,
+    Transaction, move_energy,
 };
 
 use crate::runtime::{
     CABLE_TIER_COUNT, CELL_TIER_COUNT, CableTier, CellTier, DISCHARGER_TIER_COUNT, DischargerTier,
-    EnergizingRecipe, FURNATOR_TIER_COUNT, Furnator, FurnatorTier, Neighbour, ORB_MAX_ENERGY,
-    ORB_OUTPUT_SLOT, ORB_SLOTS, ROD_TIER_COUNT, RodTier, cable_tier, cell_tier, clamp_energy,
-    comparator_strength, discharger_tier, furnator_tier, network_moves, push_amount, rod_tier,
+    EnergizingRecipe, FURNATOR_TIER_COUNT, Furnator, FurnatorTier, HOPPER_TIER_COUNT, HopperTier,
+    Neighbour, ORB_MAX_ENERGY, ORB_OUTPUT_SLOT, ORB_SLOTS, ROD_TIER_COUNT, RodTier, cable_tier,
+    cell_tier, clamp_energy, comparator_strength, discharger_tier, furnator_tier, network_moves,
+    push_amount, rod_tier,
 };
 
 /// The energizing orb block and its item.
@@ -120,6 +122,18 @@ pub(crate) const DISCHARGERS: [(&str, &str); DISCHARGER_TIER_COUNT] = [
     ("powah:energy_discharger_nitro", "energy_discharger_nitro"),
 ];
 
+/// Every energy hopper tier's block id and block entity type name, in the ladder's order (the
+/// index [`hopper_of`] takes).
+pub(crate) const HOPPERS: [(&str, &str); HOPPER_TIER_COUNT] = [
+    ("powah:energy_hopper_starter", "energy_hopper_starter"),
+    ("powah:energy_hopper_basic", "energy_hopper_basic"),
+    ("powah:energy_hopper_hardened", "energy_hopper_hardened"),
+    ("powah:energy_hopper_blazing", "energy_hopper_blazing"),
+    ("powah:energy_hopper_niotic", "energy_hopper_niotic"),
+    ("powah:energy_hopper_spirited", "energy_hopper_spirited"),
+    ("powah:energy_hopper_nitro", "energy_hopper_nitro"),
+];
+
 /// The furnator's fuel slot: upstream's slot 1 of 2, and the charge slot is 0.
 const FUEL_SLOT: usize = 1;
 /// The charge slot: upstream's slot 0 of the furnator, and the first of a cell's two.
@@ -168,6 +182,13 @@ pub(crate) fn item_buffer(block: &str) -> Option<ItemBuffer> {
             max_insert: tier.transfer,
             max_extract: tier.transfer,
         }),
+        // `AbstractEnergyBlock.getTransferType()` is the default `Transfer.ALL`: a hopper's
+        // own item both gives and takes at its tier's transfer.
+        Kind::Hopper(tier) => Some(ItemBuffer {
+            capacity: tier.capacity,
+            max_insert: tier.transfer,
+            max_extract: tier.transfer,
+        }),
         Kind::Rod(tier) => Some(ItemBuffer {
             capacity: tier.capacity,
             max_insert: tier.transfer,
@@ -186,6 +207,9 @@ pub(crate) fn kind_item_slots(kind: Kind) -> usize {
         Kind::Furnator(_) => 1,
         Kind::Cell(_) => CELL_SLOTS,
         Kind::Discharger(_) => DISCHARGER_SLOTS,
+        // `EnergyHopperTile` has no slots of its own (`getSlotLimit` 0, `canInsert` and
+        // `canExtract` false): it charges the container it faces, never one it holds.
+        Kind::Hopper(_) => 0,
         Kind::Orb | Kind::Cable(_) | Kind::Rod(_) => 0,
     }
 }
@@ -203,6 +227,7 @@ pub(crate) fn keep_capacity(block: &str) -> Option<i32> {
     match Kind::of(block)? {
         Kind::Furnator(tier) => Some(tier.capacity),
         Kind::Cell(tier) | Kind::Discharger(tier) => Some(tier.capacity),
+        Kind::Hopper(tier) => Some(tier.capacity),
         Kind::Rod(tier) => Some(tier.capacity),
         Kind::Orb | Kind::Cable(_) => None,
     }
@@ -358,6 +383,8 @@ pub(crate) enum Kind {
     Cable(CableTier),
     /// An energy discharger, carrying its tier's capacity and transfer.
     Discharger(DischargerTier),
+    /// An energy hopper, carrying its tier's capacity, transfer and charging rate.
+    Hopper(HopperTier),
     /// The energizing orb: a recipe-gated buffer over seven slots.
     Orb,
     /// An energizing rod, carrying its tier's capacity and transfer.
@@ -374,7 +401,8 @@ impl Kind {
                 .or_else(|| cell_of(block).map(Kind::Cell))
                 .or_else(|| cable_of(block).map(Kind::Cable))
                 .or_else(|| rod_of(block).map(Kind::Rod))
-                .or_else(|| discharger_of(block).map(Kind::Discharger)),
+                .or_else(|| discharger_of(block).map(Kind::Discharger))
+                .or_else(|| hopper_of(block).map(Kind::Hopper)),
         }
     }
 }
@@ -405,6 +433,13 @@ pub(crate) fn cell_of(block: &str) -> Option<CellTier> {
 pub(crate) fn discharger_of(block: &str) -> Option<DischargerTier> {
     let index = DISCHARGERS.iter().position(|(id, _)| *id == block)?;
     discharger_tier(index)
+}
+
+/// The energy hopper a block id names, with its tier's numbers; `None` for any other block. The
+/// ids are the content's own (`data/powah/horizon/block/energy_hopper_*`).
+pub(crate) fn hopper_of(block: &str) -> Option<HopperTier> {
+    let index = HOPPERS.iter().position(|(id, _)| *id == block)?;
+    crate::runtime::hopper_tier(index)
 }
 
 /// What `/powah set` did, so the command can answer honestly.
@@ -485,9 +520,23 @@ pub(crate) fn battery_of(block: &str) -> Option<ModEnergyBuffer> {
         Some(Kind::Furnator(tier)) => Some(furnator_battery(tier)),
         Some(Kind::Cell(tier)) => Some(cell_battery(tier)),
         Some(Kind::Discharger(tier)) => Some(discharger_battery(tier)),
+        Some(Kind::Hopper(tier)) => Some(hopper_battery(tier)),
         Some(Kind::Orb) => Some(orb_battery()),
         Some(Kind::Rod(tier)) => Some(rod_battery(tier)),
         _ => None,
+    }
+}
+
+/// An energy hopper's buffer (`EnergyHopperTile` over `AbstractEnergyStorage` with the default
+/// `Transfer.ALL`): the tier's capacity, giving and taking its transfer on every face. It never
+/// pushes on its own (`postTick` has no `extractFromSides`); a neighbour pulls, as a cell's would.
+pub(crate) fn hopper_battery(tier: HopperTier) -> ModEnergyBuffer {
+    ModEnergyBuffer {
+        capacity: tier.capacity,
+        max_insert: tier.transfer,
+        max_extract: tier.transfer,
+        insert_faces: [true; 6],
+        extract_faces: [true; 6],
     }
 }
 
@@ -816,12 +865,70 @@ pub(crate) fn status_line(
             "Energy Cable at {x},{y},{z}: no storage, moves up to {} FE/t (t={time})",
             tier.transfer
         ),
+        // The hopper's readout names the face it charges through, which only [`info_line`] can
+        // read from the block state; this arm is the type's exhaustiveness.
+        Kind::Hopper(tier) => hopper_line(pos, energy, tier, None, time),
         // The orb and a rod have readouts of their own ([`orb_line`], [`rod_line`]);
         // [`info_line`] gives them those, so these arms are only the type's
         // exhaustiveness.
         Kind::Orb => orb_line(pos, energy, None, 0, time),
         Kind::Rod(tier) => rod_line(pos, energy, tier, None, time),
     }
+}
+
+/// An energy hopper's readout: its buffer, the face it charges through, its tier's charging rate
+/// and the transfer every face gives and takes. `facing` is the block state's own value — [`None`]
+/// only in [`status_line`]'s exhaustiveness arm, which has no block state to read.
+pub(crate) fn hopper_line(
+    pos: [i32; 3],
+    energy: i32,
+    tier: HopperTier,
+    facing: Option<Direction>,
+    time: i64,
+) -> String {
+    let [x, y, z] = pos;
+    let facing = facing.map_or("unknown", facing_name);
+    format!(
+        "Energy Hopper at {x},{y},{z}: {energy}/{} FE (comparator {}, facing {facing}, charging \
+         {} FE/t, {} FE/t a side, t={time})",
+        tier.capacity,
+        comparator_strength(energy, tier.capacity),
+        tier.charging_rate,
+        tier.transfer,
+    )
+}
+
+/// The `facing` block state's value for a direction, as the block definition spells it.
+pub(crate) fn facing_name(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Down => "down",
+        Direction::Up => "up",
+        Direction::North => "north",
+        Direction::South => "south",
+        Direction::West => "west",
+        Direction::East => "east",
+    }
+}
+
+/// The direction a block definition's `facing` value names, `None` for anything else.
+pub(crate) fn facing_of(name: &str) -> Option<Direction> {
+    Direction::ALL
+        .into_iter()
+        .find(|direction| facing_name(*direction) == name)
+}
+
+/// The direction a clicked block face names, `None` for a variant this pin does not have (the
+/// placed block then keeps its definition's default `facing`).
+fn face_direction(face: BlockFace) -> Option<Direction> {
+    Some(match face {
+        BlockFace::Down => Direction::Down,
+        BlockFace::Up => Direction::Up,
+        BlockFace::North => Direction::North,
+        BlockFace::South => Direction::South,
+        BlockFace::West => Direction::West,
+        BlockFace::East => Direction::East,
+        _ => return None,
+    })
 }
 
 /// The charge slots of a readout, comma-separated: `<item> <held>/<capacity>`, or
@@ -1034,6 +1141,26 @@ pub(crate) fn info_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> Option<Stri
             )
         }
         Kind::Cable(_) => (0, 0, None, Vec::new()),
+        Kind::Hopper(tier) => {
+            let entity = host.block_entity(level, pos)?;
+            let saved = Tag::Compound(entity.data(&*host)?);
+            // `EnergyHopperTile.postTick` reads the container on `state.facing`'s neighbour, so the
+            // readout names that face too.
+            let facing = level.block_state(&*host, pos).and_then(|state| {
+                state
+                    .property(&host.block_states(), "facing")
+                    .ok()
+                    .flatten()
+                    .and_then(facing_of)
+            });
+            return Some(hopper_line(
+                pos,
+                clamp_energy(int(&saved, KEY_ENERGY), tier.capacity),
+                tier,
+                facing,
+                time,
+            ));
+        }
         Kind::Orb => {
             let orb = read_orb(host, level, pos)?;
             return Some(orb_line(
@@ -1083,6 +1210,7 @@ pub(crate) fn set_energy(host: &mut dyn ServerHost, pos: [i32; 3], amount: i32) 
         Some(Kind::Furnator(tier)) => tier.capacity,
         Some(Kind::Cell(tier)) => tier.capacity,
         Some(Kind::Discharger(tier)) => tier.capacity,
+        Some(Kind::Hopper(tier)) => tier.capacity,
         Some(Kind::Rod(tier)) => tier.capacity,
         // The orb's buffer is the recipe's own energy: with no recipe it stores
         // nothing, exactly as upstream's `onSlotChanged` leaves it.
@@ -1237,10 +1365,57 @@ impl BlockEntityPart for IdlePart {
     }
 }
 
+/// An energy hopper tier: a block entity with no slots of its own that queues its position for the
+/// level tick's end, where it charges the container on the face its `facing` names, and clamps its
+/// saved buffer into its tier.
+pub(crate) struct HopperPart {
+    queue: Arc<Mutex<Queue>>,
+    tier: HopperTier,
+}
+
+impl HopperPart {
+    pub(crate) fn new(queue: Arc<Mutex<Queue>>, tier: HopperTier) -> HopperPart {
+        HopperPart { queue, tier }
+    }
+}
+
+#[mod_api::horizon_part]
+impl BlockPart for HopperPart {}
+
+#[mod_api::horizon_part]
+impl BlockEntityPart for HopperPart {
+    fn block_entity_ticks(&self, _host: &dyn Host, event: &mut BlockEntityTicksEvent<'_>) {
+        event.ticks = true;
+    }
+
+    /// One server tick: queue this position for the level's move phase (the faced container is
+    /// read there, where every block entity is back in the world) and clamp a doctored buffer.
+    fn block_entity_tick(&self, host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
+        if let Some(level) = level_now(host) {
+            self.queue
+                .lock()
+                .expect("the powah queue lock is held for one insert")
+                .push(level, event.pos);
+        }
+        let mut saved = Tag::Compound(std::mem::take(&mut event.entity.nbt));
+        let before = int(&saved, KEY_ENERGY);
+        let energy = crate::runtime::clamp_energy(before, self.tier.capacity);
+        let changed = energy != before;
+        if changed {
+            write_int(&mut saved, KEY_ENERGY, energy);
+        }
+        if let Tag::Compound(nbt) = saved {
+            event.entity.nbt = nbt;
+        }
+        if !changed {
+            *event.reply = BlockEntityTickReply::Unchanged;
+        }
+    }
+}
+
 /// The orb: a block entity with the seven slots and the recipe-gated buffer, which
 /// ticks to fill itself and to turn a full buffer into its result.
 pub(crate) struct OrbPart;
-
 #[mod_api::horizon_part]
 impl BlockPart for OrbPart {}
 
@@ -1423,10 +1598,20 @@ pub(crate) struct MachineItem;
 #[mod_api::horizon_part]
 impl ItemPart for MachineItem {
     fn on_block_placed_by(&self, host: &mut dyn ServerHost, event: &mut OnBlockPlacedByEvent<'_>) {
-        let Some(asked) = asked_energy(payload_of(event.stack).as_ref()) else {
+        let Some(level) = level_now(host) else {
             return;
         };
-        let Some(level) = level_now(host) else {
+        // `AbstractBlock`'s `Facing.ALL` placement: an energy hopper's `facing` is the face it was
+        // placed against — `getStateForPlacement`'s `getNearestLookingDirection().getOpposite()`
+        // for every face-aligned placement. The pin exposes no player rotation, so the clicked face
+        // is the value; a hopper a dispenser places keeps the block's default `north`.
+        if let Some(block) = block_at(&*host, level, event.pos)
+            && matches!(Kind::of(&block), Some(Kind::Hopper(_)))
+            && let Some(facing) = face_direction(event.face)
+        {
+            host.set_block_property(event.pos, "facing", facing_name(facing));
+        }
+        let Some(asked) = asked_energy(payload_of(event.stack).as_ref()) else {
             return;
         };
         let Some(block) = block_at(&*host, level, event.pos) else {
@@ -1687,6 +1872,11 @@ pub(crate) fn on_level_tick_post(
             Kind::Rod(tier) => {
                 rod_tick(host, level, pos, tier);
             }
+            // A hopper charges the container on the face its `facing` names, out of its own
+            // buffer (`EnergyHopperTile.postTick`), and pushes nothing anywhere.
+            Kind::Hopper(tier) => {
+                charge_container(host, level, pos, tier);
+            }
             Kind::Orb => {}
             Kind::Cable(tier) => {
                 if planned.contains(&pos) {
@@ -1800,6 +1990,92 @@ fn drain_items(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3], tier: 
     }
     let mut patch = Compound::new();
     patch.insert(KEY_ENERGY.into(), Tag::Int(stored + taken));
+    let _ = entity.merge_data(host, patch);
+}
+
+/// A hopper's item pass, in the level's move phase where every block entity is back in the world:
+/// `EnergyHopperTile.postTick` reads the block entity on the face its `facing` names, and — when
+/// that block holds a container — spends `ChargeUtil.chargeItemsInContainer(container,
+/// charging_rates.get(variant), energy.getStored())` on it, then consumes what went out of its own
+/// buffer. It never pushes anything (`postTick` has no `extractFromSides`).
+///
+/// Each item's FE goes in through its own `Capabilities.Energy.ITEM` handler in a transaction, so
+/// this mod's machine items are charged by [`MachineEnergy::insert`] and a foreign battery answers
+/// for itself; a slot with no energy item (a stone) has no handler and is left alone.
+fn charge_container(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3], tier: HopperTier) {
+    let Some(state) = level.block_state(&*host, pos) else {
+        return;
+    };
+    let facing = state
+        .property(&host.block_states(), "facing")
+        .ok()
+        .flatten()
+        .and_then(facing_of);
+    let Some(facing) = facing else {
+        return;
+    };
+    let container = offset(pos, facing);
+    // The `ITEMS` capability is the game's own container read, as `world.getBlockEntity(...)
+    // instanceof Container` is upstream's test.
+    let Some(handler) = level.capability(host, &mod_api::ITEMS, container, None) else {
+        return;
+    };
+    let size = handler.size(host);
+    if size == 0 {
+        return;
+    }
+    let Some(entity) = host.block_entity(level, pos) else {
+        return;
+    };
+    let Some(saved) = entity.data(&*host) else {
+        return;
+    };
+    let stored = clamp_energy(int(&Tag::Compound(saved), KEY_ENERGY), tier.capacity);
+    let mut rooms = Vec::with_capacity(size);
+    for slot in 0..size {
+        let place = ItemPlace::BlockEntity {
+            level,
+            pos: container,
+            side: None,
+            slot,
+        };
+        let room = place
+            .capability(host, &mod_api::ITEM_ENERGY)
+            .map_or(0, |item| {
+                let held = i32::try_from(item.amount(host)).unwrap_or(i32::MAX);
+                let capacity = i32::try_from(item.capacity(host)).unwrap_or(i32::MAX);
+                capacity.saturating_sub(held).max(0)
+            });
+        rooms.push(room);
+    }
+    let mut charged = 0;
+    for (slot, asked) in crate::runtime::hopper_charges(stored, tier.charging_rate, &rooms)
+        .into_iter()
+        .enumerate()
+    {
+        let asked = u32::try_from(asked).unwrap_or(0);
+        if asked == 0 {
+            continue;
+        }
+        let place = ItemPlace::BlockEntity {
+            level,
+            pos: container,
+            side: None,
+            slot,
+        };
+        let Some(item) = place.capability(host, &mod_api::ITEM_ENERGY) else {
+            continue;
+        };
+        let moved = host
+            .transaction(|host, tx| -> Result<u32, ()> { Ok(item.insert(host, tx, asked)) })
+            .unwrap_or(0);
+        charged += i32::try_from(moved.min(asked)).unwrap_or(0);
+    }
+    if charged == 0 {
+        return;
+    }
+    let mut patch = Compound::new();
+    patch.insert(KEY_ENERGY.into(), Tag::Int(stored - charged));
     let _ = entity.merge_data(host, patch);
 }
 
@@ -2738,5 +3014,153 @@ mod tests {
         );
         assert_eq!(asked_energy(Some(&Compound::new())), None);
         assert_eq!(asked_energy(None), None);
+    }
+
+    #[test]
+    fn every_hopper_tier_is_one_of_the_ladder_with_a_two_way_buffer_and_no_slots() {
+        // `PowahConfig.EnergyDevices`: `hoppers = new ChargingConfig(batteryCapacity(),
+        // batteryTransfer(), chargingTransfer())`, and `AbstractEnergyBlock.getTransferType()`
+        // is the default `Transfer.ALL`.
+        let expected = [
+            ("powah:energy_hopper_starter", 1_000_000, 1_000, 500),
+            ("powah:energy_hopper_basic", 4_000_000, 4_000, 2_000),
+            ("powah:energy_hopper_hardened", 10_000_000, 10_000, 5_000),
+            ("powah:energy_hopper_blazing", 40_000_000, 40_000, 20_000),
+            ("powah:energy_hopper_niotic", 100_000_000, 100_000, 50_000),
+            (
+                "powah:energy_hopper_spirited",
+                400_000_000,
+                400_000,
+                200_000,
+            ),
+            (
+                "powah:energy_hopper_nitro",
+                2_000_000_000,
+                2_000_000,
+                1_000_000,
+            ),
+        ];
+        for (index, (id, capacity, transfer, charging_rate)) in expected.into_iter().enumerate() {
+            let tier = hopper_of(id).unwrap_or_else(|| panic!("{id} is an energy hopper"));
+            assert_eq!(
+                (tier.capacity, tier.transfer, tier.charging_rate),
+                (capacity, transfer, charging_rate),
+                "{id} is the ladder's tier {index}"
+            );
+            assert_eq!(
+                Kind::of(id),
+                Some(Kind::Hopper(
+                    crate::runtime::hopper_tier(index).expect("the same tier in the rule's table")
+                )),
+                "{id} maps to its tier"
+            );
+            let buffer = battery_of(id).unwrap_or_else(|| panic!("{id} declares a buffer"));
+            assert_eq!(buffer.capacity, capacity, "{id}'s capacity");
+            assert_eq!(
+                buffer.max_insert, transfer,
+                "{id} takes its transfer through a face: `Transfer.ALL`"
+            );
+            assert_eq!(buffer.max_extract, transfer, "{id}'s extract cap");
+            assert_eq!(
+                buffer.insert_faces, [true; 6],
+                "{id} takes FE on every face"
+            );
+            assert_eq!(
+                buffer.extract_faces, [true; 6],
+                "{id} gives FE on every face"
+            );
+            assert_eq!(
+                item_buffer(id),
+                Some(ItemBuffer {
+                    capacity,
+                    max_insert: transfer,
+                    max_extract: transfer,
+                }),
+                "{id}'s own item both gives and takes, as the block does"
+            );
+            assert_eq!(
+                keep_capacity(id),
+                Some(capacity),
+                "{id} keeps its buffer (`keepEnergy` is true)"
+            );
+            assert_eq!(
+                item_slots(id),
+                0,
+                "{id} has no slots of its own: it charges the container it faces"
+            );
+        }
+        assert_eq!(
+            hopper_of("powah:energy_hopper_creative"),
+            None,
+            "there is no hopper past the ladder"
+        );
+        assert_eq!(
+            Kind::of("minecraft:chest"),
+            None,
+            "a container it faces is not one of its machines"
+        );
+    }
+
+    #[test]
+    fn the_hopper_readout_names_its_buffer_its_facing_and_its_charging_rate() {
+        let starter = Kind::Hopper(crate::runtime::hopper_tier(0).expect("the starter tier"));
+        assert_eq!(
+            hopper_line(
+                [20, 100, 40],
+                0,
+                crate::runtime::hopper_tier(0).unwrap(),
+                None,
+                2600
+            ),
+            "Energy Hopper at 20,100,40: 0/1000000 FE (comparator 0, facing unknown, charging \
+             500 FE/t, 1000 FE/t a side, t=2600)"
+        );
+        assert_eq!(
+            hopper_line(
+                [20, 100, 40],
+                5_000,
+                crate::runtime::hopper_tier(0).unwrap(),
+                Some(Direction::North),
+                2612,
+            ),
+            "Energy Hopper at 20,100,40: 5000/1000000 FE (comparator 0, facing north, charging \
+             500 FE/t, 1000 FE/t a side, t=2612)"
+        );
+        // `status_line` gets the same line for the type's exhaustiveness, with no state to read.
+        assert_eq!(
+            status_line(starter, [20, 100, 40], 0, 0, None, &[], 2600),
+            hopper_line(
+                [20, 100, 40],
+                0,
+                crate::runtime::hopper_tier(0).unwrap(),
+                None,
+                2600
+            )
+        );
+        let nitro = crate::runtime::hopper_tier(6).expect("the nitro tier");
+        assert!(
+            hopper_line([1, 2, 3], 2_000_000_000, nitro, Some(Direction::Down), 7)
+                .contains("2000000000/2000000000 FE (comparator 15, facing down, charging 1000000 FE/t, 2000000 FE/t a side, t=7)"),
+            "the nitro tier names its own numbers"
+        );
+    }
+
+    #[test]
+    fn the_facing_property_names_every_direction_and_nothing_else() {
+        for direction in Direction::ALL {
+            assert_eq!(
+                facing_of(facing_name(direction)),
+                Some(direction),
+                "{direction:?} is spelled and read back"
+            );
+        }
+        assert_eq!(facing_name(Direction::North), "north");
+        assert_eq!(facing_name(Direction::Up), "up");
+        assert_eq!(facing_of("NORTH"), None, "the property is lower case");
+        assert_eq!(
+            facing_of("upward"),
+            None,
+            "a value the block has not is no facing"
+        );
     }
 }
