@@ -2455,3 +2455,271 @@ Version: **0.2.8 → 0.2.9** (one patch). The published `[[versions]]` record ke
 0.2.9 at publish time — this port does not touch the registry entry.
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+
+## Slice 10 — the Solar Panel ladder (2026-11-23)
+
+### The slice, quoted from this port's own gaps
+
+`FINDINGS.md` §"Slice 1 boundary", the line naming the family:
+
+> Gaps (recorded, not claimed): the other tiers and the creative cell; the
+> Magmator/Thermo/**Solar**/Reactors; Ender Cells/Gates; Energizing Orb/Rods; …
+
+and slice 9's coverage row, which is what kept it out of the last two waves:
+
+> the creative cell, the generators, the reactors, the ender gates, the player transmitter, the
+> batteries | `not ported` — the reactors stay `blocked(uraninite-worldgen)`; **the generators need
+> a mod fluid tank and sky visibility**
+
+and the 0.2.9 report's own "Next slice", which named it:
+
+> the Solar Panel ladder (`powah:solar_panel_{starter…nitro}`, seven tiers), because the pin
+> exposes the two reads upstream's `SolarTile` needs — `level.can_see_sky(host, pos)` and
+> `level.get_sky_darken(host)` — so the "sky visibility is unreachable" note was wrong for this
+> family.
+
+**Chosen:** the **Solar Panel**, all seven tiers — the one generator family whose only input is
+the sky, and the family that proves the sky reads work in game.
+
+**Why it fits `machines`:** a block entity with a declared block energy buffer (extract-only, on
+its bottom face), a `keepEnergy` payload on its item, one charge slot, and a tick that reads the
+level's sky (`can_see_sky` at the block above, the dimension's sky light, `get_sky_darken`). No
+renderer, no GUI, no entity, no worldgen, no fluid tank.
+
+**Not chosen (and why):** the Magmator and the Thermo Generator need a mod block entity fluid tank
+the pin cannot fill (the recorded gap), and the reactors stay `blocked(uraninite-worldgen)`; the
+creative cell (a source, not a tier), the ender gates and the player transmitter remain out. The
+Lens of Ender — upstream's bypass for the sky — is a named gap (below).
+
+### What upstream does (read from tag `v6.2.10`, commit `a5a8f25`)
+
+| Fact | Where |
+|---|---|
+| `devices.solar_panels = new GeneratorConfig(generatorCapacity(), generatorTransfer(), passiveProduction())` — the **passive** row for generation and the furnator's rows for the buffer and the per-side transfer | `config/v2/PowahConfig.java:79`, `DefaultEnergies` |
+| `passiveProduction = baseSlowScaling * 20` = **20/60/100/200/400/800/2,000 FE/t**; `generatorCapacity = baseScaling * 20,000` (20k…40M); `generatorTransfer = baseScaling * 80` (80…160,000) | `config/v2/DefaultEnergies.java` |
+| `postTick`: `(canSeeSky \|\| hasLensOfEnder) && dimensionType().hasSkyLight() && getSkyDarken() < 4` makes `min(generation, room)` while the buffer is not full | `block/solar/SolarTile.java:44-62` |
+| `canSeeSky` is refreshed every 40 ticks as `Misc.canBlockSeeSky(world, pos.above())`, i.e. **the block above the panel**: the panel's own `propagatesSkylightDown` is false, so the sky is read one block up (upstream's own comment says exactly this) | `SolarTile.java:49-56`, `util/Misc.java:7-14`, `SolarBlock.propagatesSkylightDown` |
+| `isEnergyPresent(side)` is `Direction.DOWN` only — the panel gives FE on its bottom face and no other | `SolarTile.java:78-81` |
+| `keepEnergy()` is true; one slot (`inv.add(1)`, slot limit 1, chargeables only); `chargeItems(1)` runs before the production | `SolarTile.java:34, 83-100` |
+| `Blcks.SOLAR_PANEL`: seven tiers, `Properties.metal(2.0, 20.0)`, a `SimpleWaterloggedBlock` whose shape is `box(0,0,0,16,1,16)` with four horizontal booleans (`true` = no panel attached, so the frame is drawn) | `block/Blcks.java`, `SolarBlock.java` |
+
+### What it ships
+
+Rust:
+
+| File | Change |
+|---|---|
+| `src/runtime.rs` | `SOLAR_TIER_COUNT`, `SolarTier { generation, capacity, transfer }`, `solar_tier` (the passive row × the active capacity/transfer), `Sky { can_see_sky, has_skylight, darken }`, `Sky::daylight`, `SOLAR_DAY_MAX_DARKEN`, `solar_production` (the `min(generation, room)` rule); 3 tests |
+| `src/powah.rs` | `SOLARS`, `Kind::Solar(tier)`, `solar_of`, `solar_battery` (extract on `Direction::Down` only), `solar_container` (one charge slot), `SOLAR_SLOTS`, `sky_at`, `solar_line`, `SolarPart` + `solar_tick`, `push_out_on` (the faces a machine gives on; `push_out` is it over all six), the `/powah set` and `/powah info` arms, and the four frame booleans on placement; 3 tests |
+| `src/lib.rs` | one container, one buffer, one block entity type and one machine item per solar tier |
+
+Content: see [`CONTENT.md`](CONTENT.md) §"Slice 10" — 7 blocks with their own definition and a
+1-pixel outline/collision, 7 blockstates, 11 block models, 9 item models, 7 item definitions,
+9 textures, 7 loot tables, 8 recipes with their advancements (the seven panels and the
+photoelectric pane the starter needs), the `powah:solar_panels` block and item tags, the
+pickaxe/needs-iron entries and the creative tab; `tools/carry_slice10.py` reproduces the **82**
+files from the raw carry and the jar (`--check` green).
+
+### The readouts this slice adds
+
+```text
+Solar Panel at 14,100,6: 860/20000 FE (comparator 0, sky open, day true, generating 20 FE/t, 80 FE/t a side, charge empty, t=3708)
+Solar Panel at 14,100,6: 5000/20000 FE (comparator 3, sky covered, day true, generating 20 FE/t, 80 FE/t a side, charge empty, t=3861)
+Solar Panel at 14,100,6: 5000/20000 FE (comparator 3, sky open, day false, generating 20 FE/t, 80 FE/t a side, charge empty, t=3995)
+Solar Panel at 18,100,6: 40000000/40000000 FE (comparator 15, sky open, day true, generating 2000 FE/t, 160000 FE/t a side, charge empty, t=4232)
+```
+
+The line names the two sky reads the tick makes (`sky open|covered` is `can_see_sky`, `day
+true|false` is `has_skylight && get_sky_darken() < 4`), the tier's generation and per-side
+transfer, and its one charge slot.
+
+### TDD: the red proof, quoted
+
+`solar_tier`, `Sky::daylight`, `solar_production`, `solar_battery`, `solar_container` and
+`solar_line` were declared unfinished (`todo!()`) and the five tests were written against them
+before any glue (`ports/_shared/evidence/powah/slice10-test-red.log`):
+
+```text
+---- powah::tests::every_solar_tier_is_one_of_the_ladder_with_a_down_only_buffer stdout ----
+
+thread 'powah::tests::every_solar_tier_is_one_of_the_ladder_with_a_down_only_buffer' (945896) panicked at src/runtime.rs:225:5:
+not yet implemented: the solar ladder
+
+---- powah::tests::the_solar_readout_names_its_sky_its_generation_and_its_charge_slot stdout ----
+
+thread 'powah::tests::the_solar_readout_names_its_sky_its_generation_and_its_charge_slot' (945911) panicked at src/runtime.rs:225:5:
+not yet implemented: the solar ladder
+
+---- runtime::tests::a_solar_panel_generates_only_with_sky_daylight_and_room stdout ----
+
+thread 'runtime::tests::a_solar_panel_generates_only_with_sky_daylight_and_room' (945931) panicked at src/runtime.rs:225:5:
+not yet implemented: the solar ladder
+
+---- runtime::tests::every_solar_tier_scales_upstreams_passive_numbers stdout ----
+
+thread 'runtime::tests::every_solar_tier_scales_upstreams_passive_numbers' (945941) panicked at src/runtime.rs:225:5:
+not yet implemented: the solar ladder
+
+---- runtime::tests::the_solar_daylight_test_is_upstreams_two_reads stdout ----
+
+thread 'runtime::tests::the_solar_daylight_test_is_upstreams_two_reads' (945951) panicked at src/runtime.rs:243:9:
+not yet implemented: the solar daylight test
+
+
+test result: FAILED. 69 passed; 5 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+(The red run was taken while the crate still read `0.2.9` — the version bump came with the packaging
+step.) After the implementation: **74 passed, 0 failed** (`slice10-test-green.log`, the same 74 in
+`sdk-test.log`; 69 slice-1…9 tests plus the five).
+
+### Ladder (0.2.10, pin `0a875da`)
+
+Every compile step ran in `ports/powah`, `CARGO_INCREMENTAL=0`, inside a
+`ports/tools/build-slot.sh run --job W1-powah --port ports/powah --step …` lease with
+`BUILD_LOCAL=1`; logs in `ports/_shared/evidence/powah/`.
+
+| Step | Command | Result |
+|---|---|---|
+| unit tests | `cargo test --offline` | **74 passed**, 0 failed (`sdk-test.log`) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`slice10-clippy-fmt.log`) |
+| formatting | `cargo fmt --check` | exit 0, empty (`slice10-clippy-fmt.log`) |
+| package, twice | `rm -f Cargo.lock; cargo horizon-mod build` ×2, `cmp` | **byte-identical, 388,951 B**, sha256 `13f0e7be10390536b39ae315d81878f257e5a5921f2cf7c071b45c60d6cfc9b4` (`slice10-build-twice.log`); the packed `README.md` is byte-identical to the tree's |
+| registry check | `cargo horizon-mod check powah.hmod` | **exit 0**, `powah 0.2.10 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, `388951 bytes, SHA-256 13f0e7be…cfc9b4, unsigned` (`slice10-check-fits.log`) |
+| fits the pin | `cargo horizon-mod fits powah.hmod --build 0a875da` | `0a875da  made for`, exit 0 (`slice10-check-fits.log`) |
+| fits **another** build | `cargo horizon-mod fits powah.hmod --build 0b14f8a` | `0b14f8a  fits`, exit 0 (`slice10-check-fits.log`) |
+| dialect | `python3 ports/tools/check_261_dialect.py powah.hmod` | exit 0: **197** recipe/loot files in the 26.3 dialect (`slice10-check-fits.log`) |
+| carried content | `python3 tools/carry_slice10.py --check` | 82 files match |
+| package gate | `python3 ports/tools/verify-sdk-package.py powah` | **1/1**, runtime byte-identical (`3aaf9dfd3796`), no packed `Cargo.lock`, **624 entries** (`sdk-verify.log`) |
+
+### In-game legs
+
+Launcher build `Compiling powah (1 of 1)`, `native-0a875da-eb0b2f34c233`, instance `powah-e2e`
+(`evidence/powah-e2e/launcher-build-0.2.10.log`); logs in `ports/_shared/evidence/powah-e2e/`.
+The legs ran the 388,638 B archive of these same sources whose only other difference is `README.md`
+(the archive the final rebuild replaced): nothing compiled or carried changed between them, so the
+runs stand for the delivered 388,951 B package, as slice 7's did for its README-only difference.
+
+| Leg | Command | Result |
+|---|---|---|
+| main | `launcher-game.sh build powah` + `build-slot.sh run --step e2e` | **PASS** + `EXIT:0` (`e2e-launcher-0.2.10.log`) |
+| control (whole scenario, no package) | `GAME=$CONTROL_GAME …` | `FAIL: expected powah:furnator_starter at 0,100,0, got 'minecraft:air'` + `EXIT:1` (`e2e-control-0.2.10.log`) |
+| selftest (this slice's flip) | `SELFTEST=solar …` | `FAIL: SELFTEST flipped: the open-sky panel generated 140 FE over 7 ticks` + `EXIT:1` (`e2e-selftest-solar.log`) |
+| **the previous package** (0.2.9, the parity rule's red) | the 0.2.9 game + the same scenario | `FAIL: expected powah:solar_panel_starter at 14,100,6, got 'minecraft:air'` + `EXIT:1`, after every slice 1–9 phase passed (`e2e-oldpackage-0.2.9.log`) |
+| log gate | `check-e2e-logs.py powah-e2e --strict` | `logs=37 ok=37 missing-exit=0 bad-exit=0`, exit 0 |
+
+Quoted from `e2e-launcher-0.2.10.log` (the family's own assertions):
+
+```text
+== slice 10: a solar panel generates only with an open sky and daylight ==
+  solar: Solar Panel at 14,100,6: 860/20000 FE (comparator 0, sky open, day true, generating 20 FE/t, 80 FE/t a side, charge empty, t=3708)
+  rate: Solar Panel at 14,100,6: 10140/20000 FE (comparator 7, sky open, day true, generating 20 FE/t, 80 FE/t a side, charge empty, t=3722)
+  rate: Solar Panel at 14,100,6: 10260/20000 FE (comparator 7, sky open, day true, generating 20 FE/t, 80 FE/t a side, charge empty, t=3728)
+  dt=6 ticks, panel +120 FE
+  twenty of room: Solar Panel at 14,100,6: 20000/20000 FE (comparator 15, sky open, day true, generating 20 FE/t, 80 FE/t a side, charge empty, t=3749)
+== slice 10: a stone above the panel stops it, and midnight stops it ==
+  covered: Solar Panel at 14,100,6: 5000/20000 FE (comparator 3, sky covered, day true, generating 20 FE/t, 80 FE/t a side, charge empty, t=3861)
+  covered: Solar Panel at 14,100,6: 5000/20000 FE (comparator 3, sky covered, day true, generating 20 FE/t, 80 FE/t a side, charge empty, t=3929)
+  night: Solar Panel at 14,100,6: 5000/20000 FE (comparator 3, sky open, day false, generating 20 FE/t, 80 FE/t a side, charge empty, t=3995)
+  night: Solar Panel at 14,100,6: 5000/20000 FE (comparator 3, sky open, day false, generating 20 FE/t, 80 FE/t a side, charge empty, t=4066)
+== slice 10: a solar panel gives on its bottom face only ==
+  cell below:  Energy Cell at 20,99,8: 1420/1000000 FE (comparator 0, charge empty, empty, 1000 FE/t a side, t=4169)
+  cell beside: Energy Cell at 21,100,8: 0/1000000 FE (comparator 0, charge empty, empty, 1000 FE/t a side, t=4175)
+  panel:       Solar Panel at 20,100,8: 0/20000 FE (comparator 0, sky open, day true, generating 20 FE/t, 80 FE/t a side, charge empty, t=4182)
+== slice 10: the solar ladder, its tags and its clamp ==
+  set(18,100,6) = Solar Panel at 18,100,6: 40000000/40000000 FE (comparator 15, sky open, day true, generating 2000 FE/t, 160000 FE/t a side, charge empty, t=4221)
+  info(18,100,6): Solar Panel at 18,100,6: 40000000/40000000 FE (comparator 15, sky open, day true, generating 2000 FE/t, 160000 FE/t a side, charge empty, t=4232)
+  tag(18,100,6) = {"chat":["Test passed"],"ok":true}
+  tag(0,99,3)   = {"chat":["Test failed"],"ok":true}
+```
+
+Every number is exact and its leg can fail: two readouts **6 ticks apart differ by exactly 120 =
+6 × 20** (a 40-FE or a 10-FE tier fails the whole-step test; `SELFTEST=solar` expects 0 and fails),
+a panel with exactly 20 of room fills to **20,000 and stays there**, a stone at the sky position
+leaves **5,000** for two reads 68 ticks apart while the same panel under an open sky generated
+120 in 6 (`sky covered` in the readout names why), `/time set midnight` with the sky open leaves
+**5,000** for 71 ticks (`sky open, day false`), the panel's bottom face charges the cell under it
+(**1,420**) while a cell on its side stays **0** and the panel's own buffer stays **0** (it takes no
+fill), the nitro tier clamps 2,000,000,000 at **40,000,000** and names `generating 2000 FE/t,
+160000 FE/t a side`, the tag passes on a panel and fails on the arena floor, and every panel tier
+drops itself.
+
+### Coverage (parity rule, the family this slice adds)
+
+| Family (from the jar) | Status |
+|---|---|
+| the seven `solar_panel_*` blocks and items | **tested** — the starter placed and read back (its column cleared to y=250), the nitro placed and clamped at 40,000,000; the 0.2.9 package red at the starter's own id; the control game knows neither id |
+| `postTick`'s production rule (sky + daylight + room) | **tested** — 20 FE/t measured against the game clock (`+120` over `dt=6`), the last 20 of room filled exactly, a stone above and midnight each holding 5,000 for 60 ticks; the counterfactual `SELFTEST=solar` fails |
+| `canSeeSky` at `pos.above()` | **tested** — the stone at 14,101,6 (the block above the panel) is what stops it, and the readout says `sky covered` |
+| `getSkyDarken() < 4` | **tested** — `/time set midnight` stops an open-sky panel and the readout says `day false`; `/time set noon` restarts it (the rate leg) |
+| `dimensionType().hasSkyLight()` | **rule-tested** — `the_solar_daylight_test_is_upstreams_two_reads`; no in-game leg (the arena is the Overworld; the End has no sky to test — see the harness note) |
+| `isEnergyPresent(DOWN)` | **tested** — a cell under the panel charges to 1,420 while a cell beside it stays 0, and the panel takes no fill |
+| `keepEnergy` on a panel | **rule-tested** — `keep_capacity`/`item_buffer` pinned per tier; the payload path itself is proved in game on the furnator, cell, rod, discharger and hopper families |
+| the one charge slot (`chargeItems(1)`) | **rule-tested** — `solar_container` and `item_slots` = 1 per tier; the readout's `charge` field prints it (empty in every leg) |
+| the eight recipes + advancements | **tested** — `craft_check.py` crafts the pane and all seven panels (output id + count, every ingredient consumed) |
+| the `powah:solar_panels` block/item tags | **tested in game** — `execute if block … #powah:solar_panels` passes on a panel and fails on the arena floor |
+| loot | **tested** — the loot leg mines all seven tiers in survival and asserts each drops itself |
+| the Lens of Ender | `not ported` — the jar has no recipe for it (it is got by right-clicking an enderman with a photoelectric pane, `general.lens_of_ender`, and the panel's lens slot is a GUI upgrade); `solar_production` keeps upstream's `lens_of_ender` parameter and its test pins the rule |
+| waterlogging | `not ported` — cosmetic (`SimpleWaterloggedBlock`); the carried blockstate has no waterlogged variant |
+| the panel's GUI, side config and redstone modes | `not ported` — slice 1's GUI/side-config gaps |
+
+### Deviations and upstream defects this slice records
+
+1. **`canSeeSky` is read every tick, not every 40.** Upstream refreshes it on `ticks % 40 == 0`
+   (a cache to spare a light lookup); the port asks the level each tick, so a placed panel produces
+   from its first tick and a stone overhead stops it at once. Measured: the panel read 860 FE 30
+   ticks after placement.
+2. **Production runs in the block entity's own tick; the push down runs at the level tick's end.**
+   A block entity is out of the world during its own tick, so a neighbour's `ENERGY` capability is
+   read in the queue phase — the same phase rule slices 7–9 record. Upstream's `postTick` does both
+   in one call.
+3. **The four frame booleans are set on placement only.** Upstream's `updateShape` also recomputes
+   them when a neighbour changes; they are cosmetic (the carried blockstate's multipart) and no
+   assertion depends on them.
+4. **Waterlogging is not ported** (cosmetic, as above).
+5. **The solar item's `minecraft:max_stack_size` is 1** as upstream's `stacksTo(1)`; the block is a
+   1-pixel plate (outline and collision) rather than the carry's `oak_fence` guess, and the panel
+   takes no FE in through any face (upstream's `AbstractEnergyProvider`).
+
+**Upstream defects fixed:** none. `Misc.canBlockSeeSky(world, pos.above())` looks like an
+off-by-one until `SolarBlock.propagatesSkylightDown` is read: the panel's own position never has
+full sky light, so upstream reads the block above it, and the port does the same. The one mismatch
+found in this slice was in **this slice's own first in-game leg**: the panel produced (1,640 FE in
+its buffer) but pushed nothing down, because `push_out_on` read the machine's buffer through
+`Direction::Up` — a face a solar panel does not extract on, so the capability answered nothing.
+Reading it through `faces[0]` fixed it; the leg that caught it is the "cell under the panel took no
+FE" assertion, which is kept.
+
+### Harness findings this slice measured (for the next machine port)
+
+1. **The sky is read at the block above the panel**, so the differential is a block at
+   `(x, y+1, z)` — not one at the panel's own position — and a column cleared to y=250 is what
+   makes `can_see_sky` true at the arena's y=100 (the arena's own fill stops at y=110).
+2. **`set_energy` cannot poll a producing machine for equality**; the rate leg writes the buffer
+   and takes two `info` readouts instead, comparing `b - b'` against `t' - t` (both in the same
+   `t=` clock). Every earlier exact-value poll in this harness is on a machine that is idle at that
+   moment.
+3. **`/time set midnight` takes effect on the next tick** and `get_sky_darken` follows it; the leg
+   waits 40 ticks before setting the buffer so the equality poll can settle.
+4. **The `keepEnergy` pickup's tp can land the player a block low.** Three legs of this wave (two on
+   the 0.2.10 game, one on the 0.2.9 game) failed in slice 7's spill phase with an empty inventory
+   and a `fell from a high place` line: `ctl tp` onto a dropped item's own position had put the
+   player into the 35-block fall the `floor_under` comment describes. The harness now turns
+   `fall_damage` off and `keep_inventory` on for the run (no assertion is about either), proves
+   each `floor_under` platform is stone, and re-stands the player if a tp lands below y=95. With
+   those, the main leg passed and the box has stayed green.
+5. **A recipe case must name the previous tier's item in the top row.** The first `craft_check`
+   attempt wrote `photoelectric_pane` in all seven panel recipes; the table refused the six
+   upgrades and the check failed on the real grid, which is what a fail-capable recipe assertion
+   looks like (the fix is `panel(capacitor, top, bottom)`).
+
+The first 0.2.10 archive (388,638 B, `696850bc…`) was built before this section's `README.md` prose
+landed, so the archive and the tree differed in exactly that one file. It was rebuilt from the final
+tree: the packed `README.md` is now byte-identical to the tree's, the two builds are `cmp`-identical,
+and every one of the archive's 623 tree files matches the tree byte for byte (`uses.json` is the
+build's own API-uses report, as in every earlier package). **PACKAGE_MATCHES_TREE** holds.
+
+Version: **0.2.9 → 0.2.10** (one patch). The published `[[versions]]` record keeps 0.2.9 and gains
+0.2.10 at publish time — this port does not touch the registry entry.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices

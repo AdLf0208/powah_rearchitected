@@ -1,4 +1,4 @@
-# Powah for Horizon — slices 1–9
+# Powah for Horizon — slices 1–10
 
 A clean-room Rust rewrite of **Powah! (Rearchitected) 6.2.10** (`Technici4n/Powah`,
 **LGPL-3.0-only**) for Horizon 26.3, as one flat SDK package (`api = "0.2"`): the
@@ -66,9 +66,19 @@ buffer by exactly what went out. It never pushes through a face (`postTick` has 
 `extractFromSides`), it takes and gives its tier's transfer on every face, a stone
 takes nothing, and it keeps its buffer on its item like the other machines.
 
+Slice 10 is the **Solar Panel**: seven tiers (20 FE a tick into a 20,000 FE buffer up
+to 2,000 into 40,000,000) whose only fuel is the sky. Each tick the panel reads
+`can_see_sky` at the block above it (upstream's `Misc.canBlockSeeSky(world,
+pos.above())`), its dimension's sky light and `get_sky_darken()`, and makes
+`min(generation, room)` only when it sees the sky and it is day — so a stone overhead
+or midnight stops it, exactly as upstream. It charges one item in its slot, gives FE on
+its bottom face only (`isEnergyPresent` is `Direction.DOWN`), takes no fill through any
+face, and keeps its buffer on its item. The **photoelectric pane** the starter panel is
+built from comes with it, so all eight recipes craft.
+
 Every machine declares a real `Capabilities.Energy.BLOCK` buffer (the amount is the int
 `energy` in the block entity's saved compound), so other machines can fill and drain a
-furnator, a cell, a discharger or a hopper; a cable is a pure relay.
+furnator, a cell, a discharger, a hopper or a solar panel; a cable is a pure relay.
 
 - Scope, behaviour table, the hook table, deviations and the gap list:
   [`notes.md`](notes.md); upstream analysis: [`FINDINGS.md`](FINDINGS.md);
@@ -82,14 +92,14 @@ furnator, a cell, a discharger or a hopper; a cable is a pure relay.
 
 ```text
 powah.hmod            the delivered package (horizon-mod.toml + Cargo.toml + src/ + assets/ + data/)
-horizon-mod.toml      the only manifest and identity: id, version 0.2.8, api 0.2, [native] pins
+horizon-mod.toml      the only manifest and identity: id, version 0.2.10, api 0.2, [native] pins
 Cargo.toml            one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 src/lib.rs            the one `#[mod_api::horizon_mod] impl Hooks`
 src/powah.rs          the glue: the block entity Parts, the queue, the tier tables, the buffers, the cable network, the command
 src/runtime.rs        the pure machine rules and their tests (no mod_api types)
 assets/powah/         the carried blockstates, models, items, textures and lang
 data/powah/           the carried blocks, items, loot, recipes, tags, the creative tab
-tools/craft_check.py  the recipe leg: every material, machine and discharger recipe in a real table
+tools/craft_check.py  the recipe leg: every material, machine, discharger, hopper and solar recipe in a real table
 tools/e2e.sh          the in-game scenario (needs a launcher-built game, see below)
 ```
 

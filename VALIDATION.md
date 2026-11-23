@@ -1,5 +1,29 @@
-# Validation — Powah slices 1 to 9
+# Validation — Powah slices 1 to 10
 
+> **0.2.10 (slice 10, the Solar Panel)** is recorded in
+> [`notes.md`](notes.md#slice-10--the-solar-panel-ladder-2026-11-23): the slice and the gap lines it
+> comes from (`FINDINGS.md`'s "Magmator/Thermo/Solar/Reactors" and slice 9's own "the generators need
+> a mod fluid tank and sky visibility", which this slice shows is wrong for solar — the pin reads the
+> sky natively), the upstream facts it is built on (`devices.solar_panels` = `passiveProduction` over
+> the furnator's capacity/transfer, `postTick`'s sky + daylight + room rule, `canSeeSky` at
+> `pos.above()`, `getSkyDarken() < 4`, `isEnergyPresent(DOWN)`, one charge slot, `keepEnergy`), the
+> red proof (five `todo!()` rules, 69 passed / 5 failed, quoted verbatim), the ladder at pin
+> `0a875da` (74 tests, clippy 0 warnings, `fmt --check` clean, two `cmp`-identical builds of
+> **388,951 B**, `check`, `fits` against the pin **and** against `0b14f8a`, gate 1/1 with **624
+> entries**, dialect 197/197) and the in-game legs (main `PASS`+`EXIT:0`; control and
+> `SELFTEST=solar` at `EXIT:1`; the **0.2.9 package red** at the slice's own block id after every
+> earlier phase passed; the log gate 37/37). Package: `powah.hmod`, 388,951 B, sha256
+> `13f0e7be10390536b39ae315d81878f257e5a5921f2cf7c071b45c60d6cfc9b4` (rebuilt from the final
+> tree: the first archive packed the pre-slice-10 `README.md`; the packed one is now byte-identical to
+> the tree's and every packed tree file matches). Launcher build:
+> `Compiling powah (1 of 1)`, `native-0a875da-eb0b2f34c233`, instance `powah-e2e`. What it proves: a
+> starter panel under an open noon sky generates exactly 20 FE a tick measured against the game's
+> clock (`+120` over `dt=6`) and fills its last 20 of room to exactly 20,000 without overflowing; a
+> stone at the block above it and `/time set midnight` each hold it at exactly 5,000 for 60 ticks
+> (`sky covered, day true` / `sky open, day false`); a cell under a panel charges while a cell beside
+> it stays empty and the panel takes no fill; the nitro tier clamps 2,000,000,000 FE at 40,000,000
+> and names `generating 2000 FE/t, 160000 FE/t a side`; `powah:solar_panels` matches in game; the
+> photoelectric pane and all seven panels craft; and every panel tier drops itself.
 > **0.2.9 (slice 9, the Energy Hopper)** is recorded in
 > [`notes.md`](notes.md#slice-9--the-energy-hopper-2026-11-23): the slice and the gap lines it comes
 > from (item 11's unported machines, `FINDINGS.md`'s "Discharger/Hopper/Player Transmitter" and the

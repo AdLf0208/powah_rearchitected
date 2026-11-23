@@ -122,6 +122,25 @@
 # SELFTEST=hopper expects the chest's item to read 0 (it must FAIL), proving the
 # charging assertion can fail.
 #
+# Slice 10 (the solar panel ladder) adds:
+#  - a starter solar panel under an open noon sky in the Overworld (the column above
+#    14,101,6 is cleared to y=250): `/powah set 10000`, then two readouts `dt` ticks
+#    apart must differ by exactly 20 x dt — the tier's `passiveProduction` measured
+#    against the game's own clock — and the readout names `sky open, day true,
+#    generating 20 FE/t, 80 FE/t a side`;
+#  - `/powah set 19980` leaves 20 of room, which one tick fills to exactly 20000 FE
+#    and never beyond;
+#  - a stone at the sky position (14,101,6) leaves the buffer at exactly 5,000 for 60
+#    ticks and reads `sky covered`; `/time set midnight` with the sky open leaves it
+#    at 5,000 too and reads `sky open, day false`;
+#  - a cell under the panel charges while a cell beside it stays empty and the panel's
+#    own buffer takes nothing back (`isEnergyPresent` is DOWN only);
+#  - a nitro panel clamps 2,000,000,000 FE at 40,000,000 and names `generating 2000
+#    FE/t, 160000 FE/t a side`, the block is in `powah:solar_panels`, the pane crafts,
+#    and every panel tier drops itself.
+# SELFTEST=solar expects the open-sky panel to have generated nothing (it must FAIL),
+# proving the generation assertion can fail.
+#
 # Slice 5 (the five cell recipes' `blocked(energizing-orb)` gate) adds the
 # Energizing Orb, its seven rods and the five materials they make:
 #  - a starter rod beside an orb holding iron and gold fills it to exactly its
@@ -253,7 +272,8 @@ select_item() { # select_item ITEM
 # moved into the hotbar with vanilla's own `/item replace … from entity`, the same
 # stack and payload, never a copy.
 pickup() { # pickup ITEM X Y Z
-    local tries=0 drop slot main k dx dy dz
+    local tries=0 drop slot main k dx dy dz py centre
+    centre=$(awk -v z="$4" 'BEGIN { print z + 0.5 }')
     ctl wait 10
     while [ "$tries" -lt 4 ] && [ "$(inv_count "$1")" -lt 1 ]; do
         drop=$(ctl entities 32 item |
@@ -263,7 +283,16 @@ pickup() { # pickup ITEM X Y Z
             echo "  the drop lies at $drop"
             ctl tp "$dx" "$dy" "$dz" >/dev/null
         else
-            ctl tp "$2.5" 100 "$(($3 + 1)).5" >/dev/null
+            # The item may be in the machine's own cell under a random offset the entity
+            # read has not caught yet: stand in that cell, not two blocks away from it.
+            ctl tp "$2.5" "$3" "$centre" >/dev/null
+        fi
+        # A tp onto the drop can land the player a block low on a loaded box; the fall empties the
+        # inventory and the leg then hunts a drop it already had (measured 2026-11-23, twice).
+        py=$(ctl state | jq -r '.player.position[1] // 0')
+        if ! awk -v y="$py" 'BEGIN { exit !(y >= 95) }'; then
+            echo "  the player is at y=$py after the tp; standing back on the platform"
+            ctl tp "$2.5" "$3" "$centre" >/dev/null
         fi
         ctl wait 20
         tries=$((tries + 1))
@@ -303,7 +332,7 @@ pickup() { # pickup ITEM X Y Z
     [ "$(ctl inventory | jq -r '.held.item // ""')" = "$1" ] ||
         fail "$1 is not in hand after selecting slot $slot: $(ctl inventory | jq -c '{counts, hotbar, held}' | head -c 500)"
     # stand beside the block again, not in it: the caller places the item back here
-    ctl tp "$2.5" 100 "$(($3 + 1)).5" >/dev/null
+    ctl tp "$2.5" "$3" "$(awk -v z="$4" 'BEGIN { print z + 1.5 }')" >/dev/null
     ctl wait 4
 }
 # place_item X Y Z ITEM: place ITEM from the hotbar at an empty position, from two
@@ -550,6 +579,13 @@ arena() {
     ctl command "fill -8 100 -8 24 110 24 minecraft:air" >/dev/null
     ctl command "difficulty peaceful" >/dev/null
     ctl command "kill @e[type=!player]" >/dev/null
+    # The pickup paths `ctl tp` onto a dropped item's own position. On a loaded box the player has
+    # twice landed a block low and taken the ~35-block fall into the world (measured 2026-11-23:
+    # "fell from a high place", the inventory emptied, the leg then failed to find its own drop),
+    # and no assertion here is about fall damage or a death's inventory. Both rules are reported so
+    # a build that refuses one says so in the log instead of going quietly flaky.
+    echo "  gamerule fall_damage: $(ctl command "gamerule fall_damage false")"
+    echo "  gamerule keep_inventory: $(ctl command "gamerule keep_inventory true")"
     ctl tp 0.5 100 3.5 >/dev/null
     ctl wait 20
     local y feet floor
@@ -571,15 +607,23 @@ place() { # place X Y Z ID
     [ "$got" = "$4" ] || fail "expected $4 at $1,$2,$3, got '$got'"
 }
 
-# floor_under X Z: a stone platform at y=99 from one block behind (X, 100, Z) to two in front. The
-# arena floor spans -8..24, and a `keepEnergy` leg stands its machine on y=100 outside that: without
-# a platform, the item a break drops falls into the world and the *player* does too (`pickup` tp's
-# to y=100 beside the block, and the fall is ~35 blocks), so the pickup's entity read then sees the
-# ambient drops at y=63 instead of the machine (measured 2026-11-22, two runs; the 0.2.8 run won
-# the race). The platform covers the standing spot a pickup and a `place_item` use, not the whole
-# arena: it must not erase a neighbouring phase's block.
+# floor_under X Z: a stone platform at y=99 around the machine column. The arena floor spans
+# -8..24, and a `keepEnergy` leg stands its machine on y=100 outside that: without a platform, the
+# item a break drops falls into the world and the *player* does too, so the pickup's entity read then
+# sees the ambient drops at y=63 instead of the machine (measured 2026-11-22, two runs; the 0.2.8 run
+# won the race). It is wider than the machine on purpose: a dropped item's random offset can throw it
+# a block off the machine's column (measured 2026-11-23: a furnator drop at x=33.63 from a machine at
+# x=32), and a drop that lands one block outside a 3x4 platform falls 36 blocks and is lost. The
+# platform covers the standing spots a pickup and a `place_item` use, not the whole arena: it must not
+# erase a neighbouring phase's block.
 floor_under() { # floor_under X Z
-    ctl command "fill $(($1 - 1)) 99 $(($2 - 1)) $(($1 + 1)) 99 $(($2 + 2)) minecraft:stone" >/dev/null
+    ctl command "fill $(($1 - 2)) 99 $(($2 - 1)) $(($1 + 2)) 99 $(($2 + 3)) minecraft:stone" >/dev/null
+    # Prove the platform is there now, instead of discovering it missing when the player falls.
+    local floor
+    floor=$(ctl block "$1" 99 "$2" | jq -r '.name // .block // empty')
+    echo "  platform($1,99,$2) = $floor"
+    [ "$floor" = "minecraft:stone" ] ||
+        fail "the pickup platform at $1,99,$2 is '$floor', so a later tp would drop the player"
 }
 
 # The negative control: an unmodified client of the same build. The block id must
@@ -593,7 +637,7 @@ control_leg() {
     fi
     [ -x "$CONTROL_GAME" ] || fail "missing CONTROL_GAME: $CONTROL_GAME"
     echo "== control: the same build with no powah =="
-    echo "  package under test: $HMOD ($(stat -c %s "$HMOD") B)"
+    echo "  package under test: $HMOD ($(stat -c %s "$HMOD") B, sha256 $(sha256sum "$HMOD" | cut -d' ' -f1))"
     LAUNCH_GAME=$CONTROL_GAME WORLD_NAME=$CONTROL_WORLD launch
     arena
     local setblock give name
@@ -673,6 +717,18 @@ control_leg() {
         *"Unknown item"*|*"unknown item"*|*"error"*|*"not found"*) ;;
         *) fail "the control game knew powah:energy_hopper_nitro, so the content did not come from this package" ;;
     esac
+    solar=$(ctl command "setblock 8 100 0 powah:solar_panel_starter")
+    echo "  solar setblock reply: $solar"
+    case "$solar" in
+        *"Unknown block"*|*"unknown block"*|*"error"*) ;;
+        *) fail "the control game knew powah:solar_panel_starter, so the content did not come from this package" ;;
+    esac
+    pane=$(ctl command "give @s powah:photoelectric_pane 1")
+    echo "  pane give reply: $pane"
+    case "$pane" in
+        *"Unknown item"*|*"unknown item"*|*"error"*|*"not found"*) ;;
+        *) fail "the control game knew powah:photoelectric_pane, so the content did not come from this package" ;;
+    esac
     name=$(ctl block 4 100 0 | jq -r '.name // .block // "unknown"')
     [ "$name" = "minecraft:air" ] || fail "the control game holds $name, so the block id was known"
     echo "  without the package: no block, no item (block 4,100,0 = $name)"
@@ -680,6 +736,9 @@ control_leg() {
 }
 
 echo "== launch (Overworld arena at y=100; one package, code and content together) =="
+# Name the archive this leg binds: its size and sha256 are what a reviewer compares
+# the evidence against, not the path it happened to sit at.
+echo "  package: $(basename "$HMOD") ($(stat -c %s "$HMOD") B, sha256 $(sha256sum "$HMOD" | cut -d' ' -f1))"
 control_leg
 launch
 arena
@@ -1724,13 +1783,158 @@ ctl command "gamemode creative @s" >/dev/null
 ctl command "clear @s" >/dev/null
 ctl wait 4
 
+echo "== slice 10: a solar panel generates only with an open sky and daylight =="
+# `SolarTile.postTick`: `(canSeeSky || hasLensOfEnder) && dimensionType.hasSkyLight() &&
+# getSkyDarken() < 4` makes `min(generation, room)`. `canSeeSky` is
+# `Misc.canBlockSeeSky(world, pos.above())`, so the sky is read at the block ABOVE the panel.
+# `devices.solar_panels` is a `GeneratorConfig` over `passiveProduction` (20 FE/t at starter) with
+# the furnator's capacity (20,000 FE) and per-side transfer (80 FE/t).
+#
+# The arena is the Overworld at y=100, and the column above each panel is cleared to y=250 so the
+# sun really is unobstructed (the sky is read at 14,101,6 and 18,101,6).
+place 14 100 6 powah:solar_panel_starter
+ctl command "fill 14 101 6 14 250 6 minecraft:air" >/dev/null
+ctl command "time set noon" >/dev/null
+ctl wait 30
+solar_open=$(info 14 100 6)
+echo "  solar: $solar_open"
+case "$solar_open" in
+    *"Solar Panel at 14,100,6: "*" FE (comparator "*", sky open, day true, generating 20 FE/t, 80 FE/t a side, charge empty, t="*)
+        ;;
+    *) fail "a panel under an open noon sky must read 'sky open, day true, generating 20 FE/t, 80 FE/t a side', got '$solar_open'" ;;
+esac
+# The rate against the game's own clock: the panel's `t=` field is `level.game_time`, and 20 FE a
+# tick is what two readouts `dt` ticks apart must differ by. The buffer is set well below the
+# 20,000 it can hold so neither read is at the cap.
+say "powah set 10000 14 100 6"
+ctl wait 4
+rate_first=$(info 14 100 6)
+rate_second=$(info 14 100 6)
+echo "  rate: $rate_first"
+echo "  rate: $rate_second"
+t1=$(time_of "$rate_first")
+t2=$(time_of "$rate_second")
+b1=$(energy_of "$rate_first")
+b2=$(energy_of "$rate_second")
+dt=$((t2 - t1))
+db=$((b2 - b1))
+echo "  dt=$dt ticks, panel +$db FE"
+if [ "$SELFTEST" = solar ]; then
+    echo "  SELFTEST: expecting the open-sky panel to have generated nothing (this must fail)"
+    [ "$db" = 0 ] ||
+        fail "SELFTEST flipped: the open-sky panel generated $db FE over $dt ticks"
+fi
+[ "$dt" -ge 2 ] || fail "the two readouts were $dt ticks apart, too close to measure a rate"
+[ "$db" -gt 0 ] || fail "an open-sky noon panel generated nothing over $dt ticks: $rate_second"
+[ $((db % 20)) = 0 ] ||
+    fail "the panel generated $db FE over $dt ticks, not a whole number of 20 FE ticks"
+steps=$((db / 20))
+[ "$steps" -ge $((dt - 1)) ] && [ "$steps" -le $((dt + 1)) ] ||
+    fail "the panel generated $db FE over $dt ticks; at 20 FE a tick that is not one tick a tick (expected $((dt * 20)) +- 20)"
+# Exactly 20 of room is filled in one tick and never overflowed.
+say "powah set 19980 14 100 6"
+for _ in $(seq 1 10); do
+    ctl wait 10
+    clamped=$(info 14 100 6)
+    [ "$(energy_of "$clamped")" = 20000 ] && break
+done
+echo "  twenty of room: $clamped"
+[ "$(energy_of "$clamped")" = 20000 ] ||
+    fail "a panel with 20 of room must fill to 20000 FE, got '$clamped'"
+ctl wait 20
+overflow=$(info 14 100 6)
+[ "$(energy_of "$overflow")" = 20000 ] ||
+    fail "a full panel must stay at 20000 FE, got '$overflow'"
+
+echo "== slice 10: a stone above the panel stops it, and midnight stops it =="
+# The differential for the generation above: the same panel, the same buffer, the same noon — with
+# a stone at the position the sky is read from. `set_energy` polls for equality, which settles only
+# when nothing is produced.
+ctl command "setblock 14 101 6 minecraft:stone" >/dev/null
+ctl wait 60
+set_energy 14 100 6 5000
+covered_first=$(info 14 100 6)
+echo "  covered: $covered_first"
+case "$covered_first" in
+    *"sky covered, day true"*) ;;
+    *) fail "a stone above the panel must read 'sky covered, day true', got '$covered_first'" ;;
+esac
+ctl wait 60
+covered_second=$(info 14 100 6)
+echo "  covered: $covered_second"
+[ "$(energy_of "$covered_first")" = 5000 ] && [ "$(energy_of "$covered_second")" = 5000 ] ||
+    fail "a covered panel generated FE: $(energy_of "$covered_first") then $(energy_of "$covered_second") of 5000"
+# Midnight: the sky is open again, but `getSkyDarken()` is 11, which fails upstream's `< 4`.
+ctl command "setblock 14 101 6 minecraft:air" >/dev/null
+ctl command "time set midnight" >/dev/null
+ctl wait 40
+set_energy 14 100 6 5000
+night_first=$(info 14 100 6)
+echo "  night: $night_first"
+case "$night_first" in
+    *"sky open, day false"*) ;;
+    *) fail "a panel at midnight must read 'sky open, day false', got '$night_first'" ;;
+esac
+ctl wait 60
+night_second=$(info 14 100 6)
+echo "  night: $night_second"
+[ "$(energy_of "$night_first")" = 5000 ] && [ "$(energy_of "$night_second")" = 5000 ] ||
+    fail "a midnight panel generated FE: $(energy_of "$night_first") then $(energy_of "$night_second") of 5000"
+ctl command "time set noon" >/dev/null
+ctl wait 10
+
+echo "== slice 10: a solar panel gives on its bottom face only =="
+# `SolarTile.isEnergyPresent(side)` is `Direction.DOWN` and nothing else, and its buffer is an
+# `AbstractEnergyProvider` that takes no fill: a cell under it charges, a cell beside it stays empty,
+# and the cell under it cannot push its FE back up into the panel.
+place 20 99 8 powah:energy_cell_starter
+place 21 100 8 powah:energy_cell_starter
+place 20 100 8 powah:solar_panel_starter
+ctl command "fill 20 101 8 20 250 8 minecraft:air" >/dev/null
+ctl wait 60
+down_line=$(info 20 99 8)
+side_line=$(info 21 100 8)
+panel_line=$(info 20 100 8)
+echo "  cell below:  $down_line"
+echo "  cell beside: $side_line"
+echo "  panel:       $panel_line"
+[ "$(energy_of "$down_line")" -gt 0 ] ||
+    fail "the cell under the panel took no FE: $down_line"
+[ "$(energy_of "$side_line")" = 0 ] ||
+    fail "a cell beside the panel took FE, though `isEnergyPresent` is DOWN only: $side_line"
+[ "$(energy_of "$panel_line")" = 0 ] ||
+    fail "the panel's buffer took the cell's FE, though it never takes a fill: $panel_line"
+
+echo "== slice 10: the solar ladder, its tags and its clamp =="
+place 18 100 6 powah:solar_panel_nitro
+ctl command "fill 18 101 6 18 250 6 minecraft:air" >/dev/null
+ctl wait 20
+# The nitro row: 2,000 FE/t from `passiveProduction`, the furnator's 40,000,000 FE and 160,000 FE a
+# side. `/powah set` clamps the panel at its own capacity.
+set_clamped 18 100 6 2000000000 40000000
+expect_info 18 100 6 "40000000/40000000 FE"
+expect_info 18 100 6 "generating 2000 FE/t, 160000 FE/t a side"
+solar_tag=$(ctl command "execute if block 18 100 6 #powah:solar_panels")
+solar_tag_miss=$(ctl command "execute if block 0 99 3 #powah:solar_panels")
+echo "  tag(18,100,6) = $solar_tag"
+echo "  tag(0,99,3)   = $solar_tag_miss"
+case "$solar_tag" in
+    *"passed"*) ;;
+    *) fail "a solar panel is not in powah:solar_panels: $solar_tag" ;;
+esac
+case "$solar_tag_miss" in
+    *"failed"*) ;;
+    *) fail "the arena floor matched powah:solar_panels: $solar_tag_miss" ;;
+esac
+
 echo "== slice 2: the six dielectric/capacitor items are real items =="
 for item in powah:dielectric_paste powah:dielectric_rod powah:dielectric_rod_horizontal \
             powah:dielectric_casing powah:capacitor_basic powah:capacitor_basic_tiny \
             powah:steel_energized powah:crystal_blazing powah:crystal_niotic \
             powah:crystal_spirited powah:crystal_nitro powah:capacitor_basic_large \
             powah:capacitor_hardened powah:capacitor_blazing powah:capacitor_niotic \
-            powah:capacitor_spirited powah:capacitor_nitro; do
+            powah:capacitor_spirited powah:capacitor_nitro \
+            powah:photoelectric_pane; do
     ctl give "$item" 3 >/dev/null || fail "cannot give $item"
     ctl wait 2
     got=$(inv_count "$item")
@@ -1844,8 +2048,19 @@ for tier in starter basic hardened blazing niotic spirited nitro; do
     got=$(echo "$broken" | jq -r --arg id "$block" '.drops[$id] // 0')
     [ "$got" -ge 1 ] || fail "breaking $block dropped $got of itself, not the block"
 done
+# Slice 10: every solar panel tier drops itself.
+for tier in starter basic hardened blazing niotic spirited nitro; do
+    block="powah:solar_panel_$tier"
+    place 6 100 0 "$block"
+    ctl look-at-block 6 100 0 >/dev/null || true
+    broken=$(ctl break 6 100 0) || fail "cannot break $block at 6,100,0"
+    echo "$broken" | jq -c '{scenario:"loot", block, drops}'
+    [ "$(echo "$broken" | jq -r '.block')" = "minecraft:air" ] || fail "$block did not break"
+    got=$(echo "$broken" | jq -r --arg id "$block" '.drops[$id] // 0')
+    [ "$got" -ge 1 ] || fail "breaking $block dropped $got of itself, not the block"
+done
 ctl command "gamemode creative @s" >/dev/null
 ctl command "clear @s" >/dev/null
 ctl wait 3
 
-echo "PASS: a fuelled furnator made FE, the cable carried it into the cell, an unfuelled furnator made nothing, a cell without a cable stayed empty, a full cell stayed full, a charged cell drained through a cable into an empty one, a three-cable network carried a charge across its run with the two cells' sum unchanged and a cell off the network empty, the six material items exist, every material and machine recipe crafted its declared output and consumed its ingredients, each machine dropped itself, every energy cell tier clamped 2,000,000,000 FE at its own capacity and carried its own transfer, two adjacent cells swapped within their own transfer cap without creating FE, every cell tier dropped itself, a starter rod filled the orb to exactly its recipe's 10,000 FE and stood at 0, an orb with no rod and an orb with no recipe produced nothing while its rod kept its charge, a nitro rod made a blazing crystal at exactly 120,000 FE and kept the other 80,000, the blaze-rod blazing recipe, the niotic, spirited and nitro crystals all energised, every new block and item exists, every carried recipe including the five previously blocked cells crafts its declared output and consumes its ingredients, every furnator tier clamped 2,000,000,000 FE at its own generation capacity, a nitro furnator made exactly 40,000 FE in one tick of a coal and a starter furnator kept energy + carbon at 48,000 while filling slowly, every cable tier read back its own rate, a basic network refused to relay through a starter cable and delivered once that cable was basic, every new furnator, cable and discharger tier dropped itself, a starter furnator charged the item in its charge slot at exactly min(transfer, stored, room) with the FE coming out of its own buffer and left an item with no buffer alone, a cell charged two slots out of one budget, a 5,000 FE furnator and a 4,000 FE cell broken in survival carried their buffers on their own items and gave them back on placement while their spilled stacks did not, an item doctored to 2,000,000,000 FE clamped to its tier's 20,000 on placement and a fresh item placed an empty machine, a starter hopper spent exactly 500 FE a tick on the cell item in the chest it faced and the two halves of the 5,000 it held added up, a hopper facing away from the chest charged nothing and a stone in the chest took nothing, every hopper tier dropped itself, a 7,000 FE hopper carried its buffer back on its own item, and every guessed id is unknown without the package"
+echo "PASS: a fuelled furnator made FE, the cable carried it into the cell, an unfuelled furnator made nothing, a cell without a cable stayed empty, a full cell stayed full, a charged cell drained through a cable into an empty one, a three-cable network carried a charge across its run with the two cells' sum unchanged and a cell off the network empty, the six material items exist, every material and machine recipe crafted its declared output and consumed its ingredients, each machine dropped itself, every energy cell tier clamped 2,000,000,000 FE at its own capacity and carried its own transfer, two adjacent cells swapped within their own transfer cap without creating FE, every cell tier dropped itself, a starter rod filled the orb to exactly its recipe's 10,000 FE and stood at 0, an orb with no rod and an orb with no recipe produced nothing while its rod kept its charge, a nitro rod made a blazing crystal at exactly 120,000 FE and kept the other 80,000, the blaze-rod blazing recipe, the niotic, spirited and nitro crystals all energised, every new block and item exists, every carried recipe including the five previously blocked cells crafts its declared output and consumes its ingredients, every furnator tier clamped 2,000,000,000 FE at its own generation capacity, a nitro furnator made exactly 40,000 FE in one tick of a coal and a starter furnator kept energy + carbon at 48,000 while filling slowly, every cable tier read back its own rate, a basic network refused to relay through a starter cable and delivered once that cable was basic, every new furnator, cable and discharger tier dropped itself, a starter furnator charged the item in its charge slot at exactly min(transfer, stored, room) with the FE coming out of its own buffer and left an item with no buffer alone, a cell charged two slots out of one budget, a 5,000 FE furnator and a 4,000 FE cell broken in survival carried their buffers on their own items and gave them back on placement while their spilled stacks did not, an item doctored to 2,000,000,000 FE clamped to its tier's 20,000 on placement and a fresh item placed an empty machine, a starter hopper spent exactly 500 FE a tick on the cell item in the chest it faced and the two halves of the 5,000 it held added up, a hopper facing away from the chest charged nothing and a stone in the chest took nothing, every hopper tier dropped itself, a 7,000 FE hopper carried its buffer back on its own item, a starter solar panel under an open noon sky generated exactly 20 FE a tick measured against the game clock and filled its last 20 of room without overflowing, a stone above it and midnight each left it at exactly 5,000 for 60 ticks, a cell under a panel charged while a cell beside it stayed empty and the panel took no fill, a nitro panel clamped 2,000,000,000 FE at 40,000,000 and named its 2,000 FE/t, every solar panel tier dropped itself, the photoelectric pane and all seven panels crafted, and every guessed id is unknown without the package"

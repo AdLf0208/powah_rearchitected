@@ -170,6 +170,21 @@ impl Hooks for Mod {
             }
             declare_item(registrar, block);
         }
+        // Every solar panel tier: one charge slot, a buffer the sky fills, and the bottom face it
+        // gives on (upstream's `devices.solar_panels` over `AbstractEnergyProvider`, whose
+        // `isEnergyPresent` is `Direction.DOWN`).
+        for (index, (block, name)) in powah::SOLARS.into_iter().enumerate() {
+            let tier = runtime::solar_tier(index).expect("every solar id is on the ladder");
+            let solar = registrar.block_key(block);
+            registrar.block_container(&solar, powah::solar_container());
+            registrar.block_energy(&solar, powah::solar_battery(tier));
+            let kind = powah::declare(registrar, name);
+            let part = powah::SolarPart::new(Arc::clone(&self.queue), tier);
+            if let Err(error) = registrar.block_entity_part(&kind, part) {
+                context.refuse(&error.to_string());
+            }
+            declare_item(registrar, block);
+        }
         // The energizing orb: the seven slots and the insert-only buffer a rod fills.
         let orb = registrar.block_key(powah::ORB);
         registrar.block_container(&orb, powah::orb_container());

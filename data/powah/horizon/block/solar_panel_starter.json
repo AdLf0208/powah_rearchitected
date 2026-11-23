@@ -1,0 +1,58 @@
+{
+  "template": "minecraft:iron_block",
+  "properties": {
+    "hardness": 2.0,
+    "explosion_resistance": 20.0,
+    "sounds": "minecraft:iron_block",
+    "requires_tool": true,
+    "occludes": false
+  },
+  "state_properties": {
+    "north": {
+      "type": "boolean"
+    },
+    "south": {
+      "type": "boolean"
+    },
+    "west": {
+      "type": "boolean"
+    },
+    "east": {
+      "type": "boolean"
+    }
+  },
+  "default_state": {
+    "north": "true",
+    "south": "true",
+    "west": "true",
+    "east": "true"
+  },
+  "shapes": {
+    "default": [
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0625,
+        1.0
+      ]
+    ]
+  },
+  "collision_shapes": {
+    "default": [
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0625,
+        1.0
+      ]
+    ]
+  },
+  "item": true,
+  "components": {
+    "minecraft:max_stack_size": 1
+  }
+}

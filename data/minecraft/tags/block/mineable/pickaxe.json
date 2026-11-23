@@ -43,6 +43,13 @@
     "powah:energy_hopper_blazing",
     "powah:energy_hopper_niotic",
     "powah:energy_hopper_spirited",
-    "powah:energy_hopper_nitro"
+    "powah:energy_hopper_nitro",
+    "powah:solar_panel_starter",
+    "powah:solar_panel_basic",
+    "powah:solar_panel_hardened",
+    "powah:solar_panel_blazing",
+    "powah:solar_panel_niotic",
+    "powah:solar_panel_spirited",
+    "powah:solar_panel_nitro"
   ]
 }

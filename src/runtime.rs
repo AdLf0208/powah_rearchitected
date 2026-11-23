@@ -191,14 +191,177 @@ pub fn hopper_tier(index: usize) -> Option<HopperTier> {
 /// that slot's room — `0` for an empty slot or an item with no energy buffer, which is left alone.
 #[must_use]
 pub fn hopper_charges(stored: i32, charging_rate: i32, rooms: &[i32]) -> Vec<i32> {
-    let mut budget = stored.max(0);
-    let mut planned = Vec::with_capacity(rooms.len());
-    for room in rooms {
-        let asked = charge_step(budget, charging_rate, *room);
-        budget -= asked;
-        planned.push(asked);
+    charge_slots(stored, charging_rate, rooms)
+}
+
+/// The tiers a solar panel has, in `Tier.getNormalVariants` order: starter, basic, hardened,
+/// blazing, niotic, spirited, nitro (upstream's `Tier.getNormalVariants`, which `Blcks.SOLAR_PANEL`
+/// uses).
+pub const SOLAR_TIER_COUNT: usize = 7;
+
+/// One solar panel tier's numbers (`PowahConfig.Generators.solar_panels`, a `GeneratorConfig`):
+/// `passiveProduction` while the panel sees the sky, the tier's `generatorCapacity` for its buffer
+/// and `generatorTransfer` for the FE it gives a side.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SolarTier {
+    /// `passiveProduction` — the one generator row that is not `activeProduction`.
+    pub generation: i32,
+    /// `generatorCapacity`, the same row a furnator of this tier stores.
+    pub capacity: i32,
+    /// `generatorTransfer`, the same row a furnator of this tier gives a side.
+    pub transfer: i32,
+}
+
+/// The solar panel tier at `index` (0 = starter … 6 = nitro), `None` past the ladder.
+#[must_use]
+pub fn solar_tier(index: usize) -> Option<SolarTier> {
+    /// `DefaultEnergies.baseScaling`, in `Tier.getNormalVariants` order.
+    const BASE_SCALING: [i32; SOLAR_TIER_COUNT] = [1, 4, 10, 40, 100, 400, 2_000];
+    /// `DefaultEnergies.baseSlowScaling`, the row `passiveProduction` is derived from.
+    const BASE_SLOW_SCALING: [i32; SOLAR_TIER_COUNT] = [1, 3, 5, 10, 20, 40, 100];
+    /// `passiveProduction` = `baseSlowScaling * 20`.
+    const GENERATION_PER_SCALING: i32 = 20;
+    /// `generatorCapacity` = `activeProduction * 1000` = `baseScaling * 20_000`.
+    const CAPACITY_PER_SCALING: i32 = 20_000;
+    /// `generatorTransfer` = `activeProduction * 4` = `baseScaling * 80`.
+    const TRANSFER_PER_SCALING: i32 = 80;
+    let scaling = *BASE_SCALING.get(index)?;
+    let passive = *BASE_SLOW_SCALING.get(index)?;
+    Some(SolarTier {
+        generation: passive * GENERATION_PER_SCALING,
+        capacity: scaling * CAPACITY_PER_SCALING,
+        transfer: scaling * TRANSFER_PER_SCALING,
+    })
+}
+
+/// What a solar panel reads of the sky above it, as `SolarTile.postTick` does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Sky {
+    /// `Misc.canBlockSeeSky(world, pos.above())`: full sky light at the block above the panel.
+    pub can_see_sky: bool,
+    /// `world.dimensionType().hasSkyLight()`: the Nether and the End fail this.
+    pub has_skylight: bool,
+    /// `world.getSkyDarken()`: 0 at noon, 11 at midnight; upstream's daylight test is `< 4`.
+    pub darken: i32,
+}
+
+impl Sky {
+    /// Upstream's `dimensionType().hasSkyLight() && getSkyDarken() < 4`.
+    #[must_use]
+    pub fn daylight(&self) -> bool {
+        self.has_skylight && self.darken < SOLAR_DAY_MAX_DARKEN
     }
-    planned
+}
+
+/// Upstream's `getSkyDarken()` bound: below this it is day, at or above it the panel sleeps.
+pub const SOLAR_DAY_MAX_DARKEN: i32 = 4;
+
+/// One solar panel tick's production (`SolarTile.postTick`): a buffer with room, an open sky (a
+/// Lens of Ender stands in for it) and daylight in a dimension the sky lights make
+/// `min(generation, room)`; anything else makes nothing.
+#[must_use]
+pub fn solar_production(energy: i32, tier: SolarTier, sky: Sky, lens_of_ender: bool) -> i32 {
+    if !(sky.can_see_sky || lens_of_ender) || !sky.daylight() {
+        return 0;
+    }
+    (tier.capacity - energy).max(0).min(tier.generation)
+}
+
+/// The channels one owner's ender network has at most (`EnderNetwork.MAX_CHANNELS`): a channel
+/// index is 0 ..= 11, and a tier's own count (below) is what its GUI offers.
+pub const MAX_CHANNELS: i32 = 12;
+
+/// The tiers an ender cell and an ender gate have, in `Tier.getNormalVariants` order: starter,
+/// basic, hardened, blazing, niotic, spirited, nitro (`Blcks.ENDER_CELL` / `Blcks.ENDER_GATE`).
+pub const ENDER_TIER_COUNT: usize = 7;
+
+/// One ender cell or gate tier's numbers (`PowahConfig.EnergyDevices.ender_cells` /
+/// `ender_gates`, an `EnderConfig`): the FE one call moves through the channel
+/// (`EnderConfig.getTransfer`) and the channels the tier offers
+/// (`EnderConfig.channels`, a `TieredChannelValues`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EnderTier {
+    /// The most one insert or extract moves for this tier (`batteryTransfer` for a cell,
+    /// `cableTransfer` for a gate).
+    pub transfer: i32,
+    /// How many channels the tier offers: the saved index is 0 ..= `channels - 1`
+    /// (`TieredChannelValues.getDefault()` = 1, 2, 3, 5, 7, 9, 12).
+    pub channels: i32,
+}
+
+/// `TieredChannelValues.getDefault()`, in `Tier.getNormalVariants` order.
+const ENDER_CHANNELS: [i32; ENDER_TIER_COUNT] = [1, 2, 3, 5, 7, 9, 12];
+
+/// The ender cell tier at `index` (0 = starter … 6 = nitro), `None` past the ladder.
+///
+/// Its transfer is `batteryTransfer()` = `reactorProduction * 2 * 2` = `baseScaling * 1_000`:
+/// the energy cell's per-side row, which `PowahConfig` hands the cell's `EnderConfig`.
+#[must_use]
+pub fn ender_cell_tier(index: usize) -> Option<EnderTier> {
+    todo!("the ender cell ladder")
+}
+
+/// The ender gate tier at `index` (0 = starter … 6 = nitro), `None` past the ladder.
+///
+/// Its transfer is `cableTransfer()` = `reactorProduction * 2` = `baseScaling * 500`: the cable's
+/// rate, which `PowahConfig` hands the gate's `EnderConfig` — a gate is a tap, so it moves at the
+/// cable's rate, and it cannot extend the network.
+#[must_use]
+pub fn ender_gate_tier(index: usize) -> Option<EnderTier> {
+    todo!("the ender gate ladder")
+}
+
+/// The channel a tier offers at `channel`.
+///
+/// Upstream saves the index on the tile as a `RangedInt(12)` (0..11) and gates the *buttons* it
+/// shows with `getMaxChannels()`; the port has no GUI, so its `/powah channel` is that gate and a
+/// value past the tier's count never reaches the tile.
+#[must_use]
+pub fn channel_clamped(channel: i32, channels: i32) -> i32 {
+    todo!("the channel clamp")
+}
+
+/// One channel of an owner's ender network: what it holds and what it can hold
+/// (`EnderNetwork`'s shared `Energy`). Its capacity is 0 until an extender item is inserted, so a
+/// fresh channel stores nothing — upstream's own empty network.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Channel {
+    /// The FE the channel holds.
+    pub stored: i32,
+    /// The FE the channel can hold.
+    pub capacity: i32,
+}
+
+impl Channel {
+    /// `Energy.receiveEnergy`: at most the room, the tier's transfer and what was offered.
+    #[must_use]
+    pub fn insert(self, amount: i32, transfer: i32) -> (Channel, i32) {
+    todo!("a channel insert")
+}
+
+    /// `Energy.extractEnergy`: at most what the channel holds and the tier's transfer.
+    #[must_use]
+    pub fn extract(self, amount: i32, transfer: i32) -> (Channel, i32) {
+    todo!("a channel extract")
+}
+
+    /// `AbstractEnderTile.onSlotChanged`: an extender item's capacity joins the channel and the
+    /// item's own charge is spent into it, clamped to the new capacity (upstream runs
+    /// `energy.setCapacity(newCap)` then `energy.setStored(stored + extended)`, whose setters clamp).
+    #[must_use]
+    pub fn extended(self, capacity: i32, stored: i32) -> Channel {
+    todo!("a channel extension")
+}
+}
+
+/// One pass's worth of charge steps over a machine's slots
+/// (`ChargeUtil.transferSlotList` with `min(maxPerStack, maxTotal - charged)`): each slot takes
+/// `min(per_slot, what is left of the budget, the slot's own room)`, the budget shrinking by what
+/// the pass has taken so far. `rooms[slot]` is that slot's room — `0` for an empty slot or an item
+/// with no energy buffer, which is left alone.
+#[must_use]
+pub fn charge_slots(stored: i32, per_slot: i32, rooms: &[i32]) -> Vec<i32> {
+    todo!("a charge pass")
 }
 
 /// Energy clamped into a buffer.
@@ -1600,6 +1763,364 @@ mod tests {
             hopper_charges(5_000, 500, &[]),
             Vec::<i32>::new(),
             "a container with no slots is a pass that does nothing"
+        );
+    }
+
+    #[test]
+    fn every_ender_tier_is_one_of_the_ladder_with_its_own_transfer_and_channels() {
+        // `PowahConfig.EnergyDevices`: cells take `batteryTransfer()` (`baseScaling * 1_000`),
+        // gates `cableTransfer()` (`baseScaling * 500`) — so a cell's row is exactly twice a gate's
+        // at every tier — and both take `TieredChannelValues.getDefault()` for their channels.
+        let expected = [
+            (1_000, 500, 1),
+            (4_000, 2_000, 2),
+            (10_000, 5_000, 3),
+            (40_000, 20_000, 5),
+            (100_000, 50_000, 7),
+            (400_000, 200_000, 9),
+            (2_000_000, 1_000_000, 12),
+        ];
+        for (index, (cell, gate, channels)) in expected.into_iter().enumerate() {
+            let cell_tier = ender_cell_tier(index).unwrap_or_else(|| panic!("tier {index} is a cell"));
+            let gate_tier = ender_gate_tier(index).unwrap_or_else(|| panic!("tier {index} is a gate"));
+            assert_eq!(
+                (cell_tier.transfer, cell_tier.channels),
+                (cell, channels),
+                "ender cell tier {index}'s numbers"
+            );
+            assert_eq!(
+                (gate_tier.transfer, gate_tier.channels),
+                (gate, channels),
+                "ender gate tier {index}'s numbers"
+            );
+            assert_eq!(
+                cell_tier.transfer,
+                gate_tier.transfer * 2,
+                "the cell row is `batteryTransfer`, twice the gate's `cableTransfer`"
+            );
+        }
+        assert_eq!(ender_cell_tier(ENDER_TIER_COUNT), None);
+        assert_eq!(ender_gate_tier(ENDER_TIER_COUNT), None);
+        assert_eq!(MAX_CHANNELS, 12, "`EnderNetwork.MAX_CHANNELS`");
+        assert_eq!(
+            ender_cell_tier(ENDER_TIER_COUNT - 1).expect("the nitro cell").channels,
+            MAX_CHANNELS,
+            "the nitro tier is the one that offers every channel"
+        );
+    }
+
+    #[test]
+    fn a_channel_takes_and_gives_at_most_its_transfer() {
+        // A fresh channel has capacity 0 (`EnderConfig.getCapacity` is 0 and `Energy.create(0)`
+        // starts empty), so nothing can even be put into an owner's network before an extender.
+        assert_eq!(
+            Channel::default().insert(5_000, 1_000),
+            (Channel::default(), 0),
+            "an empty channel has no room, whatever is offered"
+        );
+        let open = Channel {
+            stored: 0,
+            capacity: 4_000_000,
+        };
+        assert_eq!(
+            open.insert(5_000, 1_000),
+            (
+                Channel {
+                    stored: 1_000,
+                    capacity: 4_000_000
+                },
+                1_000
+            ),
+            "one call moves the tier's transfer, not the offer"
+        );
+        let full = Channel {
+            stored: 4_000_000,
+            capacity: 4_000_000,
+        };
+        assert_eq!(full.insert(1_000, 1_000).1, 0, "a full channel takes nothing");
+        let near = Channel {
+            stored: 3_999_500,
+            capacity: 4_000_000,
+        };
+        assert_eq!(
+            near.insert(1_000, 1_000).1,
+            500,
+            "only the room left goes in"
+        );
+        let held = Channel {
+            stored: 100_000,
+            capacity: 4_000_000,
+        };
+        assert_eq!(
+            held.extract(5_000, 500),
+            (
+                Channel {
+                    stored: 99_500,
+                    capacity: 4_000_000
+                },
+                500
+            ),
+            "a gate's row moves 500 a call out of the same channel"
+        );
+        assert_eq!(
+            Channel {
+                stored: 200,
+                capacity: 4_000_000
+            }
+            .extract(5_000, 500)
+            .1,
+            200,
+            "a channel gives what it holds, never more"
+        );
+        assert_eq!(
+            Channel {
+                stored: 100,
+                capacity: 4_000_000
+            }
+            .insert(-5, 1_000)
+            .1,
+            0,
+            "nothing negative is inserted"
+        );
+    }
+
+    #[test]
+    fn an_extender_adds_its_capacity_and_its_own_charge() {
+        // `AbstractEnderTile.onSlotChanged`: `newCap = capacity + extender capacity`, then
+        // `setStored(extender stored + channel stored)` — a 4,000,000-FE basic energy cell holding
+        // 500 gives the channel both.
+        assert_eq!(
+            Channel {
+                stored: 100,
+                capacity: 1_000
+            }
+            .extended(4_000_000, 500),
+            Channel {
+                stored: 600,
+                capacity: 4_000_001
+            },
+            "the item's capacity joins the channel and its charge is spent into it"
+        );
+        assert_eq!(
+            Channel {
+                stored: 900,
+                capacity: 1_000
+            }
+            .extended(0, 5_000),
+            Channel {
+                stored: 1_000,
+                capacity: 1_000
+            },
+            "an addend beyond the capacity is clamped, as `setStored` does"
+        );
+        assert_eq!(
+            Channel {
+                stored: 0,
+                capacity: 0
+            }
+            .extended(-5, -5),
+            Channel {
+                stored: 0,
+                capacity: 0
+            },
+            "nothing negative is added"
+        );
+    }
+
+    #[test]
+    fn a_channel_index_is_clamped_to_the_tiers_own_offering() {
+        // The saved index is a `RangedInt(12)` and `getMaxChannels()` is what the GUI offers, so a
+        // starter cell has exactly one channel (index 0) and a basic one two.
+        assert_eq!(channel_clamped(0, 1), 0);
+        assert_eq!(channel_clamped(3, 1), 0, "a starter cell offers channel 0 only");
+        assert_eq!(channel_clamped(-1, 1), 0);
+        assert_eq!(channel_clamped(1, 2), 1, "a basic cell offers 0 and 1");
+        assert_eq!(channel_clamped(5, 5), 4, "a blazing cell offers 0..=4");
+        assert_eq!(channel_clamped(11, 12), 11, "the nitro cell offers every channel");
+        assert_eq!(channel_clamped(20, 12), 11);
+    }
+
+    #[test]
+    fn an_ender_pass_charges_its_two_slots_out_of_one_budget() {
+        // `AbstractEnergyStorage.chargeItems(1, 3)` is slots 1 and 2 with `maxPerSlot` the tier's
+        // transfer and one budget for the pass.
+        assert_eq!(
+            charge_slots(1_500, 1_000, &[10_000, 10_000]),
+            vec![1_000, 500],
+            "the pass spends the transfer a slot, then only what the channel has left"
+        );
+        assert_eq!(
+            charge_slots(200, 1_000, &[10_000, 10_000]),
+            vec![200, 0],
+            "an almost empty channel charges one slot and no more"
+        );
+    }
+
+    #[test]
+    fn every_solar_tier_scales_upstreams_passive_numbers() {
+        // `DefaultEnergies`: `passiveProduction = baseSlowScaling * 20` (1, 3, 5, 10, 20, 40, 100),
+        // while `generatorCapacity` and `generatorTransfer` are the active row every generator
+        // shares: `baseScaling * 20_000` and `baseScaling * 80`.
+        let expected = [
+            (20, 20_000, 80),
+            (60, 80_000, 320),
+            (100, 200_000, 800),
+            (200, 800_000, 3_200),
+            (400, 2_000_000, 8_000),
+            (800, 8_000_000, 32_000),
+            (2_000, 40_000_000, 160_000),
+        ];
+        for (index, (generation, capacity, transfer)) in expected.into_iter().enumerate() {
+            let tier = solar_tier(index).unwrap_or_else(|| panic!("tier {index} is on the ladder"));
+            assert_eq!(
+                (tier.generation, tier.capacity, tier.transfer),
+                (generation, capacity, transfer),
+                "solar tier {index}'s numbers"
+            );
+            let furnator = furnator_tier(index).expect("the furnator of the same tier");
+            assert_eq!(
+                (tier.capacity, tier.transfer),
+                (furnator.capacity, furnator.transfer),
+                "tier {index} stores and gives what a furnator of its tier does"
+            );
+        }
+        assert_eq!(
+            solar_tier(SOLAR_TIER_COUNT),
+            None,
+            "there is no eighth solar tier"
+        );
+        // The one number a solar panel does not share with the furnator: upstream derives it from
+        // `baseSlowScaling`, so a basic panel makes 60 FE/t where a basic furnator burns 80.
+        assert_eq!(
+            solar_tier(1).expect("the basic tier").generation,
+            60,
+            "`passiveProduction` is the slow scaling"
+        );
+        assert_eq!(
+            furnator_tier(1).expect("the basic furnator").generation,
+            80,
+            "while the furnator's `activeProduction` is the fast one"
+        );
+    }
+
+    #[test]
+    fn the_solar_daylight_test_is_upstreams_two_reads() {
+        // `dimensionType().hasSkyLight() && getSkyDarken() < 4`.
+        let open = |darken| Sky {
+            can_see_sky: true,
+            has_skylight: true,
+            darken,
+        };
+        assert!(open(0).daylight(), "noon");
+        assert!(open(SOLAR_DAY_MAX_DARKEN - 1).daylight(), "dusk");
+        assert!(!open(SOLAR_DAY_MAX_DARKEN).daylight(), "the boundary");
+        assert!(!open(11).daylight(), "midnight");
+        assert!(
+            !Sky {
+                has_skylight: false,
+                ..open(0)
+            }
+            .daylight(),
+            "the Nether and the End have no sky to light a panel"
+        );
+    }
+
+    #[test]
+    fn a_solar_panel_generates_only_with_sky_daylight_and_room() {
+        let starter = solar_tier(0).expect("the starter tier");
+        let day = Sky {
+            can_see_sky: true,
+            has_skylight: true,
+            darken: 0,
+        };
+        assert_eq!(
+            solar_production(0, starter, day, false),
+            starter.generation,
+            "a panel under an open noon sky makes its 20 FE a tick"
+        );
+        assert_eq!(
+            solar_production(19_980, starter, day, false),
+            20,
+            "with exactly 20 of room it makes the whole generation"
+        );
+        assert_eq!(
+            solar_production(19_990, starter, day, false),
+            10,
+            "with 10 of room it makes 10, not 20"
+        );
+        assert_eq!(
+            solar_production(starter.capacity, starter, day, false),
+            0,
+            "a full buffer pauses production"
+        );
+        assert_eq!(
+            solar_production(starter.capacity + 5, starter, day, false),
+            0,
+            "and a doctored buffer above the tier makes nothing"
+        );
+        assert_eq!(
+            solar_production(
+                0,
+                starter,
+                Sky {
+                    can_see_sky: false,
+                    ..day
+                },
+                false
+            ),
+            0,
+            "a stone above the panel blocks it"
+        );
+        assert_eq!(
+            solar_production(0, starter, Sky { darken: 11, ..day }, false),
+            0,
+            "midnight makes nothing, however open the sky"
+        );
+        assert_eq!(
+            solar_production(
+                0,
+                starter,
+                Sky {
+                    has_skylight: false,
+                    ..day
+                },
+                false
+            ),
+            0,
+            "a dimension the sky does not light makes nothing"
+        );
+        assert_eq!(
+            solar_production(
+                0,
+                starter,
+                Sky {
+                    can_see_sky: false,
+                    ..day
+                },
+                true
+            ),
+            20,
+            "a Lens of Ender stands in for the sky (the item itself is not ported)"
+        );
+        assert_eq!(
+            solar_production(
+                0,
+                starter,
+                Sky {
+                    can_see_sky: false,
+                    darken: 11,
+                    ..day
+                },
+                true
+            ),
+            0,
+            "but the lens does not make it night"
+        );
+        let nitro = solar_tier(6).expect("the nitro tier");
+        assert_eq!(
+            solar_production(0, nitro, day, false),
+            2_000,
+            "the nitro panel makes its 2,000 FE a tick"
         );
     }
 }

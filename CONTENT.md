@@ -188,6 +188,38 @@ asset or model is invented; the carry's own blockstate already draws all six fac
 `--check` verifies the tree still matches. Every recipe is craftable from carried items, so all
 seven are carried and all seven are crafted in the recipe leg.
 
+## Slice 10 — the Solar Panel ladder (2026-11-23)
+
+The generator whose only input is the sky, and the pane it is built from. No asset or model is
+invented; two files are written because the carry's guesses would be wrong.
+
+| Family | Files |
+|---|---|
+| blocks (7) | `data/powah/horizon/block/solar_panel_<tier>.json` — **written, not carried**: the carry's guess is `minecraft:oak_fence` (a full-size post), while upstream's `SolarBlock` is a 1-pixel plate (`box(0,0,0,16,1,16)`) with four horizontal booleans (`north`/`east`/`south`/`west`, `true` when no panel of the same tier is attached, so the frame is drawn). The definition is `minecraft:iron_block` with `Properties.metal(2.0, 20.0)`, **its own** four booleans (default `true`), a `shapes` and a `collision_shapes` at `[0,0,0,1,0.0625,1]`, and stack 1 |
+| blockstates (7) | `assets/powah/blockstates/solar_panel_<tier>.json`, carried byte-for-byte (four frames and the panel) |
+| block models (11) | `solar_panel` (the base), `solar_panel_frame`, `solar_panel_frame_` (the six higher tiers' shared frame) and `solar_panel_starter_frame`, plus the seven tiers' own models |
+| item models (9) + item definitions (7) | `assets/powah/models/item/solar_panel…`, `assets/powah/items/solar_panel_<tier>.json` |
+| textures (9) | `solar_panel_top.png`, `solar_panel_starter_top.png` and the seven `<tier>_frame.png` |
+| loot tables (7) | `data/powah/loot_table/blocks/solar_panel_<tier>.json` (the jar's 26.3 shape) |
+| the pane (1 item + 1 recipe + 1 advancement + 1 texture + 2 models) | `powah:photoelectric_pane` — the starter panel's top row; its recipe is the jar's `dld/lpl/dld` (paste, lapis, a glass pane) and its unlock advancement comes with it |
+| recipes (8) + advancements (8) | the seven `solar_panel_<tier>` recipes from the jar (the starter `ppp/cdc/eee`, each tier `ppp/cdc/<material>` over the previous tier's panel) and the pane's; read from the jar in the pin's string form |
+| tags | the jar's `powah:solar_panels` block and item tags; the seven join `minecraft:mineable/pickaxe` and `minecraft:needs_iron_tool` |
+| creative tab | the seven panels and the pane join `data/powah/horizon/creative_tab/machines.json`, after the hopper row (69 items) |
+| lang | unchanged: the carry's `en_us.json` already has `block.powah.solar_panel_<tier>` and `item.powah.photoelectric_pane` |
+
+Two patches, both the ones earlier slices apply:
+
+1. **The horizon block definition is written** (see above) rather than the carry's fence guess.
+2. **The jar's one NeoForge `c:` tag becomes its vanilla member**: the pane's `#c:glass_panes` is
+   `minecraft:glass_pane` in the recipe **and** in its unlock advancement (26.3 has no `c:` tags).
+
+`tools/carry_slice10.py` reproduces the slice's **82** files from the raw carry and the jar and
+`--check` verifies the tree still matches. Every recipe is craftable from carried items (the
+capacitor tiers come from slice 5's materials, the pane from slice 2's paste and vanilla lapis), so
+all eight are carried and all eight are crafted in the recipe leg. The Lens of Ender is **not**
+carried: the jar has no recipe for it (it is a right-click interaction on an enderman with a pane,
+config-gated) and the panel's lens slot is a GUI upgrade — a named gap in `notes.md`.
+
 ## Where this content lives now (0.2.0)
 
 Since the SDK migration the carried tree **is the package root**: `assets/powah/` and

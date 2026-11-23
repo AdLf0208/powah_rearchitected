@@ -20,13 +20,13 @@ slice 1 carried but could not craft, slice 4's basic energy cell, slice 5's
 twenty-one (the energizing orb, the seven rods, the large capacitor and its five
 tiers, the five cell recipes that needed the orb's materials, and the blazing
 crystal block both ways), slice 6's eighteen (the six furnator tiers and both
-of the jar's cable recipes for the six cable tiers), slice 8's seven dischargers
-and slice 9's seven hoppers. A wrong id or count exits 1
-with the observed slot and three off-pattern grids (a stick where the casing goes
-on the furnator's and the orb's shapes, and where the capacitor goes on the
-cable's) must leave the result empty. `SELFTEST=1` expects the first output one
-item too high, so the run MUST fail — that is what proves the assertions can
-fail.
+of the jar's cable recipes for the six cable tiers), slice 8's seven dischargers,
+slice 9's seven hoppers and slice 10's photoelectric pane and seven solar panels.
+A wrong id or count exits 1 with the observed slot, and four off-pattern grids (a
+stick where the casing goes on the furnator's, the orb's and the solar panel's
+shapes, and where the capacitor goes on the cable's) must leave the result empty.
+`SELFTEST=1` expects the first output one item too high, so the run MUST fail —
+that is what proves the assertions can fail.
 """
 import json
 import os
@@ -147,6 +147,21 @@ def hopper(capacitor_id, below):
             capacitor_id: [103, 105],
             "powah:dielectric_casing": [104],
             below: [107]}
+
+
+def panel(capacitor_id, top, bottom):
+    """`ppp/cdc/xxx`: three of the previous tier's panels (the starter's are
+    photoelectric panes) over the tier's capacitor and casing, with the tier's
+    material below (the jar's `solar_panel_<tier>` shape)."""
+    return {top: [100, 101, 102],
+            capacitor_id: [103, 105],
+            "powah:dielectric_casing": [104],
+            bottom: [106, 107, 108]}
+
+
+# The starter panel's recipe, reused by the off-pattern control below.
+PANEL_STARTER = panel("powah:capacitor_basic_tiny", "powah:photoelectric_pane",
+                      "powah:dielectric_paste")
 
 
 def shaped(label, pattern, out, out_count):
@@ -366,6 +381,32 @@ CASES = [
     shaped("5 paste + 2 nitro capacitors + casing + spirited hopper -> a nitro hopper",
            hopper("powah:capacitor_nitro", "powah:energy_hopper_spirited"),
            "powah:energy_hopper_nitro", 1),
+    # --- slice 10: the solar panel ladder, and the pane the starter needs ----
+    shaped("4 paste + 4 lapis + a glass pane -> a photoelectric pane",
+           {"powah:dielectric_paste": [100, 102, 106, 108],
+            "minecraft:lapis_lazuli": [101, 103, 105, 107],
+            "minecraft:glass_pane": [104]},
+           "powah:photoelectric_pane", 1),
+    shaped("3 panes + 2 tiny capacitors + casing + 3 paste -> a starter solar panel",
+           PANEL_STARTER, "powah:solar_panel_starter", 1),
+    shaped("3 starter panels + 2 basic capacitors + casing + 3 iron -> a basic solar panel",
+           panel("powah:capacitor_basic", "powah:solar_panel_starter", "minecraft:iron_ingot"),
+           "powah:solar_panel_basic", 1),
+    shaped("3 basic panels + 2 hardened capacitors + casing + 3 steel -> a hardened solar panel",
+           panel("powah:capacitor_hardened", "powah:solar_panel_basic", "powah:steel_energized"),
+           "powah:solar_panel_hardened", 1),
+    shaped("3 hardened panels + 2 blazing capacitors + casing + 3 blazing crystals -> a blazing solar panel",
+           panel("powah:capacitor_blazing", "powah:solar_panel_hardened", "powah:crystal_blazing"),
+           "powah:solar_panel_blazing", 1),
+    shaped("3 blazing panels + 2 niotic capacitors + casing + 3 niotic crystals -> a niotic solar panel",
+           panel("powah:capacitor_niotic", "powah:solar_panel_blazing", "powah:crystal_niotic"),
+           "powah:solar_panel_niotic", 1),
+    shaped("3 niotic panels + 2 spirited capacitors + casing + 3 spirited crystals -> a spirited solar panel",
+           panel("powah:capacitor_spirited", "powah:solar_panel_niotic", "powah:crystal_spirited"),
+           "powah:solar_panel_spirited", 1),
+    shaped("3 spirited panels + 2 nitro capacitors + casing + 3 nitro crystals -> a nitro solar panel",
+           panel("powah:capacitor_nitro", "powah:solar_panel_spirited", "powah:crystal_nitro"),
+           "powah:solar_panel_nitro", 1),
 ]
 
 
@@ -535,6 +576,7 @@ def main():
         ("energizing orb", ENERGIZING_ORB, (104, "powah:dielectric_casing")),
         ("nitro cable", cable("powah:capacitor_nitro", "powah:crystal_nitro"),
          (104, "powah:capacitor_nitro")),
+        ("solar panel", PANEL_STARTER, (104, "powah:dielectric_casing")),
     ):
         given = {}
         for item, targets in pattern.items():
@@ -561,9 +603,11 @@ def main():
         raise SystemExit(1)
     print("recipe PASS: every carried recipe — the eight material recipes, the three machines, "
           "the basic cell, slice 5's orb, seven rods, six capacitors, five cells and the blazing "
-          "crystal block both ways, and slice 6's six furnator tiers and twelve cable recipes — "
-          "crafts its declared output id and count, every ingredient is consumed, the lava bucket "
-          "leaves its bucket, and all three off-pattern grids leave the result empty")
+          "crystal block both ways, slice 6's six furnator tiers and twelve cable recipes, "
+          "slice 8's seven dischargers, slice 9's seven hoppers and slice 10's photoelectric pane "
+          "and seven solar panels — crafts its declared output id and count, every ingredient is "
+          "consumed, the lava bucket leaves its bucket, and all four off-pattern grids leave the "
+          "result empty")
 
 
 if __name__ == "__main__":

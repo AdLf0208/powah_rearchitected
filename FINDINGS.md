@@ -219,6 +219,44 @@ the furnator GUI; particles/sound; the cable **network** (the port moves energy
 one cable hop, so a chain of cables does not relay); cable connection states
 beyond the content tag; comparator output; worldgen (uraninite, dry ice).
 
+**Closed since (each in its own section of `notes.md`):** the other six tiers of the furnator, cell
+and cable, and the discharger and hopper ladders (slices 4, 6, 8, 9); the Energizing Orb and its
+rods (slice 5); item charging and the `keepEnergy` payload (slice 7); the cable network (slice 3);
+the **Solar** panel ladder (slice 10). **Still open:** the creative cell, the Magmator and Thermo
+Generator (a mod block entity fluid tank the pin cannot fill), the reactors
+(`blocked(uraninite-worldgen)`), the ender cells/gates, the player transmitter, side config,
+redstone modes, the GUIs, particles, worldgen.
+
+## Slice 10 — the Solar Panel, read 2026-11-23
+
+Same clone, tag `v6.2.10` (commit `a5a8f25`). Files read:
+
+| Area | Files |
+|---|---|
+| panel | `block/solar/SolarTile.java`, `SolarBlock.java` |
+| numbers | `config/v2/PowahConfig.java` (`generators.solar_panels`), `config/v2/DefaultEnergies.java` (`passiveProduction`) |
+| sky reads | `util/Misc.java` (`canBlockSeeSky`) |
+| core | `lib/block/AbstractEnergyProvider.java` (`extractFromSides`, `isEnergyPresent`), `lib/block/AbstractEnergyBlock.java`, `lib/logistics/energy/Energy.java` (`produce`, `isFull`) |
+| blocks | `block/Blcks.java` (`SOLAR_PANEL`, `Properties.metal`, `Tier.getNormalVariants`) |
+| recipes | the jar's `data/powah/recipe/crafting/solar_panel_*.json` and `photoelectric_pane.json` |
+
+**Behaviour extracted.**
+
+- `postTick` first charges its one slot and pushes to its energy sides, then — while the buffer is
+  not full — makes `min(generation, room)` when `(canSeeSky || hasLensOfEnder)` and the dimension
+  has sky light and `getSkyDarken() < 4`. A closed sky or night makes nothing; a full buffer pauses
+  it without side effects.
+- `canSeeSky` is `Misc.canBlockSeeSky(world, pos.above())` — the **block above** the panel, because
+  `SolarBlock.propagatesSkylightDown` is false, so the panel's own position never has full sky
+  light. It is refreshed every 40 ticks (`ticks % 40 == 0`) while no Lens of Ender is fitted.
+- `isEnergyPresent(side)` is `Direction.DOWN` only: the panel gives FE on its bottom face, and no
+  other; its buffer is an `AbstractEnergyProvider` (never takes a fill).
+- `keepEnergy()` is true; one slot (`inv.add(1)`, slot limit 1, chargeables only).
+- The block is `Properties.metal(2.0, 20.0)`, a `SimpleWaterloggedBlock` with a 1-pixel shape and
+  four horizontal booleans whose `true` means "no panel of the same tier attached" (the frame).
+- The Lens of Ender is the sky bypass; it is not crafted (a config-gated right-click on an
+  enderman with a photoelectric pane) and lives in the panel's GUI upgrade slot.
+
 ## Slice 7 — the item-energy family (`keepEnergy`, `chargeItems`), read 2026-11-22
 
 Same clone, tag `v6.2.10` (commit `a5a8f25`). Files read:

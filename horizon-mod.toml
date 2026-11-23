@@ -1,11 +1,11 @@
-# Slices 1-9 of the Powah port, as one flat SDK package: the carried blocks, items, models,
+# Slices 1-10 of the Powah port, as one flat SDK package: the carried blocks, items, models,
 # textures, recipes, loot, tags and lang are the `assets/` and `data/` beside `src/`, and the
 # behaviour is the one `impl Hooks` there. Licence: LGPL-3.0-only (Technici4n/Powah); the full
 # text and its provenance are in LICENSE and LICENSE-NOTICE.md inside this package. Local-only
 # until the maintainer approves publishing (ARCHITECTURE.md §8).
 id = "powah"
 name = "Powah"
-version = "0.2.9"
+version = "0.2.10"
 description = """A port of Powah! (Rearchitected) for Horizon, slice 1: the starter tier of the energy
 chain. The Furnator burns a furnace fuel into carbon and makes 20 FE/t into a 20,000 FE buffer
 (one coal is 48,000 FE); the Energy Cell is a 1,000,000 FE capacitor that takes and gives 1,000
@@ -38,8 +38,13 @@ item's own energy capability, so a cell item placed there gives up its charge.
 Slice 9 adds the energy hopper: seven tiers of a 1M…2G FE storage block with no slots of its own that
 charges the container on the face its `facing` names, at 500…1,000,000 FE a tick a slot out of its own
 buffer, giving and taking its tier's transfer on every face.
-Not yet ported: the creative cell, the generators, reactors, side config, redstone modes and the
-GUIs."""
+Slice 10 adds the solar panel: seven tiers (20…2,000 FE/t into the furnator's 20k…40M buffer), each
+generating only while it sees the sky above it (the level's `can_see_sky` and `get_sky_darken`, so a
+stone overhead or midnight stops it), charging one item in its slot, keeping its buffer on its item
+and giving FE on its bottom face only; the photoelectric pane that the starter panel is built from
+comes with it.
+Not yet ported: the creative cell, the magmator and thermo generators, the reactors, the Lens of
+Ender, side config, redstone modes and the GUIs."""
 authors = ["owmii", "Technici4n", "AdLf0208"]
 # A native mod: Rust in src/, compiled by the launcher against the game build [native] pins,
 # beside the carried assets/ and data/. The id is the resource namespace and the only identity.
@@ -48,7 +53,8 @@ api = "0.2"
 # or single-player world runs it inside the client installation.
 side = "both"
 # The one shared value every manifest carries ("May add blocks, items, mob effects and entity
-# types"); this package's content declares nine blocks, their items and nine block entity types.
+# types"); this package's content declares its blocks, their items and one block entity type per
+# machine kind.
 capabilities = ["registries"]
 
 [native]

@@ -27,9 +27,9 @@ use mod_api::{
 use crate::runtime::{
     CABLE_TIER_COUNT, CELL_TIER_COUNT, CableTier, CellTier, DISCHARGER_TIER_COUNT, DischargerTier,
     EnergizingRecipe, FURNATOR_TIER_COUNT, Furnator, FurnatorTier, HOPPER_TIER_COUNT, HopperTier,
-    Neighbour, ORB_MAX_ENERGY, ORB_OUTPUT_SLOT, ORB_SLOTS, ROD_TIER_COUNT, RodTier, cable_tier,
-    cell_tier, clamp_energy, comparator_strength, discharger_tier, furnator_tier, network_moves,
-    push_amount, rod_tier,
+    Neighbour, ORB_MAX_ENERGY, ORB_OUTPUT_SLOT, ORB_SLOTS, ROD_TIER_COUNT, RodTier,
+    SOLAR_TIER_COUNT, Sky, SolarTier, cable_tier, cell_tier, clamp_energy, comparator_strength,
+    discharger_tier, furnator_tier, network_moves, push_amount, rod_tier,
 };
 
 /// The energizing orb block and its item.
@@ -134,6 +134,18 @@ pub(crate) const HOPPERS: [(&str, &str); HOPPER_TIER_COUNT] = [
     ("powah:energy_hopper_nitro", "energy_hopper_nitro"),
 ];
 
+/// Every solar panel tier's block id and block entity type name, in the ladder's order (the index
+/// [`solar_of`] takes).
+pub(crate) const SOLARS: [(&str, &str); SOLAR_TIER_COUNT] = [
+    ("powah:solar_panel_starter", "solar_panel_starter"),
+    ("powah:solar_panel_basic", "solar_panel_basic"),
+    ("powah:solar_panel_hardened", "solar_panel_hardened"),
+    ("powah:solar_panel_blazing", "solar_panel_blazing"),
+    ("powah:solar_panel_niotic", "solar_panel_niotic"),
+    ("powah:solar_panel_spirited", "solar_panel_spirited"),
+    ("powah:solar_panel_nitro", "solar_panel_nitro"),
+];
+
 /// The furnator's fuel slot: upstream's slot 1 of 2, and the charge slot is 0.
 const FUEL_SLOT: usize = 1;
 /// The charge slot: upstream's slot 0 of the furnator, and the first of a cell's two.
@@ -145,6 +157,8 @@ const CELL_SLOTS: usize = 2;
 /// A discharger's seven slots (`EnergyDischargerTile`'s `inv.add(7)`, slot limit 1,
 /// dischargeable items only).
 const DISCHARGER_SLOTS: usize = 7;
+/// A solar panel's one slot (`SolarTile`'s `inv.add(1)`, slot limit 1, chargeables only).
+const SOLAR_SLOTS: usize = 1;
 
 /// What one of this mod's machine items holds, as upstream's `EnergyBlockItem`
 /// `Info` gives it: the machine tier's capacity, and the per-call insert and
@@ -173,6 +187,12 @@ pub(crate) fn item_buffer(block: &str) -> Option<ItemBuffer> {
         // `EnergyDischargerBlock.getTransferType` is `Transfer.EXTRACT` too: a
         // discharger item only gives.
         Kind::Discharger(tier) => Some(ItemBuffer {
+            capacity: tier.capacity,
+            max_insert: 0,
+            max_extract: tier.transfer,
+        }),
+        // A solar panel is an `AbstractEnergyProvider` too: its own item gives and never takes.
+        Kind::Solar(tier) => Some(ItemBuffer {
             capacity: tier.capacity,
             max_insert: 0,
             max_extract: tier.transfer,
@@ -210,6 +230,8 @@ pub(crate) fn kind_item_slots(kind: Kind) -> usize {
         // `EnergyHopperTile` has no slots of its own (`getSlotLimit` 0, `canInsert` and
         // `canExtract` false): it charges the container it faces, never one it holds.
         Kind::Hopper(_) => 0,
+        // `SolarTile`'s one charge slot (`inv.add(1)`, `chargeItems(1)`).
+        Kind::Solar(_) => SOLAR_SLOTS,
         Kind::Orb | Kind::Cable(_) | Kind::Rod(_) => 0,
     }
 }
@@ -228,6 +250,7 @@ pub(crate) fn keep_capacity(block: &str) -> Option<i32> {
         Kind::Furnator(tier) => Some(tier.capacity),
         Kind::Cell(tier) | Kind::Discharger(tier) => Some(tier.capacity),
         Kind::Hopper(tier) => Some(tier.capacity),
+        Kind::Solar(tier) => Some(tier.capacity),
         Kind::Rod(tier) => Some(tier.capacity),
         Kind::Orb | Kind::Cable(_) => None,
     }
@@ -254,6 +277,20 @@ pub(crate) fn discharger_container() -> ModContainer {
     let slots: Vec<usize> = (0..DISCHARGER_SLOTS).collect();
     ModContainer {
         slots: DISCHARGER_SLOTS,
+        faces: std::array::from_fn(|_| slots.clone()),
+        inputs: slots.clone(),
+        outputs: slots,
+        menu: None,
+    }
+}
+
+/// A solar panel's container: upstream's one charge slot (`SolarTile`'s `inv.add(1)`, slot limit
+/// 1, chargeables only), every face reaching it, no menu. The slot rule is the tick's, as a
+/// declaration cannot express a per-slot `canInsert` at this pin.
+pub(crate) fn solar_container() -> ModContainer {
+    let slots: Vec<usize> = (0..SOLAR_SLOTS).collect();
+    ModContainer {
+        slots: SOLAR_SLOTS,
         faces: std::array::from_fn(|_| slots.clone()),
         inputs: slots.clone(),
         outputs: slots,
@@ -385,6 +422,8 @@ pub(crate) enum Kind {
     Discharger(DischargerTier),
     /// An energy hopper, carrying its tier's capacity, transfer and charging rate.
     Hopper(HopperTier),
+    /// A solar panel, carrying its tier's generation, capacity and transfer.
+    Solar(SolarTier),
     /// The energizing orb: a recipe-gated buffer over seven slots.
     Orb,
     /// An energizing rod, carrying its tier's capacity and transfer.
@@ -402,7 +441,8 @@ impl Kind {
                 .or_else(|| cable_of(block).map(Kind::Cable))
                 .or_else(|| rod_of(block).map(Kind::Rod))
                 .or_else(|| discharger_of(block).map(Kind::Discharger))
-                .or_else(|| hopper_of(block).map(Kind::Hopper)),
+                .or_else(|| hopper_of(block).map(Kind::Hopper))
+                .or_else(|| solar_of(block).map(Kind::Solar)),
         }
     }
 }
@@ -440,6 +480,13 @@ pub(crate) fn discharger_of(block: &str) -> Option<DischargerTier> {
 pub(crate) fn hopper_of(block: &str) -> Option<HopperTier> {
     let index = HOPPERS.iter().position(|(id, _)| *id == block)?;
     crate::runtime::hopper_tier(index)
+}
+
+/// The solar panel a block id names, with its tier's numbers; `None` for any other block. The ids
+/// are the content's own (`data/powah/horizon/block/solar_panel_*`).
+pub(crate) fn solar_of(block: &str) -> Option<SolarTier> {
+    let index = SOLARS.iter().position(|(id, _)| *id == block)?;
+    crate::runtime::solar_tier(index)
 }
 
 /// What `/powah set` did, so the command can answer honestly.
@@ -521,9 +568,25 @@ pub(crate) fn battery_of(block: &str) -> Option<ModEnergyBuffer> {
         Some(Kind::Cell(tier)) => Some(cell_battery(tier)),
         Some(Kind::Discharger(tier)) => Some(discharger_battery(tier)),
         Some(Kind::Hopper(tier)) => Some(hopper_battery(tier)),
+        Some(Kind::Solar(tier)) => Some(solar_battery(tier)),
         Some(Kind::Orb) => Some(orb_battery()),
         Some(Kind::Rod(tier)) => Some(rod_battery(tier)),
         _ => None,
+    }
+}
+
+/// A solar panel's buffer (`AbstractEnergyProvider` over `GeneratorConfig`): the tier's capacity,
+/// taking nothing through any face and giving its transfer on the one face upstream's
+/// `SolarTile.isEnergyPresent` names — `Direction.DOWN`.
+pub(crate) fn solar_battery(tier: SolarTier) -> ModEnergyBuffer {
+    let mut extract_faces = [false; 6];
+    extract_faces[Direction::Down as usize] = true;
+    ModEnergyBuffer {
+        capacity: tier.capacity,
+        max_insert: 0,
+        max_extract: tier.transfer,
+        insert_faces: [false; 6],
+        extract_faces,
     }
 }
 
@@ -868,6 +931,9 @@ pub(crate) fn status_line(
         // The hopper's readout names the face it charges through, which only [`info_line`] can
         // read from the block state; this arm is the type's exhaustiveness.
         Kind::Hopper(tier) => hopper_line(pos, energy, tier, None, time),
+        // A solar panel's readout names the sky it reads, which only [`info_line`] can ask the
+        // level; this arm is the type's exhaustiveness.
+        Kind::Solar(tier) => solar_line(pos, energy, tier, None, charge, time),
         // The orb and a rod have readouts of their own ([`orb_line`], [`rod_line`]);
         // [`info_line`] gives them those, so these arms are only the type's
         // exhaustiveness.
@@ -895,6 +961,36 @@ pub(crate) fn hopper_line(
         comparator_strength(energy, tier.capacity),
         tier.charging_rate,
         tier.transfer,
+    )
+}
+
+/// A solar panel's readout: its buffer, the sky it reads, its tier's generation and the transfer it
+/// gives a side. `sky` is the level's answer — [`None`] only in [`status_line`]'s exhaustiveness
+/// arm, which has no level to ask.
+pub(crate) fn solar_line(
+    pos: [i32; 3],
+    energy: i32,
+    tier: SolarTier,
+    sky: Option<Sky>,
+    charge: &[ChargeReadout<'_>],
+    time: i64,
+) -> String {
+    let [x, y, z] = pos;
+    let (sky, day) = match sky {
+        Some(sky) => (
+            if sky.can_see_sky { "open" } else { "covered" },
+            if sky.daylight() { "true" } else { "false" },
+        ),
+        None => ("unknown", "unknown"),
+    };
+    format!(
+        "Solar Panel at {x},{y},{z}: {energy}/{} FE (comparator {}, sky {sky}, day {day}, \
+         generating {} FE/t, {} FE/t a side, charge {}, t={time})",
+        tier.capacity,
+        comparator_strength(energy, tier.capacity),
+        tier.generation,
+        tier.transfer,
+        charge_text(charge),
     )
 }
 
@@ -1070,6 +1166,20 @@ pub(crate) fn block_at(host: &dyn Host, level: LevelRef, pos: [i32; 3]) -> Optio
     Some(level.block(host, pos)?.id(host))
 }
 
+/// What a solar panel at `pos` reads of the sky, upstream's three reads: `canSeeSky` at the block
+/// above it (`Misc.canBlockSeeSky(world, pos.above())`), the dimension's sky light and the level's
+/// darkening.
+pub(crate) fn sky_at(host: &dyn Host, level: LevelRef, pos: [i32; 3]) -> Sky {
+    let above = [pos[0], pos[1] + 1, pos[2]];
+    Sky {
+        can_see_sky: level.can_see_sky(host, above).unwrap_or(false),
+        has_skylight: level
+            .dimension_type(host)
+            .is_some_and(|kind| kind.has_skylight),
+        darken: level.get_sky_darken(host).unwrap_or(0),
+    }
+}
+
 /// The two usages `/powah` declares, all operator-only (level 2). They are
 /// administrative: `set` writes a machine's stored FE, `item` writes the charge
 /// of the item in its charge slot, and `info` reads its slots, at coordinates the
@@ -1161,6 +1271,26 @@ pub(crate) fn info_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> Option<Stri
                 time,
             ));
         }
+        Kind::Solar(tier) => {
+            let entity = host.block_entity(level, pos)?;
+            let saved = Tag::Compound(entity.data(&*host)?);
+            let charge = charge_readout(host, entity, slots);
+            let charge: Vec<ChargeReadout<'_>> = charge
+                .iter()
+                .map(|slot| {
+                    slot.as_ref()
+                        .map(|(item, held, capacity)| (item.as_str(), *held, *capacity))
+                })
+                .collect();
+            return Some(solar_line(
+                pos,
+                clamp_energy(int(&saved, KEY_ENERGY), tier.capacity),
+                tier,
+                Some(sky_at(&*host, level, pos)),
+                &charge,
+                time,
+            ));
+        }
         Kind::Orb => {
             let orb = read_orb(host, level, pos)?;
             return Some(orb_line(
@@ -1211,6 +1341,7 @@ pub(crate) fn set_energy(host: &mut dyn ServerHost, pos: [i32; 3], amount: i32) 
         Some(Kind::Cell(tier)) => tier.capacity,
         Some(Kind::Discharger(tier)) => tier.capacity,
         Some(Kind::Hopper(tier)) => tier.capacity,
+        Some(Kind::Solar(tier)) => tier.capacity,
         Some(Kind::Rod(tier)) => tier.capacity,
         // The orb's buffer is the recipe's own energy: with no recipe it stores
         // nothing, exactly as upstream's `onSlotChanged` leaves it.
@@ -1413,6 +1544,88 @@ impl BlockEntityPart for HopperPart {
     }
 }
 
+/// A solar panel tier: a block entity with one charge slot, a buffer the sky fills, and the
+/// level-tick queue for the one face it gives on.
+pub(crate) struct SolarPart {
+    queue: Arc<Mutex<Queue>>,
+    tier: SolarTier,
+}
+
+impl SolarPart {
+    pub(crate) fn new(queue: Arc<Mutex<Queue>>, tier: SolarTier) -> SolarPart {
+        SolarPart { queue, tier }
+    }
+}
+
+#[mod_api::horizon_part]
+impl BlockPart for SolarPart {}
+
+#[mod_api::horizon_part]
+impl BlockEntityPart for SolarPart {
+    fn block_entity_ticks(&self, _host: &dyn Host, event: &mut BlockEntityTicksEvent<'_>) {
+        event.ticks = true;
+    }
+
+    /// One server tick: queue this position for the level's move phase, then charge the slot and
+    /// produce from the sky (`SolarTile.postTick`).
+    fn block_entity_tick(&self, host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
+        if let Some(level) = level_now(host) {
+            self.queue
+                .lock()
+                .expect("the powah queue lock is held for one insert")
+                .push(level, event.pos);
+        }
+        if !solar_tick(host, event, self.tier) {
+            *event.reply = BlockEntityTickReply::Unchanged;
+        }
+    }
+}
+
+/// The solar panel's tick (`SolarTile.postTick`): clamp the buffer into the tier, charge the item in
+/// its slot out of the buffer, then produce `min(generation, room)` while the panel sees the sky and
+/// it is daylight. Answers whether anything changed.
+fn solar_tick(
+    host: &mut dyn ServerHost,
+    event: &mut BlockEntityTickEvent<'_>,
+    tier: SolarTier,
+) -> bool {
+    let resized = event.entity.items.len() != SOLAR_SLOTS;
+    if resized {
+        event.entity.items.resize(SOLAR_SLOTS, None);
+    }
+    let mut saved = Tag::Compound(std::mem::take(&mut event.entity.nbt));
+    let before = clamp_energy(int(&saved, KEY_ENERGY), tier.capacity);
+    let mut energy = before;
+    let charged = charge_items(
+        &*host,
+        SOLAR_SLOTS,
+        energy,
+        tier.transfer,
+        &mut event.entity.items,
+    );
+    energy -= charged;
+    let produced = match level_now(host) {
+        Some(level) => crate::runtime::solar_production(
+            energy,
+            tier,
+            sky_at(&*host, level, event.pos),
+            // Upstream's Lens of Ender stands in for the sky; the item and the panel's upgrade
+            // slot are not ported (see `notes.md`), so no panel this port places has one.
+            false,
+        ),
+        None => 0,
+    };
+    energy += produced;
+    let changed = energy != before;
+    if changed {
+        write_int(&mut saved, KEY_ENERGY, energy);
+    }
+    if let Tag::Compound(nbt) = saved {
+        event.entity.nbt = nbt;
+    }
+    resized || charged > 0 || produced > 0
+}
+
 /// The orb: a block entity with the seven slots and the recipe-gated buffer, which
 /// ticks to fill itself and to turn a full buffer into its result.
 pub(crate) struct OrbPart;
@@ -1586,6 +1799,20 @@ pub(crate) fn on_block_drops(level: &dyn LevelHost, event: &mut BlockDropsEvent<
     Flow::Continue
 }
 
+/// The four `SolarBlock` frame booleans for a panel placed at `pos`: a side is `true` (framed) when
+/// no panel of the same tier stands beside it, which is upstream's inverted `canAttach`.
+fn set_panel_frames(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3], block: &str) {
+    for (side, name) in [
+        (Direction::North, "north"),
+        (Direction::South, "south"),
+        (Direction::West, "west"),
+        (Direction::East, "east"),
+    ] {
+        let attached = block_at(&*host, level, offset(pos, side)).as_deref() == Some(block);
+        host.set_block_property(pos, name, if attached { "false" } else { "true" });
+    }
+}
+
 /// The item half of every machine: a placed machine takes the buffer its item
 /// carried, clamped into the tier's capacity.
 ///
@@ -1610,6 +1837,14 @@ impl ItemPart for MachineItem {
             && let Some(facing) = face_direction(event.face)
         {
             host.set_block_property(event.pos, "facing", facing_name(facing));
+        }
+        // `SolarBlock.getStateForPlacement` → `createState`: each horizontal side is framed when no
+        // panel of the same tier stands there (upstream's states are `!canAttach`, so `true` draws
+        // the frame). The blockstate's multipart reads exactly these four.
+        if let Some(block) = block_at(&*host, level, event.pos)
+            && solar_of(&block).is_some()
+        {
+            set_panel_frames(host, level, event.pos, &block);
         }
         let Some(asked) = asked_energy(payload_of(event.stack).as_ref()) else {
             return;
@@ -1877,6 +2112,11 @@ pub(crate) fn on_level_tick_post(
             Kind::Hopper(tier) => {
                 charge_container(host, level, pos, tier);
             }
+            // A solar panel gives only on the face upstream's `isEnergyPresent` names, its own
+            // bottom (`Direction.DOWN`).
+            Kind::Solar(tier) => {
+                push_out_on(host, level, pos, tier.transfer, &[Direction::Down]);
+            }
             Kind::Orb => {}
             Kind::Cable(tier) => {
                 if planned.contains(&pos) {
@@ -1892,7 +2132,24 @@ pub(crate) fn on_level_tick_post(
 /// every side whose neighbour can take it. One transaction per side, so a refused
 /// insert creates no energy.
 fn push_out(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3], transfer: i32) {
-    let Some(own) = level.capability(&mut *host, &ENERGY, pos, Some(Direction::Up)) else {
+    push_out_on(host, level, pos, transfer, &Direction::ALL);
+}
+
+/// [`push_out`] on the faces a machine gives on: a solar panel's `isEnergyPresent` is its own
+/// bottom (`Direction.DOWN`) and nothing else, so the other five are never tried.
+fn push_out_on(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+    transfer: i32,
+    faces: &[Direction],
+) {
+    // The buffer is read through a face the machine gives on: a solar panel extracts only on its
+    // bottom, so reading through `Up` would answer no handler at all.
+    let Some(&own_face) = faces.first() else {
+        return;
+    };
+    let Some(own) = level.capability(&mut *host, &ENERGY, pos, Some(own_face)) else {
         return;
     };
     let stored = i32::try_from(own.amount(host)).unwrap_or(i32::MAX);
@@ -1900,7 +2157,7 @@ fn push_out(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3], transfer:
     if amount == 0 {
         return;
     }
-    for side in Direction::ALL {
+    for &side in faces {
         let neighbour = offset(pos, side);
         // Upstream's `extractFromSides` skips a side whose neighbour refuses a fill; this
         // mod's own blocks say so in their declaration (`furnator_battery` has no insert
@@ -3161,6 +3418,158 @@ mod tests {
             facing_of("upward"),
             None,
             "a value the block has not is no facing"
+        );
+    }
+
+    #[test]
+    fn every_solar_tier_is_one_of_the_ladder_with_a_down_only_buffer() {
+        // `PowahConfig.Generators.solar_panels` is a `GeneratorConfig`: passiveGeneration for its
+        // 20 FE/t, the furnator's capacity and transfer for the rest. `SolarTile.isEnergyPresent`
+        // is `Direction.DOWN`.
+        let expected = [
+            ("powah:solar_panel_starter", 20, 20_000, 80),
+            ("powah:solar_panel_basic", 60, 80_000, 320),
+            ("powah:solar_panel_hardened", 100, 200_000, 800),
+            ("powah:solar_panel_blazing", 200, 800_000, 3_200),
+            ("powah:solar_panel_niotic", 400, 2_000_000, 8_000),
+            ("powah:solar_panel_spirited", 800, 8_000_000, 32_000),
+            ("powah:solar_panel_nitro", 2_000, 40_000_000, 160_000),
+        ];
+        for (index, (id, generation, capacity, transfer)) in expected.into_iter().enumerate() {
+            let tier = solar_of(id).unwrap_or_else(|| panic!("{id} is a solar panel"));
+            assert_eq!(
+                (tier.generation, tier.capacity, tier.transfer),
+                (generation, capacity, transfer),
+                "{id} is the ladder's tier {index}"
+            );
+            assert_eq!(
+                Kind::of(id),
+                Some(Kind::Solar(
+                    crate::runtime::solar_tier(index).expect("the same tier in the rule's table")
+                )),
+                "{id} maps to its tier"
+            );
+            let buffer = battery_of(id).unwrap_or_else(|| panic!("{id} declares a buffer"));
+            assert_eq!(buffer.capacity, capacity, "{id}'s capacity");
+            assert_eq!(
+                buffer.max_insert, 0,
+                "{id} makes its own FE: `AbstractEnergyProvider` never takes a fill"
+            );
+            assert_eq!(buffer.max_extract, transfer, "{id}'s extract cap");
+            assert_eq!(buffer.insert_faces, [false; 6], "{id} takes no FE in");
+            let mut down_only = [false; 6];
+            down_only[Direction::Down as usize] = true;
+            assert_eq!(
+                buffer.extract_faces, down_only,
+                "{id} gives FE on its bottom face only (`isEnergyPresent` is `Direction.DOWN`)"
+            );
+            assert_eq!(
+                item_buffer(id),
+                Some(ItemBuffer {
+                    capacity,
+                    max_insert: 0,
+                    max_extract: transfer,
+                }),
+                "{id}'s own item only gives, as the block does"
+            );
+            assert_eq!(
+                keep_capacity(id),
+                Some(capacity),
+                "{id} keeps its buffer (`keepEnergy` is true)"
+            );
+            assert_eq!(
+                item_slots(id),
+                1,
+                "{id} holds `SolarTile`'s one charge slot"
+            );
+        }
+        assert_eq!(
+            solar_of("powah:solar_panel_creative"),
+            None,
+            "there is no solar tier past the ladder"
+        );
+        assert_eq!(solar_of("powah:energy_cell_starter"), None);
+        assert_eq!(solar_of("minecraft:stone"), None);
+    }
+
+    #[test]
+    fn the_solar_container_is_its_one_charge_slot() {
+        let container = solar_container();
+        assert_eq!(
+            container.slots, 1,
+            "`SolarTile`'s `inv.add(1)`, slot limit 1"
+        );
+        assert_eq!(container.inputs, vec![0]);
+        assert_eq!(container.outputs, vec![0]);
+        assert_eq!(container.faces, std::array::from_fn(|_| vec![0]));
+        assert_eq!(container.menu, None, "this port has no GUI");
+    }
+
+    #[test]
+    fn the_solar_readout_names_its_sky_its_generation_and_its_charge_slot() {
+        let starter = crate::runtime::solar_tier(0).expect("the starter tier");
+        let day = crate::runtime::Sky {
+            can_see_sky: true,
+            has_skylight: true,
+            darken: 0,
+        };
+        assert_eq!(
+            solar_line([16, 100, 20], 20, starter, Some(day), &[None], 1234),
+            "Solar Panel at 16,100,20: 20/20000 FE (comparator 0, sky open, day true, generating \
+             20 FE/t, 80 FE/t a side, charge empty, t=1234)"
+        );
+        assert_eq!(
+            solar_line(
+                [16, 100, 20],
+                10_000,
+                starter,
+                Some(crate::runtime::Sky {
+                    can_see_sky: false,
+                    ..day
+                }),
+                &[None],
+                1300
+            ),
+            "Solar Panel at 16,100,20: 10000/20000 FE (comparator 7, sky covered, day true, \
+             generating 20 FE/t, 80 FE/t a side, charge empty, t=1300)"
+        );
+        assert!(
+            solar_line(
+                [16, 100, 20],
+                10_000,
+                starter,
+                Some(crate::runtime::Sky { darken: 11, ..day }),
+                &[None],
+                1400
+            )
+            .contains("sky open, day false, generating 20 FE/t"),
+            "a midnight panel still sees the sky but is not in daylight"
+        );
+        let nitro = crate::runtime::solar_tier(6).expect("the nitro tier");
+        assert!(
+            solar_line(
+                [18, 100, 22],
+                40_000_000,
+                nitro,
+                Some(day),
+                &[Some(("powah:energy_cell_nitro", 5_000, 2_000_000_000))],
+                1500
+            )
+            .contains(
+                "40000000/40000000 FE (comparator 15, sky open, day true, generating 2000 FE/t, \
+                 160000 FE/t a side, charge powah:energy_cell_nitro 5000/2000000000"
+            ),
+            "the nitro tier names its own generation, its own transfer and its charge slot"
+        );
+        // `status_line`'s exhaustiveness arm has no level to ask, so it reports neither sky nor day.
+        assert_eq!(
+            status_line(Kind::Solar(starter), [16, 100, 20], 0, 0, None, &[None], 7),
+            solar_line([16, 100, 20], 0, starter, None, &[None], 7)
+        );
+        assert!(
+            solar_line([16, 100, 20], 0, starter, None, &[None], 7)
+                .contains("sky unknown, day unknown"),
+            "the arm without a level says so instead of guessing"
         );
     }
 }
