@@ -11,25 +11,26 @@
 //! output is a declaration now (`Registrar::block_energy`, keyed by the block),
 //! so the buffer's numbers have one home, [`battery_of`], which the cable's
 //! relay also reads when it plans a move.
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use mod_api::HostBlockStates;
 use mod_api::{
-    self, BlockDropsEvent, BlockEntityPart, BlockEntityTickEvent, BlockEntityTickReply,
-    BlockEntityTicksEvent, BlockEntityTypeKey, BlockFace, BlockPart, Command, CommandArgumentValue,
-    Component, ComponentId, Compound, Direction, ENERGY, EnergyHandler, Flow, Host,
-    HostTransaction, Identifier, ItemComponentHandler, ItemKey, ItemPart, ItemPlace, LevelHost,
-    LevelRef, ModContainer, ModEnergyBuffer, OnBlockPlacedByEvent, Registrar, ServerHost, Tag,
-    Transaction, move_energy,
+    self, AttachmentCodec, AttachmentError, AttachmentType, BlockDropsEvent, BlockEntityPart,
+    BlockEntityTickEvent, BlockEntityTickReply, BlockEntityTicksEvent, BlockEntityTypeKey,
+    BlockFace, BlockPart, BlockSide, Command, CommandArgumentValue, Component, ComponentId,
+    Compound, Direction, ENERGY, EnergyHandler, Flow, Holder, Host, HostTransaction, Identifier,
+    ItemComponentHandler, ItemKey, ItemPart, ItemPlace, LevelHost, LevelRef, ModContainer,
+    ModEnergyBuffer, OnBlockPlacedByEvent, Registrar, ServerHost, Tag, Transaction, move_energy,
 };
 
 use crate::runtime::{
-    CABLE_TIER_COUNT, CELL_TIER_COUNT, CableTier, CellTier, DISCHARGER_TIER_COUNT, DischargerTier,
-    EnergizingRecipe, FURNATOR_TIER_COUNT, Furnator, FurnatorTier, HOPPER_TIER_COUNT, HopperTier,
-    Neighbour, ORB_MAX_ENERGY, ORB_OUTPUT_SLOT, ORB_SLOTS, ROD_TIER_COUNT, RodTier,
-    SOLAR_TIER_COUNT, Sky, SolarTier, cable_tier, cell_tier, clamp_energy, comparator_strength,
-    discharger_tier, furnator_tier, network_moves, push_amount, rod_tier,
+    CABLE_TIER_COUNT, CELL_TIER_COUNT, CableTier, CellTier, Channel, DISCHARGER_TIER_COUNT,
+    DischargerTier, ENDER_TIER_COUNT, EnderTier, EnergizingRecipe, FURNATOR_TIER_COUNT, Furnator,
+    FurnatorTier, HOPPER_TIER_COUNT, HopperTier, MAX_CHANNELS, Neighbour, ORB_MAX_ENERGY,
+    ORB_OUTPUT_SLOT, ORB_SLOTS, ROD_TIER_COUNT, RodTier, SOLAR_TIER_COUNT, Sky, SolarTier,
+    cable_tier, cell_tier, clamp_energy, comparator_strength, discharger_tier, ender_cell_tier,
+    ender_gate_tier, furnator_tier, network_moves, push_amount, rod_tier,
 };
 
 /// The energizing orb block and its item.
@@ -146,6 +147,30 @@ pub(crate) const SOLARS: [(&str, &str); SOLAR_TIER_COUNT] = [
     ("powah:solar_panel_nitro", "solar_panel_nitro"),
 ];
 
+/// Every ender cell tier's block id and block entity type name, in the ladder's order (the index
+/// [`ender_cell_of`] takes).
+pub(crate) const ENDER_CELLS: [(&str, &str); ENDER_TIER_COUNT] = [
+    ("powah:ender_cell_starter", "ender_cell_starter"),
+    ("powah:ender_cell_basic", "ender_cell_basic"),
+    ("powah:ender_cell_hardened", "ender_cell_hardened"),
+    ("powah:ender_cell_blazing", "ender_cell_blazing"),
+    ("powah:ender_cell_niotic", "ender_cell_niotic"),
+    ("powah:ender_cell_spirited", "ender_cell_spirited"),
+    ("powah:ender_cell_nitro", "ender_cell_nitro"),
+];
+
+/// Every ender gate tier's block id and block entity type name, in the ladder's order (the index
+/// [`ender_gate_of`] takes).
+pub(crate) const ENDER_GATES: [(&str, &str); ENDER_TIER_COUNT] = [
+    ("powah:ender_gate_starter", "ender_gate_starter"),
+    ("powah:ender_gate_basic", "ender_gate_basic"),
+    ("powah:ender_gate_hardened", "ender_gate_hardened"),
+    ("powah:ender_gate_blazing", "ender_gate_blazing"),
+    ("powah:ender_gate_niotic", "ender_gate_niotic"),
+    ("powah:ender_gate_spirited", "ender_gate_spirited"),
+    ("powah:ender_gate_nitro", "ender_gate_nitro"),
+];
+
 /// The furnator's fuel slot: upstream's slot 1 of 2, and the charge slot is 0.
 const FUEL_SLOT: usize = 1;
 /// The charge slot: upstream's slot 0 of the furnator, and the first of a cell's two.
@@ -159,6 +184,13 @@ const CELL_SLOTS: usize = 2;
 const DISCHARGER_SLOTS: usize = 7;
 /// A solar panel's one slot (`SolarTile`'s `inv.add(1)`, slot limit 1, chargeables only).
 const SOLAR_SLOTS: usize = 1;
+/// An ender cell's and an ender gate's three slots (`AbstractEnderTile`'s `inv.add(3)` — the cell
+/// on its own, the gate in `EnderGateTile`): slot 0 the extender, slots 1 and 2 the charge slots.
+const ENDER_SLOTS: usize = 3;
+/// The extender slot (`AbstractEnderTile.canInsert` slot 0: `IEnderExtender` items only).
+const ENDER_EXTENDER_SLOT: usize = 0;
+/// How many slots an ender block charges (`AbstractEnderTile.postTick`'s `chargeItems(1, 3)`).
+const ENDER_CHARGE_SLOTS: usize = ENDER_SLOTS - ENDER_EXTENDER_SLOT - 1;
 
 /// What one of this mod's machine items holds, as upstream's `EnergyBlockItem`
 /// `Info` gives it: the machine tier's capacity, and the per-call insert and
@@ -197,6 +229,9 @@ pub(crate) fn item_buffer(block: &str) -> Option<ItemBuffer> {
             max_insert: 0,
             max_extract: tier.transfer,
         }),
+        // An ender cell and an ender gate keep nothing in their own item (upstream's `keepEnergy`
+        // is false): the FE is in the owner's channel, which the channel store keeps.
+        Kind::EnderCell(_) | Kind::EnderGate(_) => None,
         Kind::Cell(tier) => Some(ItemBuffer {
             capacity: tier.capacity,
             max_insert: tier.transfer,
@@ -232,6 +267,9 @@ pub(crate) fn kind_item_slots(kind: Kind) -> usize {
         Kind::Hopper(_) => 0,
         // `SolarTile`'s one charge slot (`inv.add(1)`, `chargeItems(1)`).
         Kind::Solar(_) => SOLAR_SLOTS,
+        // `AbstractEnderTile.postTick`'s `chargeItems(1, 3)`: an ender cell and an ender gate each
+        // charge the two slots after the extender.
+        Kind::EnderCell(_) | Kind::EnderGate(_) => ENDER_CHARGE_SLOTS,
         Kind::Orb | Kind::Cable(_) | Kind::Rod(_) => 0,
     }
 }
@@ -252,6 +290,9 @@ pub(crate) fn keep_capacity(block: &str) -> Option<i32> {
         Kind::Hopper(tier) => Some(tier.capacity),
         Kind::Solar(tier) => Some(tier.capacity),
         Kind::Rod(tier) => Some(tier.capacity),
+        // Upstream's `keepEnergy()` is false for both ender blocks: the FE is in the owner's
+        // channel, not in the tile, so the item carries nothing and keeps nothing.
+        Kind::EnderCell(_) | Kind::EnderGate(_) => None,
         Kind::Orb | Kind::Cable(_) => None,
     }
 }
@@ -408,6 +449,9 @@ const KEY_ORB: &str = "orb";
 /// A rod's warm-up counter (`Ticker(20)`), kept across a reload so a reloaded rod
 /// does not restart its 20 ticks.
 const KEY_COOLDOWN: &str = "cool_down";
+/// An ender block's channel index and owner (`AbstractEnderTile`'s `channel` and `owner_id`).
+const KEY_CHANNEL: &str = "channel";
+const KEY_OWNER: &str = "owner";
 
 /// The three machines, as a readout has to tell them apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -428,6 +472,10 @@ pub(crate) enum Kind {
     Orb,
     /// An energizing rod, carrying its tier's capacity and transfer.
     Rod(RodTier),
+    /// An ender cell, carrying its tier's transfer and channel count.
+    EnderCell(EnderTier),
+    /// An ender gate, carrying its tier's transfer and channel count.
+    EnderGate(EnderTier),
 }
 
 impl Kind {
@@ -442,7 +490,9 @@ impl Kind {
                 .or_else(|| rod_of(block).map(Kind::Rod))
                 .or_else(|| discharger_of(block).map(Kind::Discharger))
                 .or_else(|| hopper_of(block).map(Kind::Hopper))
-                .or_else(|| solar_of(block).map(Kind::Solar)),
+                .or_else(|| solar_of(block).map(Kind::Solar))
+                .or_else(|| ender_cell_of(block).map(Kind::EnderCell))
+                .or_else(|| ender_gate_of(block).map(Kind::EnderGate)),
         }
     }
 }
@@ -487,6 +537,20 @@ pub(crate) fn hopper_of(block: &str) -> Option<HopperTier> {
 pub(crate) fn solar_of(block: &str) -> Option<SolarTier> {
     let index = SOLARS.iter().position(|(id, _)| *id == block)?;
     crate::runtime::solar_tier(index)
+}
+
+/// The ender cell a block id names, with its tier's transfer and channel count; `None` for any
+/// other block. The ids are the content's own (`data/powah/horizon/block/ender_cell_*`).
+pub(crate) fn ender_cell_of(block: &str) -> Option<EnderTier> {
+    let index = ENDER_CELLS.iter().position(|(id, _)| *id == block)?;
+    ender_cell_tier(index)
+}
+
+/// The ender gate a block id names, with its tier's transfer and channel count; `None` for any
+/// other block. The ids are the content's own (`data/powah/horizon/block/ender_gate_*`).
+pub(crate) fn ender_gate_of(block: &str) -> Option<EnderTier> {
+    let index = ENDER_GATES.iter().position(|(id, _)| *id == block)?;
+    ender_gate_tier(index)
 }
 
 /// What `/powah set` did, so the command can answer honestly.
@@ -601,6 +665,496 @@ pub(crate) fn hopper_battery(tier: HopperTier) -> ModEnergyBuffer {
         insert_faces: [true; 6],
         extract_faces: [true; 6],
     }
+}
+
+/// An ender cell's or an ender gate's container: upstream's three slots (`AbstractEnderTile`'s
+/// `inv.add(3)`), slot 0 the extender and 1-2 the charge slots, every face reaching all three, no
+/// menu. Upstream's per-slot `canInsert` (an `IEnderExtender` in slot 0, chargeables after it)
+/// cannot be expressed by a container declaration at this pin, so the tick decides what it takes.
+pub(crate) fn ender_container() -> ModContainer {
+    let slots: Vec<usize> = (0..ENDER_SLOTS).collect();
+    ModContainer {
+        slots: ENDER_SLOTS,
+        faces: std::array::from_fn(|_| slots.clone()),
+        inputs: slots.clone(),
+        outputs: slots,
+        menu: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The ender network: one shared channel per owner
+// ---------------------------------------------------------------------------
+
+/// Upstream's `EnderNetwork` key: one channel of one owner's ender network. The owner is the
+/// player the block was placed by (`owner_id` in upstream's saved compound, a `UUID`), written as
+/// NBT writes a UUID — four ints — so a block placed with no player (`/setblock`, a dispenser) is
+/// all-zero and still has channels of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ChannelKey {
+    /// The owner's UUID, most significant int first.
+    pub owner: [i32; 4],
+    /// The channel index (0 ..= 11, upstream's `RangedInt(12)`).
+    pub channel: i32,
+}
+
+impl ChannelKey {
+    /// The key of `owner`'s channel `channel`.
+    #[must_use]
+    pub(crate) fn new(owner: u128, channel: i32) -> ChannelKey {
+        ChannelKey {
+            owner: [
+                (owner >> 96) as i32,
+                (owner >> 64) as i32,
+                (owner >> 32) as i32,
+                owner as i32,
+            ],
+            channel,
+        }
+    }
+
+    /// The owner's UUID as the four ints hold it.
+    #[must_use]
+    #[allow(
+        dead_code,
+        reason = "the key's UUID form is what the saved-key test reads back; the game build never needs it"
+    )]
+    pub(crate) fn owner_uuid(self) -> u128 {
+        self.owner
+            .iter()
+            .fold(0u128, |uuid, word| (uuid << 32) | u128::from(*word as u32))
+    }
+}
+
+/// Every channel of every owner in one level: upstream's `EnderNetwork` `SavedData`, whose map
+/// holds one owner's twelve shared `Energy` objects. The pin has no `SavedData`, so this is a
+/// level attachment (`Holder::Level`, the `transfer_labels` pattern) — **one store per level**,
+/// which is this port's recorded deviation from upstream's single store on the overworld server:
+/// a channel here does not reach another dimension.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ChannelStore {
+    channels: BTreeMap<ChannelKey, Channel>,
+}
+
+impl ChannelStore {
+    /// What the key's channel holds: an absent entry is an empty channel, as upstream's
+    /// `computeIfAbsent(owner, k -> empty())` starts one.
+    #[must_use]
+    pub(crate) fn get(&self, key: &ChannelKey) -> Channel {
+        self.channels.get(key).copied().unwrap_or_default()
+    }
+
+    /// Store the key's channel, dropping an entry that holds and can hold nothing so the saved
+    /// compound stays as small as the network really is (upstream keeps twelve per owner for ever;
+    /// an empty channel there behaves exactly like an absent one).
+    pub(crate) fn set(&mut self, key: ChannelKey, channel: Channel) {
+        if channel.capacity <= 0 && channel.stored <= 0 {
+            self.channels.remove(&key);
+        } else {
+            self.channels.insert(key, channel);
+        }
+    }
+
+    /// The entries in key order, which a `BTreeMap` keeps stable, so the saved compound is too.
+    pub(crate) fn entries(&self) -> impl Iterator<Item = (&ChannelKey, &Channel)> {
+        self.channels.iter()
+    }
+
+    /// One entry, as the codec's decoder rebuilds it.
+    pub(crate) fn insert(&mut self, key: ChannelKey, channel: Channel) {
+        self.channels.insert(key, channel);
+    }
+}
+
+/// The owner's ender network as the level holds it. Saved by its codec, so a channel's FE survives
+/// a relaunch exactly as upstream's `powah_network` does.
+static ENDER_CHANNELS: AttachmentType<ChannelStore> = AttachmentType {
+    namespace: "powah",
+    name: "ender_channels",
+    default: ChannelStore::default,
+    codec: Some(AttachmentCodec {
+        encode: encode_channels,
+        decode: decode_channels,
+    }),
+    copy_on_death: false,
+    sync: false,
+};
+
+/// `EnderNetwork.save`: one record per channel, keyed by the owner and the index.
+fn encode_channels(store: &ChannelStore) -> Result<Compound, AttachmentError> {
+    let records: Vec<Tag> = store
+        .entries()
+        .map(|(key, channel)| {
+            Tag::compound([
+                ("owner", Tag::IntArray(key.owner.to_vec())),
+                ("channel", Tag::Int(key.channel)),
+                ("stored", Tag::Int(channel.stored)),
+                ("capacity", Tag::Int(channel.capacity)),
+            ])
+        })
+        .collect();
+    match Tag::compound([("channels", Tag::List(records))]) {
+        Tag::Compound(root) => Ok(root),
+        _ => Err(AttachmentError::Encode),
+    }
+}
+
+/// `EnderNetwork`'s loader: an absent list is an empty network, a malformed record is a decode
+/// error rather than a silently empty channel.
+fn decode_channels(root: &Compound) -> Result<ChannelStore, AttachmentError> {
+    let mut store = ChannelStore::default();
+    let Some(record) = root.get(&"channels".into()) else {
+        return Ok(store);
+    };
+    let Tag::List(records) = record else {
+        return Err(AttachmentError::Decode);
+    };
+    for record in records {
+        let Tag::Compound(entry) = record else {
+            return Err(AttachmentError::Decode);
+        };
+        let Some(Tag::IntArray(owner)) = entry.get(&"owner".into()) else {
+            return Err(AttachmentError::Decode);
+        };
+        if owner.len() != 4 {
+            return Err(AttachmentError::Decode);
+        }
+        let (Some(Tag::Int(channel)), Some(Tag::Int(stored)), Some(Tag::Int(capacity))) = (
+            entry.get(&"channel".into()),
+            entry.get(&"stored".into()),
+            entry.get(&"capacity".into()),
+        ) else {
+            return Err(AttachmentError::Decode);
+        };
+        store.insert(
+            ChannelKey {
+                owner: [owner[0], owner[1], owner[2], owner[3]],
+                channel: *channel,
+            },
+            Channel {
+                stored: *stored,
+                capacity: *capacity,
+            },
+        );
+    }
+    Ok(store)
+}
+
+/// The level's ender network, or an empty one where it has none yet.
+fn read_channels(host: &mut dyn ServerHost) -> ChannelStore {
+    ENDER_CHANNELS
+        .get_existing(host.attachments(), Holder::Level)
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+}
+
+/// Writes the level's ender network back; false where the level cannot hold it.
+fn write_channels(host: &mut dyn ServerHost, store: &ChannelStore) -> bool {
+    ENDER_CHANNELS
+        .set(host.attachments(), Holder::Level, store.clone())
+        .is_ok()
+}
+
+/// The channel a block entity names: its saved `channel` (0 when absent, clamped to upstream's
+/// twelve) and its saved `owner` (all-zero when absent).
+#[must_use]
+pub(crate) fn channel_key(saved: &Tag) -> ChannelKey {
+    let owner = match saved.get(KEY_OWNER) {
+        Some(Tag::IntArray(owner)) if owner.len() == 4 => [owner[0], owner[1], owner[2], owner[3]],
+        _ => [0; 4],
+    };
+    ChannelKey {
+        owner,
+        channel: int(saved, KEY_CHANNEL).clamp(0, MAX_CHANNELS - 1),
+    }
+}
+
+/// The channel key of the ender block entity at `pos`, read from its saved compound.
+pub(crate) fn ender_key_at(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+) -> Option<ChannelKey> {
+    let entity = host.block_entity(level, pos)?;
+    Some(channel_key(&Tag::Compound(entity.data(&*host)?)))
+}
+
+/// The `ENERGY` capability of an ender cell or gate: the owner's channel itself, read and written
+/// in place. Upstream's `AbstractEnderTile.getEnergy()` hands every block on a channel the same
+/// `Energy` object, so a fill into one is a fill into all; this handler is that object, which is
+/// why two cells on one channel read the same FE and a channel that outlives its last cell keeps it.
+pub(crate) struct EnderEnergy {
+    level: LevelRef,
+    pos: [i32; 3],
+    tier: EnderTier,
+}
+
+impl EnergyHandler for EnderEnergy {
+    /// What the channel holds (`Energy.getStored`).
+    fn amount(&self, host: &mut dyn ServerHost) -> u32 {
+        let Some(key) = ender_key_at(host, self.level, self.pos) else {
+            return 0;
+        };
+        u32::try_from(read_channels(host).get(&key).stored.max(0)).unwrap_or(0)
+    }
+
+    /// What the channel can hold (`Energy.getCapacity`): 0 until an extender is inserted.
+    fn capacity(&self, host: &mut dyn ServerHost) -> u32 {
+        let Some(key) = ender_key_at(host, self.level, self.pos) else {
+            return 0;
+        };
+        u32::try_from(read_channels(host).get(&key).capacity.max(0)).unwrap_or(0)
+    }
+
+    /// `AbstractEnergyStorage.receiveEnergy`: at most the room, the tier's transfer and the offer.
+    fn insert(&self, host: &mut dyn ServerHost, _tx: &Transaction, amount: u32) -> u32 {
+        let Some(key) = ender_key_at(host, self.level, self.pos) else {
+            return 0;
+        };
+        let mut store = read_channels(host);
+        let (after, moved) = store.get(&key).insert(
+            i32::try_from(amount).unwrap_or(i32::MAX),
+            self.tier.transfer,
+        );
+        if moved <= 0 {
+            return 0;
+        }
+        store.set(key, after);
+        if !write_channels(host, &store) {
+            return 0;
+        }
+        u32::try_from(moved).unwrap_or(0)
+    }
+
+    /// `AbstractEnergyStorage.extractEnergy`: at most what the channel holds and the transfer.
+    fn extract(&self, host: &mut dyn ServerHost, _tx: &Transaction, amount: u32) -> u32 {
+        let Some(key) = ender_key_at(host, self.level, self.pos) else {
+            return 0;
+        };
+        let mut store = read_channels(host);
+        let (after, moved) = store.get(&key).extract(
+            i32::try_from(amount).unwrap_or(i32::MAX),
+            self.tier.transfer,
+        );
+        if moved <= 0 {
+            return 0;
+        }
+        store.set(key, after);
+        if !write_channels(host, &store) {
+            return 0;
+        }
+        u32::try_from(moved).unwrap_or(0)
+    }
+}
+
+/// The handler an ender block answers on one side: a cell on all six faces, a gate only on the
+/// face its `facing` state names (`EnderGateTile.isEnergyPresent`). A gate's other five faces
+/// answer no handler at all, which is upstream's `getExternalStorage` answering null there — a
+/// neighbour on those faces sees no energy capability, as `canSurvive` expects.
+pub(crate) fn ender_capability(
+    host: &mut dyn ServerHost,
+    at: BlockSide,
+    state: mod_api::BlockState,
+    entity: Option<mod_api::BlockEntityRef>,
+    kind: Kind,
+) -> Option<Box<dyn EnergyHandler>> {
+    entity?;
+    let tier = match kind {
+        Kind::EnderCell(tier) => tier,
+        Kind::EnderGate(tier) => {
+            let facing = state
+                .property(&host.block_states(), "facing")
+                .ok()
+                .flatten()
+                .and_then(facing_of);
+            if let (Some(facing), Some(side)) = (facing, at.side)
+                && side != facing
+            {
+                return None;
+            }
+            tier
+        }
+        _ => return None,
+    };
+    Some(Box::new(EnderEnergy {
+        level: at.level,
+        pos: at.pos,
+        tier,
+    }))
+}
+
+/// An ender cell or gate: a block entity whose buffer is the owner's channel, with the extender
+/// slot, the two charge slots and the level-tick queue for the faces it pushes on.
+pub(crate) struct EnderPart {
+    queue: Arc<Mutex<Queue>>,
+    kind: Kind,
+}
+
+impl EnderPart {
+    pub(crate) fn new(queue: Arc<Mutex<Queue>>, kind: Kind) -> EnderPart {
+        EnderPart { queue, kind }
+    }
+
+    /// The tier this block carries, `None` for a kind that is not an ender block.
+    fn tier(&self) -> Option<EnderTier> {
+        match self.kind {
+            Kind::EnderCell(tier) | Kind::EnderGate(tier) => Some(tier),
+            _ => None,
+        }
+    }
+}
+
+#[mod_api::horizon_part]
+impl BlockPart for EnderPart {}
+
+#[mod_api::horizon_part]
+impl BlockEntityPart for EnderPart {
+    fn block_entity_ticks(&self, _host: &dyn Host, event: &mut BlockEntityTicksEvent<'_>) {
+        event.ticks = true;
+    }
+
+    /// One server tick (`AbstractEnderTile.postTick`): queue the position for the level's move
+    /// phase, absorb an extender item from slot 0 (a cell only), then charge slots 1-2 out of the
+    /// channel.
+    fn block_entity_tick(&self, host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
+        if let Some(level) = level_now(host) {
+            self.queue
+                .lock()
+                .expect("the powah queue lock is held for one insert")
+                .push(level, event.pos);
+        }
+        let Some(tier) = self.tier() else {
+            *event.reply = BlockEntityTickReply::Unchanged;
+            return;
+        };
+        let resized = event.entity.items.len() != ENDER_SLOTS;
+        if resized {
+            event.entity.items.resize(ENDER_SLOTS, None);
+        }
+        let saved = Tag::Compound(std::mem::take(&mut event.entity.nbt));
+        let key = channel_key(&saved);
+        let mut changed = resized;
+        // `isExtender()`: only an ender cell takes an item into slot 0 (`onSlotChanged`).
+        if matches!(self.kind, Kind::EnderCell(_)) {
+            changed |= absorb_extender(&mut *host, &mut event.entity.items, key, tier);
+        }
+        changed |= charge_from_channel(&mut *host, &mut event.entity.items, key, tier);
+        if let Tag::Compound(nbt) = saved {
+            event.entity.nbt = nbt;
+        }
+        if !changed {
+            *event.reply = BlockEntityTickReply::Unchanged;
+        }
+    }
+}
+
+/// `AbstractEnderTile.onSlotChanged` for slot 0: an extender item's capacity joins the channel and
+/// the item's own charge is spent into it, then the item is consumed. Answers whether anything
+/// changed.
+///
+/// The extenders this package carries are the seven energy cell items (`EnergyCellItem implements
+/// IEnderExtender`; a battery is not part of any slice), so `getExtendedCapacity` is the cell
+/// tier's capacity and `getExtendedEnergy` is the FE the item's own payload holds.
+fn absorb_extender(
+    host: &mut dyn ServerHost,
+    items: &mut [Option<mod_api::ItemStack>],
+    key: ChannelKey,
+    _tier: EnderTier,
+) -> bool {
+    let Some(stack) = items.get(ENDER_EXTENDER_SLOT).and_then(Option::as_ref) else {
+        return false;
+    };
+    let id = stack.item().id(&*host);
+    let Some(capacity) = cell_of(&id).map(|cell| cell.capacity) else {
+        return false;
+    };
+    let mut store = read_channels(host);
+    let after = store.get(&key).extended(capacity, held_energy(stack));
+    if after == store.get(&key) {
+        return false;
+    }
+    store.set(key, after);
+    if !write_channels(host, &store) {
+        return false;
+    }
+    items[ENDER_EXTENDER_SLOT] = stack.clone().shrink(1);
+    true
+}
+
+/// `AbstractEnderTile.postTick`'s `chargeItems(1, 3)`: the two slots after the extender, each
+/// taking `min(the tier's transfer, the channel's remaining budget, its own room)` and the channel
+/// debited by exactly what the items took.
+fn charge_from_channel(
+    host: &mut dyn ServerHost,
+    items: &mut [Option<mod_api::ItemStack>],
+    key: ChannelKey,
+    tier: EnderTier,
+) -> bool {
+    let mut store = read_channels(host);
+    let channel = store.get(&key);
+    if channel.stored <= 0 {
+        return false;
+    }
+    let first = ENDER_EXTENDER_SLOT + 1;
+    let mut rooms = Vec::with_capacity(ENDER_CHARGE_SLOTS);
+    for slot in first..first + ENDER_CHARGE_SLOTS {
+        rooms.push(items.get(slot).and_then(Option::as_ref).map_or(0, |stack| {
+            let id = stack.item().id(&*host);
+            item_buffer(&id).map_or(0, |buffer| {
+                // The item's own capability caps one call too (`Info.maxInsert`), and the pass's
+                // per-slot limit and the room are both minima, so the cap folds into the room.
+                let room = buffer.capacity.saturating_sub(held_energy(stack).max(0));
+                room.min(buffer.max_insert)
+            })
+        }));
+    }
+    let mut charged = 0;
+    for (offset, asked) in crate::runtime::charge_slots(channel.stored, tier.transfer, &rooms)
+        .into_iter()
+        .enumerate()
+    {
+        if asked <= 0 {
+            continue;
+        }
+        let slot = first + offset;
+        let Some(stack) = items.get(slot).and_then(Option::as_ref) else {
+            continue;
+        };
+        let held = held_energy(stack);
+        let Some(charged_stack) = with_payload_energy(&*host, stack, held.saturating_add(asked))
+        else {
+            continue;
+        };
+        items[slot] = Some(charged_stack);
+        charged += asked;
+    }
+    if charged <= 0 {
+        return false;
+    }
+    store.set(
+        key,
+        Channel {
+            stored: channel.stored - charged,
+            ..channel
+        },
+    );
+    write_channels(host, &store)
+}
+
+/// The `facing` value of the block at `pos`, `None` when the block has no such state or no block
+/// stands there: the face an energy hopper charges through and an ender gate reaches energy on.
+pub(crate) fn facing_at(
+    host: &dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+) -> Option<Direction> {
+    level
+        .block_state(host, pos)?
+        .property(&host.block_states(), "facing")
+        .ok()
+        .flatten()
+        .and_then(facing_of)
 }
 
 /// The furnator saved in a block entity's compound, clamped into its tier; a
@@ -934,9 +1488,11 @@ pub(crate) fn status_line(
         // A solar panel's readout names the sky it reads, which only [`info_line`] can ask the
         // level; this arm is the type's exhaustiveness.
         Kind::Solar(tier) => solar_line(pos, energy, tier, None, charge, time),
-        // The orb and a rod have readouts of their own ([`orb_line`], [`rod_line`]);
-        // [`info_line`] gives them those, so these arms are only the type's
-        // exhaustiveness.
+        // An ender block's readout names the channel and the face a gate reaches, which only
+        // [`info_line`] can read; this arm is the type's exhaustiveness.
+        Kind::EnderCell(_) | Kind::EnderGate(_) => {
+            ender_line(kind, pos, Channel::default(), 0, None, charge, time)
+        }
         Kind::Orb => orb_line(pos, energy, None, 0, time),
         Kind::Rod(tier) => rod_line(pos, energy, tier, None, time),
     }
@@ -989,6 +1545,51 @@ pub(crate) fn solar_line(
         tier.capacity,
         comparator_strength(energy, tier.capacity),
         tier.generation,
+        tier.transfer,
+        charge_text(charge),
+    )
+}
+
+/// An ender cell's and an ender gate's readout: what the owner's channel holds and can hold, the
+/// channel it is on (of the tier's count), the transfer it moves a call and — for a gate — the face
+/// it reaches energy on. `channel` is the shared store's entry, which is what makes two blocks on
+/// one channel read the same number; `facing` is [`None`] only in [`status_line`]'s exhaustiveness
+/// arm, which has no block state to read.
+pub(crate) fn ender_line(
+    kind: Kind,
+    pos: [i32; 3],
+    channel: Channel,
+    index: i32,
+    facing: Option<Direction>,
+    charge: &[ChargeReadout<'_>],
+    time: i64,
+) -> String {
+    let [x, y, z] = pos;
+    let (name, tier, gate) = match kind {
+        Kind::EnderGate(tier) => ("Ender Gate", tier, true),
+        Kind::EnderCell(tier) => ("Ender Cell", tier, false),
+        // Only the exhaustiveness arm of [`status_line`] reaches this, and it has no ender block.
+        _ => (
+            "Ender Cell",
+            EnderTier {
+                transfer: 0,
+                channels: 0,
+            },
+            false,
+        ),
+    };
+    let face = match (gate, facing) {
+        (true, Some(facing)) => format!(", facing {}", facing_name(facing)),
+        (true, None) => ", facing unknown".to_owned(),
+        (false, _) => String::new(),
+    };
+    format!(
+        "{name} at {x},{y},{z}: {}/{} FE (comparator {}, channel {index}/{}{face}, {} FE/t a \
+         side, charge {}, t={time})",
+        channel.stored,
+        channel.capacity,
+        comparator_strength(channel.stored, channel.capacity),
+        tier.channels,
         tier.transfer,
         charge_text(charge),
     )
@@ -1184,7 +1785,9 @@ pub(crate) fn sky_at(host: &dyn Host, level: LevelRef, pos: [i32; 3]) -> Sky {
 /// administrative: `set` writes a machine's stored FE, `item` writes the charge
 /// of the item in its charge slot, and `info` reads its slots, at coordinates the
 /// caller chooses, so they are operator diagnostics rather than gameplay (review
-/// finding 2026-11-18).
+/// finding 2026-11-18). `channel` is the same kind of control: upstream's channel is
+/// chosen in the block's GUI, which this port does not have, so the packet's effect
+/// (`SetChannelPacket`) is a command here.
 pub(crate) fn declare_commands(commands: &mut Vec<Command>) {
     commands.push(Command::op("powah info <pos:block_pos>", 2));
     commands.push(Command::op("powah set <amount:integer> <pos:block_pos>", 2));
@@ -1192,6 +1795,48 @@ pub(crate) fn declare_commands(commands: &mut Vec<Command>) {
         "powah item <amount:integer> <pos:block_pos>",
         2,
     ));
+    commands.push(Command::op(
+        "powah channel <channel:integer> <pos:block_pos>",
+        2,
+    ));
+}
+
+/// What `/powah channel` did, so the command can answer honestly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ChannelOutcome {
+    /// The block is on this channel now, and its tier offers that many.
+    Set(i32, i32),
+    /// No ender cell or ender gate stands there.
+    NoBlock,
+}
+
+/// Set an ender block's channel (`SetChannelPacket`: `cell.getChannel().set(channel)`), clamped to
+/// the tier's own count — the values upstream's GUI offers.
+pub(crate) fn set_channel_index(
+    host: &mut dyn ServerHost,
+    pos: [i32; 3],
+    channel: i32,
+) -> ChannelOutcome {
+    let Some(level) = level_now(host) else {
+        return ChannelOutcome::NoBlock;
+    };
+    let Some(block) = block_at(&*host, level, pos) else {
+        return ChannelOutcome::NoBlock;
+    };
+    let tier = match Kind::of(&block) {
+        Some(Kind::EnderCell(tier) | Kind::EnderGate(tier)) => tier,
+        _ => return ChannelOutcome::NoBlock,
+    };
+    let Some(entity) = host.block_entity(level, pos) else {
+        return ChannelOutcome::NoBlock;
+    };
+    let set = crate::runtime::channel_clamped(channel, tier.channels);
+    let mut patch = Compound::new();
+    patch.insert(KEY_CHANNEL.into(), Tag::Int(set));
+    match entity.merge_data(host, patch) {
+        Ok(_) => ChannelOutcome::Set(set, tier.channels),
+        Err(_) => ChannelOutcome::NoBlock,
+    }
 }
 
 /// A machine's charge slots as its readout shows them: each slot's item (with the
@@ -1201,7 +1846,18 @@ fn charge_readout(
     entity: mod_api::BlockEntityRef,
     slots: usize,
 ) -> Vec<Option<(String, i32, i32)>> {
-    (0..slots)
+    charge_readout_from(host, entity, 0, slots)
+}
+
+/// The `count` slots from `first` on, as a readout shows them: an ender block's charge slots start
+/// after its extender slot.
+fn charge_readout_from(
+    host: &mut dyn ServerHost,
+    entity: mod_api::BlockEntityRef,
+    first: usize,
+    count: usize,
+) -> Vec<Option<(String, i32, i32)>> {
+    (first..first + count)
         .map(|slot| {
             let stack = entity
                 .item_slot(&*host, u32::try_from(slot).unwrap_or(u32::MAX))
@@ -1291,6 +1947,31 @@ pub(crate) fn info_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> Option<Stri
                 time,
             ));
         }
+        Kind::EnderCell(_) | Kind::EnderGate(_) => {
+            let entity = host.block_entity(level, pos)?;
+            let saved = Tag::Compound(entity.data(&*host)?);
+            let key = channel_key(&saved);
+            let channel = read_channels(host).get(&key);
+            // The charge slots are 1 and 2: slot 0 is the extender (`inv.add(3)`).
+            let charge = charge_readout_from(host, entity, ENDER_EXTENDER_SLOT + 1, slots);
+            let charge: Vec<ChargeReadout<'_>> = charge
+                .iter()
+                .map(|slot| {
+                    slot.as_ref()
+                        .map(|(item, held, capacity)| (item.as_str(), *held, *capacity))
+                })
+                .collect();
+            let gate = matches!(kind, Kind::EnderGate(_));
+            return Some(ender_line(
+                kind,
+                pos,
+                channel,
+                key.channel,
+                gate.then(|| facing_at(&*host, level, pos)).flatten(),
+                &charge,
+                time,
+            ));
+        }
         Kind::Orb => {
             let orb = read_orb(host, level, pos)?;
             return Some(orb_line(
@@ -1329,6 +2010,10 @@ pub(crate) fn info_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> Option<Stri
 /// harness control the in-game check uses. Writing an `energy` key into a foreign
 /// block's compound would be a foreign key in someone else's data, so only this
 /// mod's blocks take it.
+///
+/// An ender cell or gate stores nothing in its own compound: the FE is the owner's channel, so
+/// this writes the channel (which is what upstream's GUI and its `setEnergy` path do), clamped to
+/// the channel's capacity — 0 until an extender is inserted.
 pub(crate) fn set_energy(host: &mut dyn ServerHost, pos: [i32; 3], amount: i32) -> SetOutcome {
     let Some(level) = level_now(host) else {
         return SetOutcome::NoBlock;
@@ -1336,6 +2021,20 @@ pub(crate) fn set_energy(host: &mut dyn ServerHost, pos: [i32; 3], amount: i32) 
     let Some(block) = block_at(&*host, level, pos) else {
         return SetOutcome::NoBlock;
     };
+    if let Some(Kind::EnderCell(_) | Kind::EnderGate(_)) = Kind::of(&block) {
+        let Some(key) = ender_key_at(host, level, pos) else {
+            return SetOutcome::NoBlock;
+        };
+        let mut store = read_channels(host);
+        let channel = store.get(&key);
+        let stored = clamp_energy(amount, channel.capacity);
+        store.set(key, Channel { stored, ..channel });
+        return if write_channels(host, &store) {
+            SetOutcome::Set(stored)
+        } else {
+            SetOutcome::NoBlock
+        };
+    }
     let capacity = match Kind::of(&block) {
         Some(Kind::Furnator(tier)) => tier.capacity,
         Some(Kind::Cell(tier)) => tier.capacity,
@@ -1349,6 +2048,8 @@ pub(crate) fn set_energy(host: &mut dyn ServerHost, pos: [i32; 3], amount: i32) 
             .and_then(|orb| orb.recipe)
             .map_or(0, |recipe| recipe.energy),
         Some(Kind::Cable(_)) => return SetOutcome::Cable,
+        // An ender block's buffer is its owner's channel, written above.
+        Some(Kind::EnderCell(_) | Kind::EnderGate(_)) => return SetOutcome::NoBlock,
         None => return SetOutcome::NoBlock,
     };
     let energy = clamp_energy(amount, capacity);
@@ -1846,6 +2547,26 @@ impl ItemPart for MachineItem {
         {
             set_panel_frames(host, level, event.pos, &block);
         }
+        // `AbstractEnderTile.onPlaced`: the owner is the player who placed the block
+        // (`setOwner(placer.getGameProfile())`), and an ender gate's `facing` is the face it was
+        // placed against — the face it reaches energy on (`isEnergyPresent`).
+        if let Some(block) = block_at(&*host, level, event.pos)
+            && let Some(Kind::EnderCell(_) | Kind::EnderGate(_)) = Kind::of(&block)
+        {
+            if matches!(Kind::of(&block), Some(Kind::EnderGate(_)))
+                && let Some(facing) = face_direction(event.face)
+            {
+                host.set_block_property(event.pos, "facing", facing_name(facing));
+            }
+            if let Some(placer) = event.placer
+                && let Some(entity) = host.block_entity(level, event.pos)
+            {
+                let key = ChannelKey::new(placer.uuid(), 0);
+                let mut patch = Compound::new();
+                patch.insert(KEY_OWNER.into(), Tag::IntArray(key.owner.to_vec()));
+                let _ = entity.merge_data(host, patch);
+            }
+        }
         let Some(asked) = asked_energy(payload_of(event.stack).as_ref()) else {
             return;
         };
@@ -2118,6 +2839,14 @@ pub(crate) fn on_level_tick_post(
                 push_out_on(host, level, pos, tier.transfer, &[Direction::Down]);
             }
             Kind::Orb => {}
+            // An ender cell gives on every face; an ender gate only on its `facing` one, exactly
+            // the face its capability answers on (`EnderGateTile.isEnergyPresent`).
+            Kind::EnderCell(tier) => push_out(host, level, pos, tier.transfer),
+            Kind::EnderGate(tier) => {
+                if let Some(facing) = facing_at(&*host, level, pos) {
+                    push_out_on(host, level, pos, tier.transfer, &[facing]);
+                }
+            }
             Kind::Cable(tier) => {
                 if planned.contains(&pos) {
                     continue;
@@ -2260,15 +2989,7 @@ fn drain_items(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3], tier: 
 /// this mod's machine items are charged by [`MachineEnergy::insert`] and a foreign battery answers
 /// for itself; a slot with no energy item (a stone) has no handler and is left alone.
 fn charge_container(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3], tier: HopperTier) {
-    let Some(state) = level.block_state(&*host, pos) else {
-        return;
-    };
-    let facing = state
-        .property(&host.block_states(), "facing")
-        .ok()
-        .flatten()
-        .and_then(facing_of);
-    let Some(facing) = facing else {
+    let Some(facing) = facing_at(&*host, level, pos) else {
         return;
     };
     let container = offset(pos, facing);
@@ -2513,8 +3234,8 @@ mod tests {
         declare_commands(&mut commands);
         assert_eq!(
             commands.len(),
-            3,
-            "every usage is declared: `info`, `set` and the item charge control"
+            4,
+            "every usage is declared: `info`, `set`, the item charge control and the channel control"
         );
         let usages: Vec<&str> = commands
             .iter()
@@ -2523,6 +3244,10 @@ mod tests {
         assert!(
             usages.contains(&"powah item <amount:integer> <pos:block_pos>"),
             "the item charge control is a usage of its own: {usages:?}"
+        );
+        assert!(
+            usages.contains(&"powah channel <channel:integer> <pos:block_pos>"),
+            "the channel control is the packet's replacement: {usages:?}"
         );
         for command in &commands {
             assert!(
@@ -2536,6 +3261,174 @@ mod tests {
                 command.usage
             );
         }
+    }
+
+    #[test]
+    fn every_ender_block_is_one_of_the_two_ladders() {
+        let cells = [
+            ("powah:ender_cell_starter", 1_000, 1),
+            ("powah:ender_cell_basic", 4_000, 2),
+            ("powah:ender_cell_hardened", 10_000, 3),
+            ("powah:ender_cell_blazing", 40_000, 5),
+            ("powah:ender_cell_niotic", 100_000, 7),
+            ("powah:ender_cell_spirited", 400_000, 9),
+            ("powah:ender_cell_nitro", 2_000_000, 12),
+        ];
+        for (index, (id, transfer, channels)) in cells.into_iter().enumerate() {
+            let tier = ender_cell_of(id).unwrap_or_else(|| panic!("{id} is an ender cell"));
+            assert_eq!(
+                (tier.transfer, tier.channels),
+                (transfer, channels),
+                "{id} is the cell ladder's tier {index}"
+            );
+            assert_eq!(Kind::of(id), Some(Kind::EnderCell(tier)));
+        }
+        for (id, transfer) in [
+            ("powah:ender_gate_starter", 500),
+            ("powah:ender_gate_basic", 2_000),
+            ("powah:ender_gate_hardened", 5_000),
+            ("powah:ender_gate_blazing", 20_000),
+            ("powah:ender_gate_niotic", 50_000),
+            ("powah:ender_gate_spirited", 200_000),
+            ("powah:ender_gate_nitro", 1_000_000),
+        ] {
+            let tier = ender_gate_of(id).unwrap_or_else(|| panic!("{id} is an ender gate"));
+            assert_eq!(tier.transfer, transfer, "{id} moves at the cable's row");
+            assert_eq!(Kind::of(id), Some(Kind::EnderGate(tier)));
+        }
+        assert_eq!(ender_cell_of("powah:ender_gate_starter"), None);
+        assert_eq!(ender_gate_of(CELL), None);
+    }
+
+    #[test]
+    fn the_ender_container_is_the_extender_slot_and_two_charge_slots() {
+        let container = ender_container();
+        assert_eq!(container.slots, 3, "`AbstractEnderTile`'s `inv.add(3)`");
+        assert_eq!(
+            item_slots("powah:ender_cell_starter"),
+            2,
+            "`chargeItems(1, 3)` charges the two slots after the extender"
+        );
+        assert_eq!(
+            item_slots("powah:ender_gate_nitro"),
+            2,
+            "a gate charges the same two slots"
+        );
+        assert_eq!(
+            keep_capacity("powah:ender_cell_starter"),
+            None,
+            "`keepEnergy()` is false: the FE is the owner's channel, and the item carries nothing"
+        );
+        assert_eq!(keep_capacity("powah:ender_gate_nitro"), None);
+        assert_eq!(
+            item_buffer("powah:ender_cell_starter"),
+            None,
+            "an ender item is no energy item of its own"
+        );
+        assert_eq!(
+            battery_of("powah:ender_cell_starter"),
+            None,
+            "the channel answers the capability; the block declares no buffer of its own"
+        );
+    }
+
+    #[test]
+    fn the_ender_readouts_name_the_channel_the_tier_and_a_gates_face() {
+        let tier = ender_cell_tier(0).expect("the starter cell");
+        let gate = ender_gate_tier(0).expect("the starter gate");
+        let channel = Channel {
+            stored: 100_000,
+            capacity: 4_000_000,
+        };
+        let cell = ender_line(
+            Kind::EnderCell(tier),
+            [1, 2, 3],
+            channel,
+            0,
+            None,
+            &[None, None],
+            42,
+        );
+        assert_eq!(
+            cell,
+            "Ender Cell at 1,2,3: 100000/4000000 FE (comparator 0, channel 0/1, 1000 FE/t a side, \
+             charge empty, empty, t=42)"
+        );
+        let gate_line = ender_line(
+            Kind::EnderGate(gate),
+            [1, 2, 3],
+            channel,
+            1,
+            Some(Direction::North),
+            &[None, None],
+            42,
+        );
+        assert_eq!(
+            gate_line,
+            "Ender Gate at 1,2,3: 100000/4000000 FE (comparator 0, channel 1/1, facing north, 500 \
+             FE/t a side, charge empty, empty, t=42)"
+        );
+    }
+
+    #[test]
+    fn a_channel_store_survives_its_codec() {
+        let mut store = ChannelStore::default();
+        let cell = ChannelKey::new(0x1234_5678_9abc_def0_1122_3344_5566_7788, 3);
+        let gate = ChannelKey::new(0x1234_5678_9abc_def0_1122_3344_5566_7788, 11);
+        store.set(
+            cell,
+            Channel {
+                stored: 12_345,
+                capacity: 4_000_000,
+            },
+        );
+        store.set(gate, Channel::default());
+        assert_eq!(
+            store.get(&gate),
+            Channel::default(),
+            "a channel that holds nothing is an empty channel"
+        );
+        let encoded = encode_channels(&store).expect("the store encodes");
+        let decoded = decode_channels(&encoded).expect("the store decodes");
+        assert_eq!(
+            decoded.get(&cell),
+            Channel {
+                stored: 12_345,
+                capacity: 4_000_000
+            },
+            "a channel's FE survives the save, which is what a relaunch reads"
+        );
+        assert_eq!(
+            decoded.get(&gate),
+            Channel::default(),
+            "the emptied entry is not in the save at all"
+        );
+    }
+
+    #[test]
+    fn an_ender_blocks_saved_channel_and_owner_are_its_key() {
+        // A fresh block entity has neither key: channel 0 of the all-zero owner.
+        assert_eq!(
+            channel_key(&Tag::Compound(Compound::new())),
+            ChannelKey {
+                owner: [0; 4],
+                channel: 0
+            }
+        );
+        let uuid = 0xdead_beef_0000_1111_2222_3333_4444_5555;
+        let mut saved = Compound::new();
+        saved.insert(KEY_CHANNEL.into(), Tag::Int(5));
+        saved.insert(
+            KEY_OWNER.into(),
+            Tag::IntArray(ChannelKey::new(uuid, 5).owner.to_vec()),
+        );
+        let key = channel_key(&Tag::Compound(saved));
+        assert_eq!(key.channel, 5);
+        assert_eq!(key.owner_uuid(), uuid, "the four ints are the owner's UUID");
+        // A doctored index is clamped to upstream's twelve channels.
+        let mut doctored = Compound::new();
+        doctored.insert(KEY_CHANNEL.into(), Tag::Int(99));
+        assert_eq!(channel_key(&Tag::Compound(doctored)).channel, 11);
     }
 
     #[test]

@@ -1,5 +1,31 @@
-# Validation — Powah slices 1 to 10
+# Validation — Powah slices 1 to 11
 
+> **0.2.11 (slice 11, the Ender Cell and Ender Gate)** is recorded in
+> [`notes.md`](notes.md#slice-11--the-ender-cell-and-the-ender-gate-2026-11-23): the slice and the
+> gap lines it comes from (`FINDINGS.md`'s "Ender Cells/Gates" and slice 10's "Still open"), the
+> upstream facts it is built on (`devices.ender_cells`/`ender_gates` = `EnderConfig` over
+> `batteryTransfer()`/`cableTransfer()` and `TieredChannelValues` = 1/2/3/5/7/9/12, capacity **0**
+> until an extender, the shared per-owner `EnderNetwork` `SavedData`, `keepEnergy()` **false**, the
+> cell's extender slot, the gate's `isEnergyPresent(facing)` and `chargeItems(1, 3)`), the red proof
+> (seven `todo!()` rules, 73 passed / 6 failed, quoted verbatim), the ladder at pin `0a875da`
+> (84 tests, clippy 0 warnings, `fmt --check` clean, two `cmp`-identical builds of **482,716 B**,
+> `check`, `fits` against the pin **and** against `0b14f8a`, gate 1/1 with **770 entries**, dialect
+> 239/239) and the in-game legs (main `PASS`+`EXIT:0`; `SELFTEST=1` and `SELFTEST=ender` at
+> `EXIT:1`; the control game knows none of the ender ids; the log gate). Package: `powah.hmod`,
+> 482,716 B, sha256 `49ba3462341a8460bd020a5e5816113a974be3fee78555d226eab4923b71612f` (the in-game legs ran the 482,574 B archive of the same
+> sources, whose only difference is `README.md`). Launcher
+> build: `Compiling powah (1 of 1)`, `native-0a875da-32e311705549`, instance `powah-e2e`. What it
+> proves: two ender cells on one channel hold and show the same 100,000/4,000,000 FE with their own
+> tiers' transfer (4,000 and 1,000 a side) printed beside it; a cell moved to channel 1 reads 0/0
+> while its peer keeps exactly 100,000, and moving it back finds the channel's FE again (the store is
+> the world's, not the block's); an energy cell item in the extender slot gives the channel
+> 4,000,000 FE of capacity; the charge slot takes 1,000 a tick (the item's own limit) while the
+> channel loses exactly the same; the channel gives its tier's 4,000 a tick and loses exactly what
+> the sink gains; a starter ender gate feeds only the hopper on its `facing` side, at the cable
+> row's 500 a tick, and the one behind it stays 0; the nitro cell and gate name 12 channels and
+> their 2,000,000/1,000,000 FE a tick; the orb makes the ender core at 50,000 FE; both ender tags
+> match in game; all fourteen tiers drop themselves; and every guessed id is unknown without the
+> package.
 > **0.2.10 (slice 10, the Solar Panel)** is recorded in
 > [`notes.md`](notes.md#slice-10--the-solar-panel-ladder-2026-11-23): the slice and the gap lines it
 > comes from (`FINDINGS.md`'s "Magmator/Thermo/Solar/Reactors" and slice 9's own "the generators need

@@ -1,0 +1,18 @@
+{
+  "category": "misc",
+  "key": {
+    "c": "powah:ender_core",
+    "i": "powah:crystal_spirited",
+    "o": "minecraft:obsidian"
+  },
+  "pattern": [
+    "oio",
+    "ici",
+    "oio"
+  ],
+  "result": {
+    "count": 1,
+    "id": "powah:ender_cell_spirited"
+  },
+  "type": "minecraft:crafting_shaped"
+}

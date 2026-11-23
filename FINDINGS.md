@@ -222,10 +222,10 @@ beyond the content tag; comparator output; worldgen (uraninite, dry ice).
 **Closed since (each in its own section of `notes.md`):** the other six tiers of the furnator, cell
 and cable, and the discharger and hopper ladders (slices 4, 6, 8, 9); the Energizing Orb and its
 rods (slice 5); item charging and the `keepEnergy` payload (slice 7); the cable network (slice 3);
-the **Solar** panel ladder (slice 10). **Still open:** the creative cell, the Magmator and Thermo
-Generator (a mod block entity fluid tank the pin cannot fill), the reactors
-(`blocked(uraninite-worldgen)`), the ender cells/gates, the player transmitter, side config,
-redstone modes, the GUIs, particles, worldgen.
+the **Solar** panel ladder (slice 10); the **Ender Cell and Ender Gate** channel family (slice 11).
+**Still open:** the creative cell, the Magmator and Thermo Generator (a mod block entity fluid tank
+the pin cannot fill), the reactors (`blocked(uraninite-worldgen)`), the player transmitter, side
+config, redstone modes, the GUIs, particles, worldgen.
 
 ## Slice 10 — the Solar Panel, read 2026-11-23
 
@@ -256,6 +256,44 @@ Same clone, tag `v6.2.10` (commit `a5a8f25`). Files read:
   four horizontal booleans whose `true` means "no panel of the same tier attached" (the frame).
 - The Lens of Ender is the sky bypass; it is not crafted (a config-gated right-click on an
   enderman with a photoelectric pane) and lives in the panel's GUI upgrade slot.
+
+## Slice 11 — the Ender Cell and the Ender Gate, read 2026-11-23
+
+Same clone, tag `v6.2.10` (commit `a5a8f25`). Files read:
+
+| Area | Files |
+|---|---|
+| the blocks | `block/ender/AbstractEnderTile.java`, `EnderCellTile.java`, `EnderCellBlock.java`, `EnderGateTile.java`, `EnderGateBlock.java` |
+| the network | `block/ender/EnderNetwork.java` (the shared `Energy` per owner and channel, a `SavedData`), `util/math/RangedInt.java` |
+| the config | `config/v2/types/EnderConfig.java` (capacity 0, transfer row), `config/v2/values/TieredChannelValues.java` (1/2/3/5/7/9/12), `PowahConfig.EnergyDevices.ender_cells`/`ender_gates` |
+| the extender | `api/energy/endernetwork/IEnderExtender.java`, `item/EnergyCellItem.java`, `item/BatteryItem.java` |
+| the core | `lib/block/AbstractEnergyStorage.java` (`chargeItems`, `extractFromSides`, `keepEnergy`), `lib/block/AbstractEnergyBlock.java`, `util/ChargeUtil.java` |
+| the channel packet | `network/packet/SetChannelPacket.java` |
+| the content | the jar's `assets/powah/{blockstates,models,textures}/…ender…`, `data/powah/recipe/crafting/ender_*`, `data/powah/recipe/energizing/ender_core.json`, the guide book's `storage_transfer/ender_{cell,gate}.md` |
+| blocks | `block/Blcks.java` (`ENDER_CELL`/`ENDER_GATE`), `block/Tiles.java` |
+
+**Behaviour extracted.**
+
+- `EnderConfig(transfer_rates, channels)`: `getCapacity` is **0** and `getTransfer` is the row's —
+  a cell takes `batteryTransfer()` (`baseScaling * 1,000`), a gate `cableTransfer()`
+  (`baseScaling * 500`), so a cell moves exactly twice what a gate of the same tier does.
+- The buffer is one shared `Energy` per (owner UUID, channel) in `EnderNetwork`, a `SavedData`
+  named `powah_network` on the overworld: `AbstractEnderTile.getEnergy()` returns that object with
+  the tier's transfer set on it, so **every block on a channel is the same storage** — a fill into
+  one is a fill into all, and breaking one loses nothing.
+- `keepEnergy()` is false (no override anywhere in the cell/gate path): nothing is written to the
+  block item, because there is nothing in the tile to write — the FE is the network's.
+- A **cell** (`isExtender()` true) takes an `IEnderExtender` in slot 0: an energy cell item's
+  capacity joins the channel and the item's own charge joins its stored value (`onSlotChanged`),
+  and the item is consumed. A **gate** (`isExtender()` false) refuses slot 0, so it cannot grow the
+  network — the guide says exactly that.
+- A gate's `isEnergyPresent(side)` is **its `facing` side only**: it answers, pushes and survives
+  against the block on that one face, and `getExternalStorage` returns null on the other five.
+- Both run `postTick` = `chargeItems(1, 3)` (slots 1 and 2) then `extractFromSides`; the channel
+  index is saved in a `RangedInt(12)` and set by `SetChannelPacket`, and `getMaxChannels()` is the
+  tier's count, which only gates the GUI's buttons.
+- Blocks: seven normal tiers of `Properties.metalNoSolid(2.0, 20.0)`; the gate adds
+  `noCollission()`, `Facing.ALL` and a 4x4x0.5-pixel plate shape per face.
 
 ## Slice 7 — the item-energy family (`keepEnergy`, `chargeItems`), read 2026-11-22
 

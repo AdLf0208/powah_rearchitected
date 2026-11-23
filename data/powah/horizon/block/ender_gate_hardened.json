@@ -1,0 +1,98 @@
+{
+  "template": "minecraft:iron_block",
+  "properties": {
+    "hardness": 2.0,
+    "explosion_resistance": 20.0,
+    "sounds": "minecraft:iron_block",
+    "requires_tool": true,
+    "occludes": false
+  },
+  "state_properties": {
+    "facing": {
+      "type": "enum",
+      "values": [
+        "down",
+        "up",
+        "north",
+        "south",
+        "west",
+        "east"
+      ]
+    }
+  },
+  "default_state": {
+    "facing": "north"
+  },
+  "shapes": {
+    "property": "facing",
+    "values": {
+      "down": [
+        [
+          0.375,
+          0.0,
+          0.375,
+          0.625,
+          0.03125,
+          0.625
+        ]
+      ],
+      "up": [
+        [
+          0.375,
+          0.96875,
+          0.375,
+          0.625,
+          1.0,
+          0.625
+        ]
+      ],
+      "north": [
+        [
+          0.375,
+          0.375,
+          0.0,
+          0.625,
+          0.625,
+          0.03125
+        ]
+      ],
+      "south": [
+        [
+          0.375,
+          0.375,
+          0.96875,
+          0.625,
+          0.625,
+          1.0
+        ]
+      ],
+      "west": [
+        [
+          0.0,
+          0.375,
+          0.375,
+          0.03125,
+          0.625,
+          0.625
+        ]
+      ],
+      "east": [
+        [
+          0.96875,
+          0.375,
+          0.375,
+          1.0,
+          0.625,
+          0.625
+        ]
+      ]
+    }
+  },
+  "collision_shapes": {
+    "default": []
+  },
+  "item": true,
+  "components": {
+    "minecraft:max_stack_size": 1
+  }
+}

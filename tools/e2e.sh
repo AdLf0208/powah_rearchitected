@@ -174,6 +174,25 @@
 #  - each tier drops itself when mined in survival.
 # SELFTEST=cells expects the basic cell to clamp at the starter's 1,000,000
 # (it must FAIL there), proving the capacity assertion can fail.
+#
+# Slice 11 (the ender channel family) adds:
+#  - two ender cells on channel 0 (a basic one extended with a 4,000,000 FE energy
+#    cell item in slot 0) hold and show the same 100,000 FE, each naming its own
+#    tier's transfer and channel count; a third cell on channel 1 reads 0;
+#  - moving the extended cell to channel 1 leaves the peer's channel at exactly
+#    100,000 and shows 0/0 on the fresh channel, and moving it back finds the
+#    channel's FE again (the channel, not the block, holds it);
+#  - a cell's charge slot takes exactly 1,000 a tick out of the channel (the
+#    item's own per-call limit, not the cell's 4,000) and the channel loses
+#    exactly what the item took;
+#  - a cell gives 4,000 a tick to the hopper beside it and the shared channel
+#    loses exactly what the hopper gains; a starter ender gate feeds only the
+#    hopper on its `facing` side, at the cable row's 500 a tick;
+#  - the nitro cell and gate name 12 channels and their 2,000,000/1,000,000 FE
+#    a tick, `#powah:ender_cells`/`#powah:ender_gates` match in game, every tier
+#    drops itself, and every guessed ender id is unknown without the package.
+# SELFTEST=ender expects the peer to read 0 FE after the shared cell moved
+# channel (it must FAIL), proving the shared-channel assertion can fail.
 set -euo pipefail
 export LC_ALL=C
 
@@ -456,6 +475,23 @@ expect_info() { # expect_info X Y Z SUBSTRING
     esac
 }
 
+# channel_reply X Y Z CHANNEL SUBSTRING: `/powah channel`, asserting the command's own reply — the
+# control that replaces upstream's GUI buttons (`SetChannelPacket`).
+channel_reply() { # channel_reply X Y Z CHANNEL SUBSTRING
+    local out line=""
+    say "powah channel $4 $1 $2 $3"
+    for _ in $(seq 1 30); do
+        ctl wait 10
+        out=$(ctl messages 20)
+        line=$(jq -r '.chat[]' <<<"$out" |
+            grep -E "Channel set to|No ender cell or gate" | head -1)
+        case "$line" in
+            *"$5"*) echo "  channel($1,$2,$3) reply: $line"; return 0 ;;
+        esac
+    done
+    fail "expected /powah channel $4 at $1,$2,$3 to answer '$5', got '$line'"
+}
+
 # set_reply X Y Z AMOUNT SUBSTRING: `/powah set`, asserting the command's own
 # reply. Used where the target feeds something and an equality poll on its buffer
 # can never settle (a rod beside an orb with a recipe drains the same tick).
@@ -728,6 +764,25 @@ control_leg() {
     case "$pane" in
         *"Unknown item"*|*"unknown item"*|*"error"*|*"not found"*) ;;
         *) fail "the control game knew powah:photoelectric_pane, so the content did not come from this package" ;;
+    esac
+    # Slice 11: the ender cell, the ender gate and the core they are built from are this package's.
+    ender_cell=$(ctl command "setblock 9 100 0 powah:ender_cell_starter")
+    echo "  ender cell setblock reply: $ender_cell"
+    case "$ender_cell" in
+        *"Unknown block"*|*"unknown block"*|*"error"*) ;;
+        *) fail "the control game knew powah:ender_cell_starter, so the content did not come from this package" ;;
+    esac
+    ender_gate=$(ctl command "setblock 10 100 0 powah:ender_gate_nitro")
+    echo "  ender gate setblock reply: $ender_gate"
+    case "$ender_gate" in
+        *"Unknown block"*|*"unknown block"*|*"error"*) ;;
+        *) fail "the control game knew powah:ender_gate_nitro, so the content did not come from this package" ;;
+    esac
+    ender_core=$(ctl command "give @s powah:ender_core 1")
+    echo "  ender core give reply: $ender_core"
+    case "$ender_core" in
+        *"Unknown item"*|*"unknown item"*|*"error"*|*"not found"*) ;;
+        *) fail "the control game knew powah:ender_core, so the content did not come from this package" ;;
     esac
     name=$(ctl block 4 100 0 | jq -r '.name // .block // "unknown"')
     [ "$name" = "minecraft:air" ] || fail "the control game holds $name, so the block id was known"
@@ -1704,12 +1759,19 @@ echo "  item at ${rate_energy:-none}, hopper at $rate_left of the 100,000 it hel
     fail "the item holds $rate_energy FE, not a whole number of 500 FE steps"
 [ $((rate_energy > 500)) = 1 ] ||
     fail "a 100,000 FE buffer at 500 a tick must have charged the item far past $rate_energy FE"
-# The two reads are a tick or two apart, so the sum is the whole within one step either way:
-# an item that never took the FE, or a hopper that spent it elsewhere, is thousands short.
+# The item's charge and the hopper's balance are read a round trip apart, so the whole cannot be
+# asserted at one instant: the window between the two readouts (the `t=` of `rate_second` and of
+# `rate_stopped`) is what may have moved in between, and that is the tolerance — 500 FE a tick of
+# it. An item that never took the FE, or a hopper that spent it elsewhere, is thousands short of
+# any such window (measured 2026-11-23: 5 ticks of latency on a full box against the old fixed
+# 1,500, i.e. 2,500 unaccounted; the window that run was 7 ticks).
+window_span=$(( $(time_of "$rate_stopped") - t2 ))
+[ "$window_span" -ge 0 ] || window_span=0
+window=$((500 * window_span))
 unaccounted=$((100000 - rate_energy - rate_left))
-echo "  unaccounted: $unaccounted FE (item + hopper against the 100,000)"
-[ "$unaccounted" -ge -1500 ] && [ "$unaccounted" -le 1500 ] ||
-    fail "the item's $rate_energy FE and the hopper's $rate_left FE do not add up to the 100,000 it held (off by $unaccounted): $rate_stopped"
+echo "  unaccounted: $unaccounted FE (item + hopper against the 100,000, within 500 x a $window_span-tick window = $window)"
+[ "$unaccounted" -ge $((-window)) ] && [ "$unaccounted" -le "$window" ] ||
+    fail "the item's $rate_energy FE and the hopper's $rate_left FE do not add up to the 100,000 it held (off by $unaccounted, beyond the $window FE that could have moved in $window_span ticks): $rate_stopped"
 
 echo "== slice 9: a hopper facing away leaves the container alone =="
 # The counterfactual for the charging above: the same hopper, the same chest, the same 5,000 — with
@@ -1927,6 +1989,253 @@ case "$solar_tag_miss" in
     *) fail "the arena floor matched powah:solar_panels: $solar_tag_miss" ;;
 esac
 
+echo "== slice 11: an ender cell's channel is one shared store per owner =="
+# Upstream's `EnderNetwork` holds one shared `Energy` per (owner, channel) — a `SavedData`, not the
+# block's — and `AbstractEnderTile.getEnergy()` hands every block on that channel the same object, so
+# two cells on a channel hold, give and show the same FE. A fresh channel's capacity is 0
+# (`EnderConfig.getCapacity`), and a **cell** grows it by taking an energy cell item into slot 0
+# (`onSlotChanged`/`IEnderExtender`). The starter tier offers one channel and 1,000 FE a call, the
+# basic two and 4,000, the nitro twelve and 2,000,000 (`TieredChannelValues`, `batteryTransfer`).
+place 30 100 30 powah:ender_cell_basic
+place 30 100 34 powah:ender_cell_starter
+place 30 100 38 powah:ender_cell_basic
+# Slot 0 is the extender: a 4,000,000 FE basic energy cell item gives the channel its capacity.
+ctl command "item replace block 30 100 30 container.0 with powah:energy_cell_basic 1" >/dev/null
+ctl wait 10
+extended=$(info 30 100 30)
+echo "  extended: $extended"
+case "$extended" in
+    *"/4000000 FE (comparator 0, channel 0/2, 4000 FE/t a side"*) ;;
+    *) fail "an ender cell holding a basic energy cell item must give its channel that cell's 4,000,000 FE capacity, got '$extended'" ;;
+esac
+set_energy 30 100 30 100000
+shared_a=$(info 30 100 30)
+shared_b=$(info 30 100 34)
+echo "  channel 0 (basic):   $shared_a"
+echo "  channel 0 (starter): $shared_b"
+case "$shared_a" in
+    *"Ender Cell at 30,100,30: 100000/4000000 FE (comparator 0, channel 0/2, 4000 FE/t a side"*) ;;
+    *) fail "the extended basic ender cell must read 100000/4000000 FE on channel 0 of 2, got '$shared_a'" ;;
+esac
+case "$shared_b" in
+    *"Ender Cell at 30,100,34: 100000/4000000 FE (comparator 0, channel 0/1, 1000 FE/t a side"*) ;;
+    *) fail "a starter ender cell on the same channel must show the channel's 100000/4000000 FE at its own 1,000 FE/t, got '$shared_b'" ;;
+esac
+
+echo "== slice 11: a cell moved to another channel leaves its peer's FE behind =="
+# The control: the FE belongs to the channel, not the block. Moving the extended cell to channel 1
+# (a basic tier offers 0 and 1) leaves it looking at a fresh, empty channel — 0/0 — while its peer
+# on channel 0 keeps exactly the 100,000 it had.
+say "powah channel 1 30 100 30"
+ctl wait 10
+moved=$(info 30 100 30)
+peer=$(info 30 100 34)
+echo "  moved to channel 1: $moved"
+echo "  peer on channel 0:  $peer"
+case "$moved" in
+    *"Ender Cell at 30,100,30: 0/0 FE (comparator 0, channel 1/2, 4000 FE/t a side"*) ;;
+    *) fail "a cell moved to a fresh channel must read 0/0 FE on channel 1/2, got '$moved'" ;;
+esac
+if [ "$SELFTEST" = ender ]; then
+    echo "  SELFTEST: expecting the peer to read 0 (this must fail)"
+    [ "$(energy_of "$peer")" = 0 ] ||
+        fail "SELFTEST flipped: the peer still reads $(energy_of "$peer") FE after the shared cell moved channel"
+fi
+[ "$(energy_of "$peer")" = 100000 ] ||
+    fail "moving one cell to another channel must leave its peer's channel at exactly 100000 FE, got '$peer'"
+# And back: the channel kept the FE while no extended cell was on it.
+say "powah channel 0 30 100 30"
+ctl wait 10
+returned=$(info 30 100 30)
+echo "  back on channel 0:  $returned"
+[ "$(energy_of "$returned")" = 100000 ] ||
+    fail "a channel keeps its FE while no extended cell is on it: expected 100000, got '$returned'"
+# A starter cell offers one channel only, which is upstream's GUI count (`getMaxChannels`).
+channel_reply 30 100 34 5 "Channel set to 0 of 0..=0."
+
+echo "== slice 11: an ender cell charges its two charge slots out of the channel =="
+# `AbstractEnderTile.postTick` runs `chargeItems(1, 3)`: slots 1 and 2, the tier's transfer a slot,
+# one budget (the channel) and the item's own per-call limit on top. A starter energy cell item
+# takes 1,000 a tick even in a basic ender cell, whose own limit is 4,000.
+ctl command "item replace block 30 100 30 container.1 with powah:energy_cell_starter 1" >/dev/null
+set_floor 30 100 30 100000 90000
+charge_first=$(info 30 100 30)
+ctl wait 6
+charge_second=$(info 30 100 30)
+echo "  charge: $charge_first"
+echo "  charge: $charge_second"
+ct1=$(time_of "$charge_first")
+ct2=$(time_of "$charge_second")
+cb1=$(charge_energy_of "$charge_first")
+cb2=$(charge_energy_of "$charge_second")
+cdt=$((ct2 - ct1))
+cgained=$((cb2 - cb1))
+clost=$(($(energy_of "$charge_first") - $(energy_of "$charge_second")))
+echo "  dt=$cdt ticks, charge item +$cgained FE, channel -$clost FE"
+[ "$cdt" -ge 2 ] || fail "the two charge readouts were $cdt ticks apart, too close to measure"
+[ "$cgained" -gt 0 ] || fail "the item in the ender cell's charge slot took nothing"
+[ "$cgained" = "$clost" ] ||
+    fail "the channel lost $clost FE while the item took $cgained: the two must match exactly"
+[ $((cgained % 1000)) = 0 ] ||
+    fail "the item took $cgained FE over $cdt ticks, not a whole number of 1,000 FE steps"
+csteps=$((cgained / 1000))
+[ "$csteps" -ge $((cdt - 1)) ] && [ "$csteps" -le $((cdt + 1)) ] ||
+    fail "the item took $cgained FE over $cdt ticks; at its own 1,000 a tick that is not one step a tick"
+ctl command "item replace block 30 100 30 container.1 with minecraft:air" >/dev/null
+ctl wait 4
+
+echo "== slice 11: a channel gives its tier's transfer a tick to every face =="
+# The cell answers all six faces and pushes out at its tier's rate (`batteryTransfer`, 4,000 at
+# basic) out of the shared channel — so the receiver's gain and the channel's loss are the same FE.
+# The sink is a **basic** hopper: its own `max_insert` is 4,000, so the basic ender cell's 4,000 a
+# tick is what moves (a starter hopper's 1,000 insert limit would cap it first, which is the two
+# caps the engine applies — measured at 1,000 on that sink).
+place 31 100 30 powah:energy_hopper_basic
+# A 1,000,000 FE channel: at 4,000 a tick that is 250 ticks of headroom, and the hopper's own
+# 4,000,000 FE buffer has room for what it takes while two round trips are measured.
+set_floor 30 100 30 1000000 900000
+rate_first=$(info 31 100 30)
+chan_first=$(info 30 100 30)
+ctl wait 6
+rate_second=$(info 31 100 30)
+chan_second=$(info 30 100 30)
+echo "  sink:  $rate_first"
+echo "  sink:  $rate_second"
+echo "  cell:  $chan_first"
+echo "  cell:  $chan_second"
+# Each end is measured against its own `t=` clock: the two readouts of one block are a round trip
+# apart, so the sink's interval and the channel's are compared as rates, not as raw sums.
+rt1=$(time_of "$rate_first")
+rt2=$(time_of "$rate_second")
+rdt=$((rt2 - rt1))
+ct1=$(time_of "$chan_first")
+ct2=$(time_of "$chan_second")
+cdt=$((ct2 - ct1))
+rgained=$(($(energy_of "$rate_second") - $(energy_of "$rate_first")))
+rlost=$(($(energy_of "$chan_first") - $(energy_of "$chan_second")))
+echo "  sink dt=$rdt ticks (+$rgained FE), channel dt=$cdt ticks (-$rlost FE)"
+[ "$rdt" -ge 2 ] && [ "$cdt" -ge 2 ] ||
+    fail "the rate readouts were $rdt/$cdt ticks apart, too close to measure"
+[ "$rgained" -gt 0 ] || fail "a cell on a funded channel pushed nothing into the hopper beside it"
+[ $((rgained % 4000)) = 0 ] ||
+    fail "the sink gained $rgained FE over $rdt ticks, not a whole number of 4,000 FE steps"
+[ $((rlost % 4000)) = 0 ] ||
+    fail "the shared channel lost $rlost FE over $cdt ticks, not a whole number of 4,000 FE steps"
+rsteps=$((rgained / 4000))
+csteps=$((rlost / 4000))
+[ "$rsteps" -ge $((rdt - 1)) ] && [ "$rsteps" -le $((rdt + 1)) ] ||
+    fail "the sink gained $rgained FE over $rdt ticks; at the basic tier's 4,000 a tick that is not one step a tick"
+[ "$csteps" -ge $((cdt - 1)) ] && [ "$csteps" -le $((cdt + 1)) ] ||
+    fail "the shared channel lost $rlost FE over $cdt ticks; at the basic tier's 4,000 a tick that is not one step a tick"
+# The two ends are read over overlapping but not identical windows, so their step counts differ by
+# at most the difference in the two windows (plus one step of boundary): the same FE moved.
+step_gap=$((rsteps - csteps))
+[ "$step_gap" -ge 0 ] || step_gap=$((-step_gap))
+window_gap=$((rdt - cdt))
+[ "$window_gap" -ge 0 ] || window_gap=$((-window_gap))
+[ "$step_gap" -le $((window_gap + 1)) ] ||
+    fail "the sink gained $rgained FE over $rdt ticks while the shared channel lost $rlost over $cdt: one store, so the same FE a tick"
+ctl command "setblock 31 100 30 minecraft:air" >/dev/null
+ctl wait 4
+
+echo "== slice 11: an ender gate reaches one face only, and moves at the cable's rate =="
+# `EnderGateTile.isEnergyPresent(side)` is the block's `facing` side: the gate answers and pushes
+# only there, and its row is `cableTransfer` (500 at starter). The gate is placed facing north (the
+# block's default), so the hopper north of it is fed and the one south of it is not.
+place 24 100 30 powah:ender_gate_starter
+place 24 100 29 powah:energy_hopper_starter
+place 24 100 31 powah:energy_hopper_starter
+set_floor 30 100 30 100000 90000
+ctl wait 20
+gate=$(info 24 100 30)
+gate_front=$(info 24 100 29)
+gate_back=$(info 24 100 31)
+echo "  gate:        $gate"
+echo "  facing side: $gate_front"
+echo "  back side:   $gate_back"
+case "$gate" in
+    *"Ender Gate at 24,100,30: "*"/4000000 FE (comparator "*", channel 0/1, facing north, 500 FE/t a side"*) ;;
+    *) fail "a starter ender gate must name channel 0/1, facing north and 500 FE/t a side, got '$gate'" ;;
+esac
+[ "$(energy_of "$gate_front")" -gt 0 ] ||
+    fail "the hopper on the gate's facing side took no FE: $gate_front"
+[ "$(energy_of "$gate_back")" = 0 ] ||
+    fail "the hopper behind the gate took FE, though `isEnergyPresent` is its facing side only: $gate_back"
+# The gate's own rate, against the game clock: 500 FE a tick at starter.
+gate_rate_a=$(info 24 100 29)
+ctl wait 6
+gate_rate_b=$(info 24 100 29)
+gt1=$(time_of "$gate_rate_a")
+gt2=$(time_of "$gate_rate_b")
+gdt=$((gt2 - gt1))
+ggained=$(($(energy_of "$gate_rate_b") - $(energy_of "$gate_rate_a")))
+echo "  dt=$gdt ticks, gate's sink +$ggained FE"
+[ "$gdt" -ge 2 ] || fail "the two gate rate readouts were $gdt ticks apart, too close to measure"
+[ $((ggained % 500)) = 0 ] ||
+    fail "the gate's sink gained $ggained FE over $gdt ticks, not a whole number of 500 FE steps"
+gsteps=$((ggained / 500))
+[ "$gsteps" -ge $((gdt - 1)) ] && [ "$gsteps" -le $((gdt + 1)) ] ||
+    fail "the gate's sink gained $ggained FE over $gdt ticks; at the cable row's 500 a tick that is not one step a tick"
+
+echo "== slice 11: the orb makes the ender core both ladders are built from =="
+# `data/powah/recipe/energizing/ender_core.json`: an ender eye, a dielectric casing and a tiny
+# capacitor for 50,000 FE. The orb's buffer is the matched recipe's own energy, so `/powah set`
+# fills it exactly and the next tick produces the core.
+place 0 100 36 powah:energizing_orb
+orb_clear 0 100 36
+orb_put 0 100 36 1 minecraft:ender_eye 1
+orb_put 0 100 36 2 powah:dielectric_casing 1
+orb_put 0 100 36 3 powah:capacitor_basic_tiny 1
+expect_info 0 100 36 "0/50000 FE (recipe powah:ender_core x1, inputs 3"
+set_reply 0 100 36 50000 "Energy set to 50000 FE."
+core=$(orb_wait 0 100 36 powah:ender_core 1) ||
+    fail "the orb did not energize an ender eye, a casing and a tiny capacitor into an ender core: $core / $(info 0 100 36)"
+echo "  output(0,100,36) = $core"
+
+echo "== slice 11: the ender ladders, their channels, their tiers and their tags =="
+place 14 100 10 powah:ender_cell_nitro
+# The nitro tier offers twelve channels (`TieredChannelValues`), so it moves to channel 1 — a fresh
+# channel with no gate draining it — and its nitro energy cell item gives that channel 2,000,000,000.
+channel_reply 14 100 10 1 "Channel set to 1 of 0..=11."
+ctl command "item replace block 14 100 10 container.0 with powah:energy_cell_nitro 1" >/dev/null
+ctl wait 10
+set_clamped 14 100 10 2000000000 2000000000
+expect_info 14 100 10 "2000000000/2000000000 FE"
+expect_info 14 100 10 "channel 1/12, 2000000 FE/t a side"
+place 14 100 14 powah:ender_gate_nitro
+ctl wait 4
+expect_info 14 100 14 "channel 0/12, facing north, 1000000 FE/t a side"
+no_channel=$(ctl command "powah channel 0 0 99 3")
+echo "  channel on the arena floor: $no_channel"
+case "$no_channel" in
+    *"No ender cell or gate there"*) ;;
+    *) fail "a channel control on a block that is not an ender cell or gate must be refused, got '$no_channel'" ;;
+esac
+cell_tag=$(ctl command "execute if block 30 100 30 #powah:ender_cells")
+cell_tag_miss=$(ctl command "execute if block 30 100 30 #powah:ender_gates")
+gate_tag=$(ctl command "execute if block 24 100 30 #powah:ender_gates")
+floor_tag=$(ctl command "execute if block 0 99 3 #powah:ender_cells")
+echo "  tag(30,100,30) #ender_cells = $cell_tag"
+echo "  tag(30,100,30) #ender_gates = $cell_tag_miss"
+echo "  tag(24,100,30) #ender_gates = $gate_tag"
+echo "  tag(0,99,3)    #ender_cells = $floor_tag"
+case "$cell_tag" in
+    *"passed"*) ;;
+    *) fail "an ender cell is not in powah:ender_cells: $cell_tag" ;;
+esac
+case "$cell_tag_miss" in
+    *"failed"*) ;;
+    *) fail "an ender cell matched powah:ender_gates: $cell_tag_miss" ;;
+esac
+case "$gate_tag" in
+    *"passed"*) ;;
+    *) fail "an ender gate is not in powah:ender_gates: $gate_tag" ;;
+esac
+case "$floor_tag" in
+    *"failed"*) ;;
+    *) fail "the arena floor matched powah:ender_cells: $floor_tag" ;;
+esac
+
 echo "== slice 2: the six dielectric/capacitor items are real items =="
 for item in powah:dielectric_paste powah:dielectric_rod powah:dielectric_rod_horizontal \
             powah:dielectric_casing powah:capacitor_basic powah:capacitor_basic_tiny \
@@ -2059,8 +2368,21 @@ for tier in starter basic hardened blazing niotic spirited nitro; do
     got=$(echo "$broken" | jq -r --arg id "$block" '.drops[$id] // 0')
     [ "$got" -ge 1 ] || fail "breaking $block dropped $got of itself, not the block"
 done
+# Slice 11: every ender cell and ender gate tier drops itself.
+for family in ender_cell ender_gate; do
+    for tier in starter basic hardened blazing niotic spirited nitro; do
+        block="powah:${family}_$tier"
+        place 6 100 0 "$block"
+        ctl look-at-block 6 100 0 >/dev/null || true
+        broken=$(ctl break 6 100 0) || fail "cannot break $block at 6,100,0"
+        echo "$broken" | jq -c '{scenario:"loot", block, drops}'
+        [ "$(echo "$broken" | jq -r '.block')" = "minecraft:air" ] || fail "$block did not break"
+        got=$(echo "$broken" | jq -r --arg id "$block" '.drops[$id] // 0')
+        [ "$got" -ge 1 ] || fail "breaking $block dropped $got of itself, not the block"
+    done
+done
 ctl command "gamemode creative @s" >/dev/null
 ctl command "clear @s" >/dev/null
 ctl wait 3
 
-echo "PASS: a fuelled furnator made FE, the cable carried it into the cell, an unfuelled furnator made nothing, a cell without a cable stayed empty, a full cell stayed full, a charged cell drained through a cable into an empty one, a three-cable network carried a charge across its run with the two cells' sum unchanged and a cell off the network empty, the six material items exist, every material and machine recipe crafted its declared output and consumed its ingredients, each machine dropped itself, every energy cell tier clamped 2,000,000,000 FE at its own capacity and carried its own transfer, two adjacent cells swapped within their own transfer cap without creating FE, every cell tier dropped itself, a starter rod filled the orb to exactly its recipe's 10,000 FE and stood at 0, an orb with no rod and an orb with no recipe produced nothing while its rod kept its charge, a nitro rod made a blazing crystal at exactly 120,000 FE and kept the other 80,000, the blaze-rod blazing recipe, the niotic, spirited and nitro crystals all energised, every new block and item exists, every carried recipe including the five previously blocked cells crafts its declared output and consumes its ingredients, every furnator tier clamped 2,000,000,000 FE at its own generation capacity, a nitro furnator made exactly 40,000 FE in one tick of a coal and a starter furnator kept energy + carbon at 48,000 while filling slowly, every cable tier read back its own rate, a basic network refused to relay through a starter cable and delivered once that cable was basic, every new furnator, cable and discharger tier dropped itself, a starter furnator charged the item in its charge slot at exactly min(transfer, stored, room) with the FE coming out of its own buffer and left an item with no buffer alone, a cell charged two slots out of one budget, a 5,000 FE furnator and a 4,000 FE cell broken in survival carried their buffers on their own items and gave them back on placement while their spilled stacks did not, an item doctored to 2,000,000,000 FE clamped to its tier's 20,000 on placement and a fresh item placed an empty machine, a starter hopper spent exactly 500 FE a tick on the cell item in the chest it faced and the two halves of the 5,000 it held added up, a hopper facing away from the chest charged nothing and a stone in the chest took nothing, every hopper tier dropped itself, a 7,000 FE hopper carried its buffer back on its own item, a starter solar panel under an open noon sky generated exactly 20 FE a tick measured against the game clock and filled its last 20 of room without overflowing, a stone above it and midnight each left it at exactly 5,000 for 60 ticks, a cell under a panel charged while a cell beside it stayed empty and the panel took no fill, a nitro panel clamped 2,000,000,000 FE at 40,000,000 and named its 2,000 FE/t, every solar panel tier dropped itself, the photoelectric pane and all seven panels crafted, and every guessed id is unknown without the package"
+echo "PASS: a fuelled furnator made FE, the cable carried it into the cell, an unfuelled furnator made nothing, a cell without a cable stayed empty, a full cell stayed full, a charged cell drained through a cable into an empty one, a three-cable network carried a charge across its run with the two cells' sum unchanged and a cell off the network empty, the six material items exist, every material and machine recipe crafted its declared output and consumed its ingredients, each machine dropped itself, every energy cell tier clamped 2,000,000,000 FE at its own capacity and carried its own transfer, two adjacent cells swapped within their own transfer cap without creating FE, every cell tier dropped itself, a starter rod filled the orb to exactly its recipe's 10,000 FE and stood at 0, an orb with no rod and an orb with no recipe produced nothing while its rod kept its charge, a nitro rod made a blazing crystal at exactly 120,000 FE and kept the other 80,000, the blaze-rod blazing recipe, the niotic, spirited and nitro crystals all energised, every new block and item exists, every carried recipe including the five previously blocked cells crafts its declared output and consumes its ingredients, every furnator tier clamped 2,000,000,000 FE at its own generation capacity, a nitro furnator made exactly 40,000 FE in one tick of a coal and a starter furnator kept energy + carbon at 48,000 while filling slowly, every cable tier read back its own rate, a basic network refused to relay through a starter cable and delivered once that cable was basic, every new furnator, cable and discharger tier dropped itself, a starter furnator charged the item in its charge slot at exactly min(transfer, stored, room) with the FE coming out of its own buffer and left an item with no buffer alone, a cell charged two slots out of one budget, a 5,000 FE furnator and a 4,000 FE cell broken in survival carried their buffers on their own items and gave them back on placement while their spilled stacks did not, an item doctored to 2,000,000,000 FE clamped to its tier's 20,000 on placement and a fresh item placed an empty machine, a starter hopper spent exactly 500 FE a tick on the cell item in the chest it faced and the two halves of the 5,000 it held added up, a hopper facing away from the chest charged nothing and a stone in the chest took nothing, every hopper tier dropped itself, a 7,000 FE hopper carried its buffer back on its own item, a starter solar panel under an open noon sky generated exactly 20 FE a tick measured against the game clock and filled its last 20 of room without overflowing, a stone above it and midnight each left it at exactly 5,000 for 60 ticks, a cell under a panel charged while a cell beside it stayed empty and the panel took no fill, a nitro panel clamped 2,000,000,000 FE at 40,000,000 and named its 2,000 FE/t, every solar panel tier dropped itself, the photoelectric pane and all seven panels crafted, two ender cells on one channel held and showed the same 100,000 FE while a cell on another channel read 0, a cell moved to the fresh channel read 0 while its peer kept exactly 100,000 and moving it back found the channel's FE again, an ender cell's extender item gave its channel 4,000,000 FE of capacity and its charge slot took 1,000 a tick out of the channel, the channel gave its tier's 4,000 a tick and lost exactly what the sink gained, an ender gate fed only the hopper on its facing side at the cable row's 500 a tick, the nitro ender cell and gate named 12 channels and their 2,000,000/1,000,000 FE a tick, both ender tags matched in game, every ender cell and gate tier dropped itself, and every guessed id is unknown without the package"

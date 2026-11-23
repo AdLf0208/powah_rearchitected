@@ -76,9 +76,22 @@ its bottom face only (`isEnergyPresent` is `Direction.DOWN`), takes no fill thro
 face, and keeps its buffer on its item. The **photoelectric pane** the starter panel is
 built from comes with it, so all eight recipes craft.
 
+Slice 11 is the **Ender Cell** and the **Ender Gate**, seven tiers each: two block
+families whose buffer is not their own. Upstream's `EnderNetwork` holds one shared
+channel per owner, and a block's `ENERGY` capability is that channel — so two cells on
+one channel hold, give and show the same FE from anywhere in the level, and the charge
+outlives breaking either block and relaunching the world (the item carries nothing:
+`keepEnergy()` is false). A **cell** answers all six faces and takes an **energy cell
+item** into its extender slot, which adds that cell's capacity and its own charge to the
+channel; a **gate** answers and pushes only on the face its `facing` names, moves at the
+cable's rate (`cableTransfer`) and cannot extend the network. The starter tier offers one
+channel, the nitro twelve (`TieredChannelValues`), and `/powah channel` is the GUI
+packet's replacement.
+
 Every machine declares a real `Capabilities.Energy.BLOCK` buffer (the amount is the int
 `energy` in the block entity's saved compound), so other machines can fill and drain a
-furnator, a cell, a discharger, a hopper or a solar panel; a cable is a pure relay.
+furnator, a cell, a discharger, a hopper or a solar panel; an ender cell or gate answers
+that capability with its owner's channel, and a cable is a pure relay.
 
 - Scope, behaviour table, the hook table, deviations and the gap list:
   [`notes.md`](notes.md); upstream analysis: [`FINDINGS.md`](FINDINGS.md);
@@ -92,7 +105,7 @@ furnator, a cell, a discharger, a hopper or a solar panel; a cable is a pure rel
 
 ```text
 powah.hmod            the delivered package (horizon-mod.toml + Cargo.toml + src/ + assets/ + data/)
-horizon-mod.toml      the only manifest and identity: id, version 0.2.10, api 0.2, [native] pins
+horizon-mod.toml      the only manifest and identity: id, version 0.2.11, api 0.2, [native] pins
 Cargo.toml            one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 src/lib.rs            the one `#[mod_api::horizon_mod] impl Hooks`
 src/powah.rs          the glue: the block entity Parts, the queue, the tier tables, the buffers, the cable network, the command
@@ -122,12 +135,15 @@ cargo horizon-mod fits powah.hmod --build nightly     # does it still fit that b
 
 ## In-game observability
 
-Slice 1 has no GUI, so the port adds two commands (recorded as harness additions,
-not upstream gameplay):
+Slice 1 has no GUI, so the port adds these commands (recorded as harness additions,
+not upstream gameplay). `/powah channel` is slice 11's replacement for the ender
+block's GUI channel buttons (`SetChannelPacket`):
 
 ```
-/powah info <x> <y> <z>          # FE, carbon, burn state, capacity, comparator
-/powah set <amount> <x> <y> <z>  # set a furnator's or a cell's stored FE
+/powah info <x> <y> <z>            # FE, carbon, burn state, capacity, comparator, an ender block's channel
+/powah set <amount> <x> <y> <z>    # set a furnator's or a cell's stored FE (an ender block's channel)
+/powah item <amount> <x> <y> <z>   # set the charge of the item in a machine's first charge slot
+/powah channel <n> <x> <y> <z>     # move an ender cell or gate to channel n (clamped to its tier)
 ```
 
 ## Running the in-game check
@@ -147,6 +163,8 @@ SELFTEST=furnator GAME=<that game> tools/e2e.sh                    # the furnato
 SELFTEST=furnator-rate GAME=<that game> tools/e2e.sh               # the nitro furnator's exact tick
 SELFTEST=drain GAME=<that game> tools/e2e.sh                       # the discharger's drain
 SELFTEST=hopper GAME=<that game> tools/e2e.sh                      # the hopper's charge rate
+SELFTEST=solar GAME=<that game> tools/e2e.sh                       # the panel's sky reads
+SELFTEST=ender GAME=<that game> tools/e2e.sh                       # the shared channel (a peer left behind)
 ```
 
 Give the port **its own launcher instance** (e.g. `--instance powah-e2e`, and the

@@ -298,7 +298,15 @@ const ENDER_CHANNELS: [i32; ENDER_TIER_COUNT] = [1, 2, 3, 5, 7, 9, 12];
 /// the energy cell's per-side row, which `PowahConfig` hands the cell's `EnderConfig`.
 #[must_use]
 pub fn ender_cell_tier(index: usize) -> Option<EnderTier> {
-    todo!("the ender cell ladder")
+    /// `DefaultEnergies.baseScaling`, in `Tier.getNormalVariants` order.
+    const BASE_SCALING: [i32; ENDER_TIER_COUNT] = [1, 4, 10, 40, 100, 400, 2_000];
+    /// `batteryTransfer` = `reactorProduction * 4` = `baseScaling * 250 * 4`.
+    const TRANSFER_PER_SCALING: i32 = 1_000;
+    let scaling = *BASE_SCALING.get(index)?;
+    Some(EnderTier {
+        transfer: scaling * TRANSFER_PER_SCALING,
+        channels: *ENDER_CHANNELS.get(index)?,
+    })
 }
 
 /// The ender gate tier at `index` (0 = starter … 6 = nitro), `None` past the ladder.
@@ -308,7 +316,15 @@ pub fn ender_cell_tier(index: usize) -> Option<EnderTier> {
 /// cable's rate, and it cannot extend the network.
 #[must_use]
 pub fn ender_gate_tier(index: usize) -> Option<EnderTier> {
-    todo!("the ender gate ladder")
+    /// `DefaultEnergies.baseScaling`, in `Tier.getNormalVariants` order.
+    const BASE_SCALING: [i32; ENDER_TIER_COUNT] = [1, 4, 10, 40, 100, 400, 2_000];
+    /// `cableTransfer` = `reactorProduction * 2` = `baseScaling * 250 * 2`.
+    const TRANSFER_PER_SCALING: i32 = 500;
+    let scaling = *BASE_SCALING.get(index)?;
+    Some(EnderTier {
+        transfer: scaling * TRANSFER_PER_SCALING,
+        channels: *ENDER_CHANNELS.get(index)?,
+    })
 }
 
 /// The channel a tier offers at `channel`.
@@ -318,7 +334,7 @@ pub fn ender_gate_tier(index: usize) -> Option<EnderTier> {
 /// value past the tier's count never reaches the tile.
 #[must_use]
 pub fn channel_clamped(channel: i32, channels: i32) -> i32 {
-    todo!("the channel clamp")
+    channel.clamp(0, (channels - 1).max(0))
 }
 
 /// One channel of an owner's ender network: what it holds and what it can hold
@@ -336,22 +352,43 @@ impl Channel {
     /// `Energy.receiveEnergy`: at most the room, the tier's transfer and what was offered.
     #[must_use]
     pub fn insert(self, amount: i32, transfer: i32) -> (Channel, i32) {
-    todo!("a channel insert")
-}
+        let moved = (self.capacity - self.stored)
+            .max(0)
+            .min(transfer.max(0))
+            .min(amount.max(0));
+        (
+            Channel {
+                stored: self.stored + moved,
+                ..self
+            },
+            moved,
+        )
+    }
 
     /// `Energy.extractEnergy`: at most what the channel holds and the tier's transfer.
     #[must_use]
     pub fn extract(self, amount: i32, transfer: i32) -> (Channel, i32) {
-    todo!("a channel extract")
-}
+        let moved = self.stored.max(0).min(transfer.max(0)).min(amount.max(0));
+        (
+            Channel {
+                stored: self.stored - moved,
+                ..self
+            },
+            moved,
+        )
+    }
 
     /// `AbstractEnderTile.onSlotChanged`: an extender item's capacity joins the channel and the
     /// item's own charge is spent into it, clamped to the new capacity (upstream runs
     /// `energy.setCapacity(newCap)` then `energy.setStored(stored + extended)`, whose setters clamp).
     #[must_use]
     pub fn extended(self, capacity: i32, stored: i32) -> Channel {
-    todo!("a channel extension")
-}
+        let capacity = self.capacity.saturating_add(capacity.max(0));
+        Channel {
+            stored: clamp_energy(self.stored.saturating_add(stored.max(0)), capacity),
+            capacity,
+        }
+    }
 }
 
 /// One pass's worth of charge steps over a machine's slots
@@ -361,7 +398,14 @@ impl Channel {
 /// with no energy buffer, which is left alone.
 #[must_use]
 pub fn charge_slots(stored: i32, per_slot: i32, rooms: &[i32]) -> Vec<i32> {
-    todo!("a charge pass")
+    let mut budget = stored.max(0);
+    let mut planned = Vec::with_capacity(rooms.len());
+    for room in rooms {
+        let asked = charge_step(budget, per_slot, *room);
+        budget -= asked;
+        planned.push(asked);
+    }
+    planned
 }
 
 /// Energy clamped into a buffer.
@@ -654,13 +698,13 @@ pub struct EnergizingRecipe {
 
 /// The energizing recipes this port carries, in the jar's own order: steel, the
 /// one blaze-powder and the one blaze-rod blazing crystal, niotic, spirited and
-/// the nitro crystal.
+/// the nitro crystal, then the ender core slice 11's recipes are built on.
 #[must_use]
 pub fn energizing() -> &'static [EnergizingRecipe] {
     /// The jar's `data/powah/recipe/energizing/*.json`. Each jar ingredient is a
     /// NeoForge `c:` tag (or an item); 26.3 has no `c:` tags, so the list is the
     /// vanilla member(s) the tag resolves to (see `notes.md`, slice 5).
-    static RECIPES: [EnergizingRecipe; 6] = [
+    static RECIPES: [EnergizingRecipe; 7] = [
         EnergizingRecipe {
             output: "powah:steel_energized",
             count: 2,
@@ -711,6 +755,17 @@ pub fn energizing() -> &'static [EnergizingRecipe] {
                 &["minecraft:redstone_block"],
                 &["minecraft:redstone_block"],
                 &["powah:blazing_crystal_block"],
+            ],
+        },
+        EnergizingRecipe {
+            // `data/powah/recipe/energizing/ender_core.json`: the cell and gate ladders' core.
+            output: "powah:ender_core",
+            count: 1,
+            energy: 50_000,
+            ingredients: &[
+                &["minecraft:ender_eye"],
+                &["powah:dielectric_casing"],
+                &["powah:capacitor_basic_tiny"],
             ],
         },
     ];
@@ -1296,8 +1351,10 @@ mod tests {
                 ("powah:crystal_niotic", 1, 300_000),
                 ("powah:crystal_spirited", 1, 1_000_000),
                 ("powah:crystal_nitro", 16, 20_000_000),
+                ("powah:ender_core", 1, 50_000),
             ],
-            "the jar's five materials, with its second blazing variant (one blaze rod)"
+            "the jar's five materials, its second blazing variant (one blaze rod) and the core \
+             slice 11's ender recipes are built on"
         );
         let nitro = energizing()
             .iter()
@@ -1781,8 +1838,10 @@ mod tests {
             (2_000_000, 1_000_000, 12),
         ];
         for (index, (cell, gate, channels)) in expected.into_iter().enumerate() {
-            let cell_tier = ender_cell_tier(index).unwrap_or_else(|| panic!("tier {index} is a cell"));
-            let gate_tier = ender_gate_tier(index).unwrap_or_else(|| panic!("tier {index} is a gate"));
+            let cell_tier =
+                ender_cell_tier(index).unwrap_or_else(|| panic!("tier {index} is a cell"));
+            let gate_tier =
+                ender_gate_tier(index).unwrap_or_else(|| panic!("tier {index} is a gate"));
             assert_eq!(
                 (cell_tier.transfer, cell_tier.channels),
                 (cell, channels),
@@ -1803,7 +1862,9 @@ mod tests {
         assert_eq!(ender_gate_tier(ENDER_TIER_COUNT), None);
         assert_eq!(MAX_CHANNELS, 12, "`EnderNetwork.MAX_CHANNELS`");
         assert_eq!(
-            ender_cell_tier(ENDER_TIER_COUNT - 1).expect("the nitro cell").channels,
+            ender_cell_tier(ENDER_TIER_COUNT - 1)
+                .expect("the nitro cell")
+                .channels,
             MAX_CHANNELS,
             "the nitro tier is the one that offers every channel"
         );
@@ -1837,7 +1898,11 @@ mod tests {
             stored: 4_000_000,
             capacity: 4_000_000,
         };
-        assert_eq!(full.insert(1_000, 1_000).1, 0, "a full channel takes nothing");
+        assert_eq!(
+            full.insert(1_000, 1_000).1,
+            0,
+            "a full channel takes nothing"
+        );
         let near = Channel {
             stored: 3_999_500,
             capacity: 4_000_000,
@@ -1897,7 +1962,7 @@ mod tests {
             .extended(4_000_000, 500),
             Channel {
                 stored: 600,
-                capacity: 4_000_001
+                capacity: 4_001_000
             },
             "the item's capacity joins the channel and its charge is spent into it"
         );
@@ -1932,11 +1997,19 @@ mod tests {
         // The saved index is a `RangedInt(12)` and `getMaxChannels()` is what the GUI offers, so a
         // starter cell has exactly one channel (index 0) and a basic one two.
         assert_eq!(channel_clamped(0, 1), 0);
-        assert_eq!(channel_clamped(3, 1), 0, "a starter cell offers channel 0 only");
+        assert_eq!(
+            channel_clamped(3, 1),
+            0,
+            "a starter cell offers channel 0 only"
+        );
         assert_eq!(channel_clamped(-1, 1), 0);
         assert_eq!(channel_clamped(1, 2), 1, "a basic cell offers 0 and 1");
         assert_eq!(channel_clamped(5, 5), 4, "a blazing cell offers 0..=4");
-        assert_eq!(channel_clamped(11, 12), 11, "the nitro cell offers every channel");
+        assert_eq!(
+            channel_clamped(11, 12),
+            11,
+            "the nitro cell offers every channel"
+        );
         assert_eq!(channel_clamped(20, 12), 11);
     }
 

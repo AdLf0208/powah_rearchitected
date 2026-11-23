@@ -1,11 +1,11 @@
-# Slices 1-10 of the Powah port, as one flat SDK package: the carried blocks, items, models,
+# Slices 1-11 of the Powah port, as one flat SDK package: the carried blocks, items, models,
 # textures, recipes, loot, tags and lang are the `assets/` and `data/` beside `src/`, and the
 # behaviour is the one `impl Hooks` there. Licence: LGPL-3.0-only (Technici4n/Powah); the full
 # text and its provenance are in LICENSE and LICENSE-NOTICE.md inside this package. Local-only
 # until the maintainer approves publishing (ARCHITECTURE.md §8).
 id = "powah"
 name = "Powah"
-version = "0.2.10"
+version = "0.2.11"
 description = """A port of Powah! (Rearchitected) for Horizon, slice 1: the starter tier of the energy
 chain. The Furnator burns a furnace fuel into carbon and makes 20 FE/t into a 20,000 FE buffer
 (one coal is 48,000 FE); the Energy Cell is a 1,000,000 FE capacitor that takes and gives 1,000
@@ -19,11 +19,11 @@ charge (up to 500 FE/t for the network), so a cell three cables away from anothe
 Slice 4 completes the energy cell ladder: the basic, hardened, blazing, niotic, spirited and nitro
 cells carry their own capacity (4M/10M/40M/100M/400M/2G FE) and per-side transfer (4,000 up to
 2,000,000 FE/t); `/powah set` clamps a cell at its tier's capacity.
-Slice 5 carries the Energizing Orb: seven slots whose inputs match one of six energizing recipes,
+Slice 5 carries the Energizing Orb: seven slots whose inputs match one of seven energizing recipes,
 a buffer filled by the energizing rods (seven tiers, 10,000 up to 20,000,000 FE, within four
-blocks), and the materials it makes — energized steel and the blazing, niotic, spirited and nitro
-crystals — so the five higher cell tiers, the large capacitor and the higher capacitor and rod
-tiers now craft.
+blocks), and the materials it makes — energized steel, the blazing, niotic, spirited and nitro
+crystals and the ender core — so the five higher cell tiers, the large capacitor, the higher
+capacitor and rod tiers and the ender cells and gates craft.
 Slice 6 completes the furnator and cable ladders: six more furnators (80/200/800/2,000/8,000/40,000
 FE/t into their own 80k…40M buffers, each giving at its own per-side rate) and six more cables
 (2,000 up to 1,000,000 FE/t), a network joining only its own tier's cables.
@@ -43,6 +43,13 @@ generating only while it sees the sky above it (the level's `can_see_sky` and `g
 stone overhead or midnight stops it), charging one item in its slot, keeping its buffer on its item
 and giving FE on its bottom face only; the photoelectric pane that the starter panel is built from
 comes with it.
+Slice 11 adds the ender cell and the ender gate, seven tiers each: one shared energy channel per
+owner (upstream's `EnderNetwork`), so two blocks on a channel hold and give the same FE from
+anywhere in the level. The cell answers all six faces and can be extended by inserting an energy
+cell item into it, which adds that cell's capacity and charge to the channel; the gate answers and
+pushes only on the face its `facing` names, moves at the cable's rate and cannot extend the network.
+The channels survive breaking the blocks and relaunching the world, because they are the world's
+data and not the block's.
 Not yet ported: the creative cell, the magmator and thermo generators, the reactors, the Lens of
 Ender, side config, redstone modes and the GUIs."""
 authors = ["owmii", "Technici4n", "AdLf0208"]

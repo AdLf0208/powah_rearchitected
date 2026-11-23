@@ -2596,9 +2596,15 @@ Every compile step ran in `ports/powah`, `CARGO_INCREMENTAL=0`, inside a
 
 Launcher build `Compiling powah (1 of 1)`, `native-0a875da-eb0b2f34c233`, instance `powah-e2e`
 (`evidence/powah-e2e/launcher-build-0.2.10.log`); logs in `ports/_shared/evidence/powah-e2e/`.
-The legs ran the 388,638 B archive of these same sources whose only other difference is `README.md`
-(the archive the final rebuild replaced): nothing compiled or carried changed between them, so the
-runs stand for the delivered 388,951 B package, as slice 7's did for its README-only difference.
+The legs below ran the 388,638 B archive (`696850bc…`) of these same sources, which differs from the
+delivered archive only in `README.md` — a document, with nothing compiled or carried changed between
+them. The delivered 0.2.10 archive is **`13f0e7be…`** (388,951 B), and it predates the ender-channel
+slice's tree edits (`src/runtime.rs` was edited at 07:18 for that slice, after this package was
+built), so the `README.md`-only difference is the **only** difference between the bytes the legs ran
+and the bytes that ship. A later main leg and `SELFTEST=solar` were also re-run on the delivered
+archive itself (`e2e-launcher-0.2.10-readme.log`, `e2e-selftest-solar-readme.log`, whose own
+`package:` line names `13f0e7be…` and 388,951 B), against the same `native-0a875da-eb0b2f34c233`
+build of 0.2.10's code — the ender edits were never compiled into it.
 
 | Leg | Command | Result |
 |---|---|---|
@@ -2715,11 +2721,325 @@ FE" assertion, which is kept.
 
 The first 0.2.10 archive (388,638 B, `696850bc…`) was built before this section's `README.md` prose
 landed, so the archive and the tree differed in exactly that one file. It was rebuilt from the final
-tree: the packed `README.md` is now byte-identical to the tree's, the two builds are `cmp`-identical,
-and every one of the archive's 623 tree files matches the tree byte for byte (`uses.json` is the
-build's own API-uses report, as in every earlier package). **PACKAGE_MATCHES_TREE** holds.
+tree: the delivered archive is **`13f0e7be…`, 388,951 B, 624 entries**, the packed `README.md` is
+byte-identical to the tree's, the two builds are `cmp`-identical, and every one of its 623 tree files
+matches the tree byte for byte (`uses.json` is the build's own API-uses report, as in every earlier
+package). **PACKAGE_MATCHES_TREE** holds. The delivered archive predates the ender-channel slice's
+tree edits, so against what was run in game the `README.md`-only difference is the only difference.
 
 Version: **0.2.9 → 0.2.10** (one patch). The published `[[versions]]` record keeps 0.2.9 and gains
 0.2.10 at publish time — this port does not touch the registry entry.
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+
+## Slice 11 — the Ender Cell and the Ender Gate (2026-11-23)
+
+### The slice, quoted from this port's own gaps
+
+`FINDINGS.md` §"Slice 1 boundary", the line naming the family:
+
+> Gaps (recorded, not claimed): the other tiers and the creative cell; the
+> Magmator/Thermo/Solar/Reactors; **Ender Cells/Gates**; Energizing Orb/Rods; …
+
+and §"Slice 10"'s closing list:
+
+> **Still open:** the creative cell, the Magmator and Thermo Generator …, the reactors
+> (`blocked(uraninite-worldgen)`), the ender cells/gates, the player transmitter, side config,
+> redstone modes, the GUIs, particles, worldgen.
+
+and the 0.2.10 report's own "Next slice", which named it:
+
+> the Ender Cell and Ender Gate channel family (`powah:ender_cell_*` and `powah:ender_gate_*`,
+> seven tiers each) — the last machines-tier gap that needs neither a mod fluid tank nor worldgen.
+
+**Chosen:** the **Ender Cell** and the **Ender Gate**, all seven tiers of each.
+
+**Why it fits `machines`:** two block entities with a declared energy capability, a saved channel
+value, an item slot that takes an energy cell as an upgrade, two charge slots, and a level-tick
+move; the buffer itself is one shared store per owner and channel, which is what makes two blocks
+in different places the same storage. No renderer, no GUI, no entity, no worldgen, no fluid tank.
+
+**Not chosen (and why):** the Magmator and Thermo Generator need a mod block entity fluid tank the
+pin cannot fill, the reactors stay `blocked(uraninite-worldgen)`, the creative cell is a source and
+not a tier, and the player transmitter is the next item-energy slice (it charges a player's
+inventory, not a block's).
+
+### What upstream does (read from tag `v6.2.10`, commit `a5a8f25`)
+
+| Fact | Where |
+|---|---|
+| `devices.ender_cells = new EnderConfig(batteryTransfer(), TieredChannelValues.getDefault())` and `devices.ender_gates = new EnderConfig(cableTransfer(), …)`: the cell moves at the energy cell's per-side row, the gate at the cable's | `config/v2/PowahConfig.java:98-105`, `config/v2/types/EnderConfig.java` |
+| `TieredChannelValues.getDefault()` = **1, 2, 3, 5, 7, 9, 12** channels for starter…nitro; `EnderNetwork.MAX_CHANNELS = 12`, and the tile saves its index in a `RangedInt(12)` (0..11) | `config/v2/values/TieredChannelValues.java`, `block/ender/EnderNetwork.java:22`, `AbstractEnderTile.java:31,44,52` |
+| `EnderConfig.getCapacity` is **0**: the network starts empty and is grown only by an extender item | `config/v2/types/EnderConfig.java:15-24` |
+| **The buffer is not the block's**: `getEnergy()` returns `EnderNetwork.get(serverLevel).getEnergy(this, channel).setTransfer(getEnergyTransfer())` — one shared `Energy` per (owner UUID, channel), a `SavedData` named `powah_network` on the overworld, so the value survives a block being broken and the world being reloaded | `block/ender/AbstractEnderTile.java:154`, `EnderNetwork.java` |
+| `keepEnergy()` is **false** (no override anywhere in the cell/gate path): nothing is written to the block item — there is nothing in the tile to keep | `lib/block/AbstractEnergyStorage.writeStorable`, `AbstractEnderTile` |
+| Cell: `isExtender()` true → slot 0 takes an `IEnderExtender` (an **energy cell item** or a battery); `onSlotChanged` adds `getExtendedCapacity` to the channel and `getExtendedEnergy` to its stored value, then consumes one item and plays the ender-eye sound | `AbstractEnderTile.java:66-84`, `item/EnergyCellItem.java`, `item/BatteryItem.java` |
+| Gate: `isExtender()` false, `canInsert` only slots > 0, and `isEnergyPresent(side)` is **the block's `facing` side only** — a gate is a tap between one face and a channel | `block/ender/EnderGateTile.java` |
+| Both: `postTick` = `chargeItems(1, 3)` (slots 1 and 2) then `extractFromSides` (six faces for a cell, one for a gate); `RangedInt channel` is set by `SetChannelPacket` | `AbstractEnderTile.postTick`, `network/packet/SetChannelPacket.java` |
+| Blocks: `Blcks.ENDER_CELL` / `ENDER_GATE` = `Properties.metalNoSolid(2.0f, 20.0f)`, seven normal tiers; the gate is `noCollission()` with `Facing.ALL` and a 4×4×0.5-pixel plate per face | `block/Blcks.java:32-38`, `EnderGateBlock.java` |
+
+The guide book says the same in words: "store energy (FE) to a specific channel of the ender
+network of the owner … if the Ender Cell … have an active channel with a valid capacity", and
+"Unlike the Ender cell you can not Upgrade the network from it"
+(`assets/powah/guides/powah/book/storage_transfer/ender_{cell,gate}.md`).
+
+### What it ships
+
+Rust:
+
+| File | Change |
+|---|---|
+| `src/runtime.rs` | `MAX_CHANNELS` (12), `ENDER_TIER_COUNT`, `EnderTier { transfer, channels }`, `ender_cell_tier` (`batteryTransfer` = `baseScaling × 1,000`), `ender_gate_tier` (`cableTransfer` = `baseScaling × 500`), `channel_clamped` (upstream's `getMaxChannels`), `Channel { stored, capacity }` with `insert`/`extract`/`extended`, `charge_slots` (the pass `hopper_charges` now delegates to); the `energizing()` table gains the jar's `ender_core` row; 5 tests |
+| `src/powah.rs` | `ENDER_CELLS`/`ENDER_GATES`, `Kind::EnderCell`/`Kind::EnderGate`, `ender_container` (three slots), `ChannelKey`/`ChannelStore` with its `AttachmentType` codec, `EnderEnergy` (the `ENERGY` capability that *is* the channel), `ender_capability` (a gate answers only its `facing` side), `EnderPart` (absorb an extender, charge 1-2, queue), `absorb_extender`, `charge_from_channel`, `facing_at`, the move-phase arms, `ender_line`, `/powah channel`, the `set_energy`/`info_line` arms, owner and gate facing on placement; 5 tests |
+| `src/lib.rs` | 14 declarations: a container, the `ENERGY` capability and its Part per tier, plus the item; `/powah channel` in the command body |
+
+Content: see [`CONTENT.md`](CONTENT.md) §"Slice 11" — the 14 blocks with written definitions (the
+cell's plain metal block; the gate's six-value `facing`, facing-plate shape and empty collision),
+14 blockstates, 16 block models, 15 item models and 15 item definitions, 25 textures (the seven
+cells' animated ones with their `.mcmeta`, the gate's shared body and seven item textures, the
+core), 14 loot tables, the 14 recipes and their unlock advancements, the `powah:ender_core` the
+recipes are built from, the `powah:ender_cells`/`powah:ender_gates` block and item tags, the
+pickaxe/needs-iron entries and the creative tab; `tools/carry_slice11.py` reproduces the **149**
+files from the raw carry (`--check` green). The fourteen `_2` recipes (one cell into one cell) are
+**not** carried, and why is in §"Deviations" below.
+
+### The readouts this slice adds
+
+```text
+Ender Cell at 30,100,30: 100000/4000000 FE (comparator 0, channel 0/2, 4000 FE/t a side, charge empty, empty, t=4298)
+Ender Cell at 30,100,34: 100000/4000000 FE (comparator 0, channel 0/1, 1000 FE/t a side, charge empty, empty, t=4304)
+Ender Cell at 30,100,30: 0/0 FE (comparator 0, channel 1/2, 4000 FE/t a side, charge empty, empty, t=4321)
+Ender Gate at 24,100,30: 86000/4000000 FE (comparator 0, channel 0/1, facing north, 500 FE/t a side, charge empty, empty, t=4436)
+Ender Cell at 14,100,10: 2000000000/2000000000 FE (comparator 15, channel 1/12, 2000000 FE/t a side, charge empty, empty, t=4571)
+Ender Gate at 14,100,14: 7000/4000000 FE (comparator 0, channel 0/12, facing north, 1000000 FE/t a side, charge empty, empty, t=4594)
+```
+
+The line names the **channel's own** stored and capacity (which is why two blocks on one channel
+print the same numbers), the channel index of the tier's count, the tier's transfer a call, and —
+for a gate — the face it reaches energy on. The two charge slots print after `charge`, as the
+hoppers' and panels' do.
+
+### TDD: the red proof, quoted
+
+`ender_cell_tier`, `ender_gate_tier`, `channel_clamped`, `Channel::insert`, `Channel::extract`,
+`Channel::extended` and `charge_slots` were declared unfinished (`todo!()`) and the tests written
+against them before any glue (`ports/_shared/evidence/powah/slice11-test-red.log`):
+
+```text
+---- runtime::tests::every_ender_tier_is_one_of_the_ladder_with_its_own_transfer_and_channels stdout ----
+
+thread 'runtime::tests::every_ender_tier_is_one_of_the_ladder_with_its_own_transfer_and_channels' (1170713) panicked at src/runtime.rs:301:5:
+not yet implemented: the ender cell ladder
+
+---- runtime::tests::a_channel_takes_and_gives_at_most_its_transfer stdout ----
+
+thread 'runtime::tests::a_channel_takes_and_gives_at_most_its_transfer' (1170689) panicked at src/runtime.rs:339:5:
+not yet implemented: a channel insert
+
+---- runtime::tests::a_channel_index_is_clamped_to_the_tiers_own_offering stdout ----
+
+thread 'runtime::tests::a_channel_index_is_clamped_to_the_tiers_own_offering' (1170688) panicked at src/runtime.rs:321:5:
+not yet implemented: the channel clamp
+
+---- runtime::tests::an_extender_adds_its_capacity_and_its_own_charge stdout ----
+
+thread 'runtime::tests::an_extender_adds_its_capacity_and_its_own_charge' (1170708) panicked at src/runtime.rs:353:5:
+not yet implemented: a channel extension
+
+---- runtime::tests::an_ender_pass_charges_its_two_slots_out_of_one_budget stdout ----
+
+thread 'runtime::tests::an_ender_pass_charges_its_two_slots_out_of_one_budget' (1170707) panicked at src/runtime.rs:364:5:
+not yet implemented: a charge pass
+
+---- runtime::tests::a_hopper_pass_charges_each_item_at_its_rate_within_one_budget stdout ----
+
+thread 'runtime::tests::a_hopper_pass_charges_each_item_at_its_rate_within_one_budget' (1170694) panicked at src/runtime.rs:364:5:
+not yet implemented: a charge pass
+
+
+test result: FAILED. 73 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+(The hopper's pass test failed with the ender's because `hopper_charges` now delegates to the new
+`charge_slots`, which is the one rule both use. A first green attempt then failed my own arithmetic
+— I had written `4,000,001` for a 1,000-capacity channel grown by a 4,000,000 item, which is
+`4,001,000`; the expectation was wrong, not the code, and it was corrected before the green run.)
+After the implementation: **84 passed, 0 failed** (`slice11-test-green.log`, and the same 84 in
+`sdk-test.log`: 74 slice-1…10 tests plus the ten this slice adds).
+
+### Ladder (0.2.11, pin `0a875da`)
+
+Every compile step ran in `ports/powah`, `CARGO_INCREMENTAL=0`, inside a
+`ports/tools/build-slot.sh run --job W2-powah --port ports/powah --step …` lease with
+`BUILD_LOCAL=1`; logs in `ports/_shared/evidence/powah/`.
+
+| Step | Command | Result |
+|---|---|---|
+| unit tests | `cargo test --offline` | **84 passed**, 0 failed (`sdk-test.log`, `slice11-test-green.log`) |
+| lints | `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`slice11-clippy-fmt.log`) |
+| formatting | `cargo fmt --check` | exit 0, empty (`slice11-clippy-fmt.log`) |
+| package, twice | `rm -f Cargo.lock; cargo horizon-mod build` ×2, `cmp` | **byte-identical, 482,716 B**, sha256 `49ba3462341a8460bd020a5e5816113a974be3fee78555d226eab4923b71612f` (`slice11-build-twice.log`); `BUILD1_EXIT:0`, `BUILD2_EXIT:0`; the packed `README.md` is byte-identical to the tree's. The first archive of this slice was **482,574 B**, sha256 `bf99ad985baff71204ad707e6d89a63470655791e81277537ebedff2366e8e4f`: the legs below ran it, and it differs from the delivered one only in `README.md` (this section's command list landed after the run, as slice 7's and slice 10's README edits did) |
+| registry check | `cargo horizon-mod check powah.hmod` | **exit 0**, `powah 0.2.11 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, `482716 bytes, SHA-256 49ba3462…1612f, unsigned` (`slice11-check-fits.log`) |
+| fits the pin | `cargo horizon-mod fits powah.hmod --build 0a875da` | `0a875da  made for`, exit 0 (`slice11-check-fits.log`) |
+| fits **another** build | `cargo horizon-mod fits powah.hmod --build 0b14f8a` | `0b14f8a  fits`, exit 0 (`slice11-check-fits.log`) |
+| dialect | `python3 ports/tools/check_261_dialect.py powah.hmod` | exit 0: **239** recipe/loot files in the 26.3 dialect (`slice11-check-fits.log`) |
+| carried content | `python3 tools/carry_slice11.py --check` | 149 files match |
+| package gate | `python3 ports/tools/verify-sdk-package.py powah` | **1/1**, runtime byte-identical (`cfdc211d1106`), no packed `Cargo.lock`, **770 entries**, the package matches the tree (`sdk-verify.log`) |
+
+The first `cargo horizon-mod build` of the bumped tree failed at the gate's shape (`invalid type:
+floating point 0.375, expected an array of length 6` — a box is a six-number *list*, and I had
+written a flat array); the stale `target/horizon-mod/powah.hmod` made the `cmp` still say
+"identical", which is why the second run prints `BUILDn_EXIT` and the exported `version`, and why
+the artifact was deleted before rebuilding. The trap is recorded below.
+
+### In-game legs
+
+Launcher build `Compiling powah (1 of 1)`, `native-0a875da-32e311705549`, instance `powah-e2e`
+(`evidence/powah-e2e/launcher-build-0.2.11.log`; the re-issued run reports *Up to date* because the
+sources it compiled are the sources on disk, and the exported
+`horizon-native-mods/powah/horizon-mod.toml` carries `version = "0.2.11"`); logs in
+`ports/_shared/evidence/powah-e2e/`.
+
+| Leg | Command | Result |
+|---|---|---|
+| main | `launcher-game.sh env powah` + `build-slot.sh run --step e2e` | **PASS** + `EXIT:0` (`e2e-launcher-0.2.11.log`) |
+| control (no package, inside the main run) | the control game, `Unknown block`/`Unknown item` for the ender ids | the three ender ids are unknown there and the arena stays air (`e2e-launcher-0.2.11.log` lines 30–31) |
+| control (whole scenario, no package) | `GAME=$CONTROL_GAME …` | `FAIL: expected powah:furnator_starter at 0,100,0, got 'minecraft:air'` + `EXIT:1` (`e2e-control-0.2.11.log`) |
+| selftest (the pre-existing flip) | `SELFTEST=1 …` | `FAIL: SELFTEST flipped: the unfuelled furnator made no FE, as it should` + `EXIT:1` (`e2e-selftest-0.2.11.log`) |
+| selftest (this slice's flip) | `SELFTEST=ender …` | `FAIL: SELFTEST flipped: the peer still reads 100000 FE after the shared cell moved channel` + `EXIT:1` (`e2e-selftest-ender.log`) |
+| **the previous package** (0.2.10, the parity rule's red) | the 0.2.10 archive in a `powah-0210` instance + the same scenario | `FAIL: expected powah:ender_cell_basic at 30,100,30, got 'minecraft:air'` + `EXIT:1`, after every slice 1–10 phase passed (`e2e-oldpackage-0.2.10.log`) |
+| log gate | `check-e2e-logs.py powah-e2e --strict` | `logs=43 ok=43 missing-exit=0 bad-exit=0`, exit 0 |
+
+Quoted from `e2e-launcher-0.2.11.log` (the family's own assertions):
+
+```text
+== slice 11: an ender cell's channel is one shared store per owner ==
+  extended: Ender Cell at 30,100,30: 0/4000000 FE (comparator 0, channel 0/2, 4000 FE/t a side, charge empty, empty, t=4281)
+  channel 0 (basic):   Ender Cell at 30,100,30: 100000/4000000 FE (comparator 0, channel 0/2, 4000 FE/t a side, charge empty, empty, t=4298)
+  channel 0 (starter): Ender Cell at 30,100,34: 100000/4000000 FE (comparator 0, channel 0/1, 1000 FE/t a side, charge empty, empty, t=4304)
+== slice 11: a cell moved to another channel leaves its peer's FE behind ==
+  moved to channel 1: Ender Cell at 30,100,30: 0/0 FE (comparator 0, channel 1/2, 4000 FE/t a side, charge empty, empty, t=4321)
+  peer on channel 0:  Ender Cell at 30,100,34: 100000/4000000 FE (comparator 0, channel 0/1, 1000 FE/t a side, charge empty, empty, t=4329)
+  back on channel 0:  Ender Cell at 30,100,30: 100000/4000000 FE (comparator 0, channel 0/2, 4000 FE/t a side, charge empty, empty, t=4348)
+  channel(30,100,34) reply: Channel set to 0 of 0..=0.
+== slice 11: an ender cell charges its two charge slots out of the channel ==
+  charge: Ender Cell at 30,100,30: 92000/4000000 FE (comparator 0, channel 0/2, 4000 FE/t a side, charge powah:energy_cell_starter 9000/1000000, empty, t=4311)
+  charge: Ender Cell at 30,100,30: 80000/4000000 FE (comparator 0, channel 0/2, 4000 FE/t a side, charge powah:energy_cell_starter 21000/1000000, empty, t=4323)
+  dt=12 ticks, charge item +12000 FE, channel -12000 FE
+== slice 11: a channel gives its tier's transfer a tick to every face ==
+  sink:  Energy Hopper at 31,100,30: 56000/4000000 FE (comparator 0, facing north, charging 2000 FE/t, 4000 FE/t a side, t=4349)
+  sink:  Energy Hopper at 31,100,30: 132000/4000000 FE (comparator 0, facing north, charging 2000 FE/t, 4000 FE/t a side, t=4368)
+  cell:  Ender Cell at 30,100,30: 948000/4000000 FE (comparator 3, channel 0/2, 4000 FE/t a side, charge empty, empty, t=4355)
+  cell:  Ender Cell at 30,100,30: 872000/4000000 FE (comparator 3, channel 0/2, 4000 FE/t a side, charge empty, empty, t=4374)
+  sink dt=19 ticks (+76000 FE), channel dt=19 ticks (-76000 FE)
+== slice 11: an ender gate reaches one face only, and moves at the cable's rate ==
+  gate:        Ender Gate at 24,100,30: 86000/4000000 FE (comparator 0, channel 0/1, facing north, 500 FE/t a side, charge empty, empty, t=4436)
+  facing side: Energy Hopper at 24,100,29: 24000/1000000 FE (comparator 0, facing north, charging 500 FE/t, 1000 FE/t a side, t=4442)
+  back side:   Energy Hopper at 24,100,31: 0/1000000 FE (comparator 0, facing north, charging 500 FE/t, 1000 FE/t a side, t=4449)
+  dt=13 ticks, gate's sink +6500 FE
+== slice 11: the orb makes the ender core both ladders are built from ==
+  output(0,100,36) = {"count": 1, "item": "powah:ender_core", "slot": 200}
+== slice 11: the ender ladders, their channels, their tiers and their tags ==
+  channel(14,100,10) reply: Channel set to 1 of 0..=11.
+  set(14,100,10) = Ender Cell at 14,100,10: 2000000000/2000000000 FE (comparator 15, channel 1/12, 2000000 FE/t a side, charge empty, empty, t=4565)
+  info(14,100,14): Ender Gate at 14,100,14: 7000/4000000 FE (comparator 0, channel 0/12, facing north, 1000000 FE/t a side, charge empty, empty, t=4594)
+  tag(30,100,30) #ender_cells = {"chat":["Test passed"],"ok":true}
+  tag(30,100,30) #ender_gates = {"chat":["Test failed"],"ok":true}
+  tag(24,100,30) #ender_gates = {"chat":["Test passed"],"ok":true}
+  tag(0,99,3)    #ender_cells = {"chat":["Test failed"],"ok":true}
+```
+
+Every number is exact and its leg can fail: the two cells on one channel read the **same**
+100,000/4,000,000 with their own tier's transfer printed beside it (a starter tier reading 4,000,
+or a peer reading 0, fails), the cell moved to channel 1 reads **0/0** while its peer stays at
+exactly **100,000** (`SELFTEST=ender` expects 0 and fails), moving it back finds the channel's FE
+(the store outlives the block on it), the charge item takes **12,000 over dt=12** while the channel
+loses the same (1,000 a tick is the *item's* own limit, not the cell's 4,000 — 4,000 would fail),
+the sink gains **76,000 over dt=19** and the channel loses **76,000 over dt=19** (4,000 a tick, one
+store), the gate's sink gains **6,500 over dt=13** (500 a tick, the cable row) while the hopper
+behind the gate stays **0**, the nitro cell clamps 2,000,000,000 on its own 2,000,000,000 capacity
+and names 12 channels, both tags match on their own blocks and fail on the arena floor, and all
+fourteen tiers drop themselves.
+
+### Coverage (parity rule, the family this slice adds)
+
+| Family (from the jar) | Status |
+|---|---|
+| the seven `ender_cell_*` and seven `ender_gate_*` blocks and items | **tested** — the starter, basic, nitro cells and gates placed and read back; the 0.2.10 package knows none of them (the control game's `Unknown block type`), and every tier drops itself |
+| the shared channel (one store per owner and channel) | **tested** — two cells on channel 0 read the same 100,000/4,000,000; a cell moved to channel 1 reads 0/0 while its peer keeps exactly 100,000, and moving it back finds the FE; `SELFTEST=ender` fails |
+| the extender item (`onSlotChanged`, `IEnderExtender`) | **tested** — a basic energy cell item in slot 0 gives the channel 4,000,000 FE of capacity and is consumed (the readout goes from 0/0 to 0/4000000) |
+| `postTick`'s `chargeItems(1, 3)` | **tested** — the starter cell item in slot 1 takes 1,000 a tick (its own per-call limit) while the channel loses exactly the same; the two slots share one budget (rule test) |
+| the channel's per-call transfer (`batteryTransfer` / `cableTransfer`) | **tested** — a basic cell gives 4,000 a tick and a starter gate 500 a tick, both against the game's clock, with the sink's gain equal to the channel's loss |
+| `EnderGateTile.isEnergyPresent(facing)` | **tested** — the hopper on the gate's `facing` side is fed, the one behind it stays exactly 0 |
+| `keepEnergy` is false (nothing on the item) | **tested in game** — the cells and gates dropped carry no payload and read their channel; the payload family itself is slice 7's |
+| the channel index and the tier's count (`TieredChannelValues`, `getMaxChannels`) | **tested** — a basic cell's `/powah channel 5` answers `Channel set to 0 of 0..=1.`, the nitro's `1` answers `1 of 0..=11.`, and a non-ender block is refused |
+| the fifteen recipes (`ender_core` in the orb, 7 cells, 7 gates) | **tested** — the orb energizes an ender eye + casing + tiny capacitor into the core at 50,000 FE, and `craft_check.py` crafts all fourteen in a real table (output id + count, every ingredient consumed) |
+| the `powah:ender_cells`/`powah:ender_gates` block and item tags | **tested in game** — each passes on its own family and fails on the other and on the arena floor |
+| loot | **tested** — all fourteen tiers mined in survival, each dropping itself |
+| the GUI, the channel buttons, particles and the waterlogged gate | `not ported` — slice 1's GUI gap; `/powah channel` is the packet's replacement and the shape is the block definition's |
+| the battery items as extenders | `not ported` — no slice carries `powah:battery_*`; the seven energy cell items are the extenders this package has |
+
+### Deviations and upstream defects this slice records
+
+1. **The channel store is one per level, not one per server.** Upstream's `EnderNetwork` is a
+   `SavedData` on the overworld, so a channel reaches every dimension; the pin has no `SavedData`,
+   so the store is a level attachment (`Holder::Level`, the `transfer_labels` pattern) and a
+   channel is per level. A cell in the Nether and one in the Overworld do not share a channel; the
+   figure the two would share is the same store's job in a later slice, if the pin grows one.
+2. **The `ENERGY` capability is the channel, registered with `block_capability_before_game`.** A
+   declared `ModEnergyBuffer` carries a static capacity and reads its amount from the block
+   entity's own `energy` NBT, which is exactly what a shared channel is not; the accumulator's
+   pattern (a handler that reads and writes the store) is what expresses upstream's single `Energy`
+   object, and it makes two cells on a channel answer the same amount with no mirror to keep.
+3. **`/powah channel` clamps to the tier's count.** Upstream's tile saves a `RangedInt(12)` (0..11)
+   and its GUI offers `getMaxChannels()` buttons (1/2/3/5/7/9/12); a crafted `SetChannelPacket`
+   could put a starter cell on any 0..11 its own GUI would never show. The port's command is the
+   GUI's replacement, so it offers what the GUI offers, and a doctored saved index is still clamped
+   to 0..11 on read.
+4. **The extender is absorbed one item a tick.** Upstream's slot limit 1 refuses a second item in
+   slot 0; a container declaration cannot express a per-slot limit at this pin (the same finding as
+   the hopper's), so a stack automation puts there is absorbed one item a tick, each adding its own
+   capacity and charge.
+5. **The ender-eye sound of an extender insertion is not played** (cosmetic; no sound calls in this
+   port), and the gate's waterlogging is not carried (cosmetic, as slice 10's panel).
+6. **The fourteen `_2` recipes are not carried.** Each is upstream's datagen self-recipe — one
+   ender cell into one ender cell, one gate into one gate — which changes nothing: `keepEnergy()` is
+   false, so the item holds no data for a recipe to preserve, and the output is the same stack the
+   input was. Carrying them would add fourteen no-op recipes and fourteen no-op assertions.
+7. **A doctored `stored` above the capacity reads as stored.** The channel's entry is written by
+   this port only (there is no block `energy` key to doctor), and `Channel::extended` clamps; the
+   readout prints what the store holds.
+
+**Upstream defects fixed:** none. The one inconsistency found is item 3 (the saved range wider than
+the tier's GUI), and it is recorded as a deviation with the reason rather than "fixed", because
+which of the two is upstream's intent is not decidable from the artefact.
+
+### Harness findings this slice measured (for the next machine port)
+
+1. **A channel's readout is the channel's, so both ends of a transfer print the same number.** The
+   rate leg measures the sink and the channel separately and compares *rates* per tick, because two
+   readouts of one block are a chat round trip apart (measured 5 ticks of latency on a loaded box)
+   and a shared store's number moves under both ends.
+2. **The receiver's `max_insert` caps a push before the giver's transfer does.** A basic ender cell
+   pushing at 4,000 into a *starter* hopper (insert limit 1,000) delivers 1,000 a tick; the leg
+   uses a basic hopper (4,000) to measure the cell's own rate. Same rule as slice 9's charging.
+3. **`/powah set` on an ender block writes the channel, not the block.** An equality poll on a cell
+   that is feeding a neighbour never settles, so the legs use `set_floor`; a fresh channel with no
+   extender clamps everything to 0, which is what makes the extender leg's first read a hard 0/0.
+4. **The channel is the world's, not the block's**: breaking the block or moving the cell to
+   another channel leaves the FE where it was, which is the assertion `SELFTEST=ender` inverts.
+5. **A fixed tolerance on a two-readout sum is a flake on a busy box.** Slice 9's "the two halves
+   add up" leg used ±1,500 FE and measured 2,500 unaccounted when five build slots were busy; the
+   tolerance is now derived from the measured window (`500 × the ticks between the two readouts`),
+   which is the FE that could legitimately have moved between them. Recorded here because it was
+   the only pre-existing leg this slice had to touch.
+
+The `target/horizon-mod/powah.hmod` trap: a failed `cargo horizon-mod build` leaves the *previous*
+archive in place, so a `cmp` between two runs still says "identical" and a copy of it looks like a
+successful build. The build script now deletes the artifact first, prints `BUILDn_EXIT`, and reads
+the exported `version` back from the archive.
+
+Version: **0.2.10 → 0.2.11** (one patch). The published `[[versions]]` record keeps 0.2.10 and
+gains 0.2.11 at publish time — this port does not touch the registry entry.
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices

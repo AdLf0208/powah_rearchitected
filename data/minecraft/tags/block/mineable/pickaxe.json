@@ -50,6 +50,20 @@
     "powah:solar_panel_blazing",
     "powah:solar_panel_niotic",
     "powah:solar_panel_spirited",
-    "powah:solar_panel_nitro"
+    "powah:solar_panel_nitro",
+    "powah:ender_cell_starter",
+    "powah:ender_cell_basic",
+    "powah:ender_cell_hardened",
+    "powah:ender_cell_blazing",
+    "powah:ender_cell_niotic",
+    "powah:ender_cell_spirited",
+    "powah:ender_cell_nitro",
+    "powah:ender_gate_starter",
+    "powah:ender_gate_basic",
+    "powah:ender_gate_hardened",
+    "powah:ender_gate_blazing",
+    "powah:ender_gate_niotic",
+    "powah:ender_gate_spirited",
+    "powah:ender_gate_nitro"
   ]
 }

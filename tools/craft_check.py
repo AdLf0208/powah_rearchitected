@@ -21,7 +21,8 @@ twenty-one (the energizing orb, the seven rods, the large capacitor and its five
 tiers, the five cell recipes that needed the orb's materials, and the blazing
 crystal block both ways), slice 6's eighteen (the six furnator tiers and both
 of the jar's cable recipes for the six cable tiers), slice 8's seven dischargers,
-slice 9's seven hoppers and slice 10's photoelectric pane and seven solar panels.
+slice 9's seven hoppers, slice 10's photoelectric pane and seven solar panels, and slice 11's
+fourteen ender cells and gates.
 A wrong id or count exits 1 with the observed slot, and four off-pattern grids (a
 stick where the casing goes on the furnator's, the orb's and the solar panel's
 shapes, and where the capacitor goes on the cable's) must leave the result empty.
@@ -183,6 +184,25 @@ def shapeless(label, cells, out, out_count, remainder=None):
         place.setdefault(item, []).append(slot)
     return {"label": label, "place": place, "want": (out, out_count),
             "remainder": remainder}
+
+
+# --- slice 11: the ender cells and gates --------------------------------------
+
+def ender_cell(material):
+    """`oio/ici/oio`: four obsidian, four of the tier's material and an ender core
+    (the jar's `ender_cell_<tier>` shape; the starter's material is an iron nugget)."""
+    return {"minecraft:obsidian": [100, 102, 106, 108],
+            material: [101, 103, 105, 107],
+            "powah:ender_core": [104]}
+
+
+def ender_gate(tier):
+    """`oio/ici/oio`: four obsidian, four of the tier's cables and an ender core,
+    four gates a craft (the jar's `ender_gate_<tier>` shape)."""
+    return {"minecraft:obsidian": [100, 102, 106, 108],
+            f"powah:energy_cable_{tier}": [101, 103, 105, 107],
+            "powah:ender_core": [104]}
+
 
 
 CASES = [
@@ -407,6 +427,35 @@ CASES = [
     shaped("3 spirited panels + 2 nitro capacitors + casing + 3 nitro crystals -> a nitro solar panel",
            panel("powah:capacitor_nitro", "powah:solar_panel_spirited", "powah:crystal_nitro"),
            "powah:solar_panel_nitro", 1),
+    # --- slice 11: the ender cell and ender gate ladders -----------------------
+    shaped("4 obsidian + 4 iron nuggets + an ender core -> a starter ender cell",
+           ender_cell("minecraft:iron_nugget"), "powah:ender_cell_starter", 1),
+    shaped("4 obsidian + 4 iron ingots + an ender core -> a basic ender cell",
+           ender_cell("minecraft:iron_ingot"), "powah:ender_cell_basic", 1),
+    shaped("4 obsidian + 4 energized steel + an ender core -> a hardened ender cell",
+           ender_cell("powah:steel_energized"), "powah:ender_cell_hardened", 1),
+    shaped("4 obsidian + 4 blazing crystals + an ender core -> a blazing ender cell",
+           ender_cell("powah:crystal_blazing"), "powah:ender_cell_blazing", 1),
+    shaped("4 obsidian + 4 niotic crystals + an ender core -> a niotic ender cell",
+           ender_cell("powah:crystal_niotic"), "powah:ender_cell_niotic", 1),
+    shaped("4 obsidian + 4 spirited crystals + an ender core -> a spirited ender cell",
+           ender_cell("powah:crystal_spirited"), "powah:ender_cell_spirited", 1),
+    shaped("4 obsidian + 4 nitro crystals + an ender core -> a nitro ender cell",
+           ender_cell("powah:crystal_nitro"), "powah:ender_cell_nitro", 1),
+    shaped("4 obsidian + 4 starter cables + an ender core -> 4 starter ender gates",
+           ender_gate("starter"), "powah:ender_gate_starter", 4),
+    shaped("4 obsidian + 4 basic cables + an ender core -> 4 basic ender gates",
+           ender_gate("basic"), "powah:ender_gate_basic", 4),
+    shaped("4 obsidian + 4 hardened cables + an ender core -> 4 hardened ender gates",
+           ender_gate("hardened"), "powah:ender_gate_hardened", 4),
+    shaped("4 obsidian + 4 blazing cables + an ender core -> 4 blazing ender gates",
+           ender_gate("blazing"), "powah:ender_gate_blazing", 4),
+    shaped("4 obsidian + 4 niotic cables + an ender core -> 4 niotic ender gates",
+           ender_gate("niotic"), "powah:ender_gate_niotic", 4),
+    shaped("4 obsidian + 4 spirited cables + an ender core -> 4 spirited ender gates",
+           ender_gate("spirited"), "powah:ender_gate_spirited", 4),
+    shaped("4 obsidian + 4 nitro cables + an ender core -> 4 nitro ender gates",
+           ender_gate("nitro"), "powah:ender_gate_nitro", 4),
 ]
 
 

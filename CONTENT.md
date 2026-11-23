@@ -220,6 +220,35 @@ all eight are carried and all eight are crafted in the recipe leg. The Lens of E
 carried: the jar has no recipe for it (it is a right-click interaction on an enderman with a pane,
 config-gated) and the panel's lens slot is a GUI upgrade — a named gap in `notes.md`.
 
+## Slice 11 — the ender cell and ender gate ladders (2026-11-23)
+
+Two block families whose buffer is one shared channel per owner, seven tiers of each. The carry's
+blockstates, models and textures draw both; the two block definitions are written, and the fourteen
+recipes are carried from the carry's already-string-form import.
+
+| Family | Files |
+|---|---|
+| blocks (14) | `data/powah/horizon/block/ender_cell_<tier>.json` (**written**: the plain `minecraft:iron_block` metal block upstream's `Properties.metalNoSolid(2.0, 20.0)` describes, no state of its own, stack 1) and `ender_gate_<tier>.json` (**written**: the same metal block with the six-value `facing` upstream's `Facing.ALL` gives it, default `north`, a 4×4×0.5-pixel plate per face (`EnderGateBlock.SHAPES`) and **empty collision** (`noCollission()`)) |
+| blockstates (14) | `assets/powah/blockstates/…`, carried byte-for-byte (the cells' single state, the gates' six facings) |
+| block models (16) | `assets/powah/models/block/{ender_cell,ender_gate}.json` (the jar's Blockbench bases, parent `block/block`) and the fourteen tiers' models — a gate tier's `ov` is the same `<tier>_ov` overlay every machine tier already carried |
+| item models (15) + item definitions (15) | `assets/powah/models/item/…` and `assets/powah/items/…` for the fourteen blocks and `powah:ender_core` |
+| textures (25) | the seven cells' animated `ender_cell_<tier>.png` with their `.mcmeta`, `ender_cell_core.png`, `ender_gate.png`, the seven gate item textures, and `ender_core.png` with its `.mcmeta` |
+| the core (1 item) | `powah:ender_core` — the item both ladders are built from; its recipe is an **energizing** row (`data/powah/recipe/energizing/ender_core.json`: an ender eye, a dielectric casing, a tiny capacitor, 50,000 FE), which lives in `src/runtime.rs`'s `energizing()` table because 26.3 has no loader for `powah:energizing` |
+| loot tables (14) | `data/powah/loot_table/blocks/…` (the jar's 26.3 shape) |
+| recipes (14) + advancements (14) | `data/powah/recipe/crafting/ender_{cell,gate}_<tier>.json` — `oio/ici/oio` (four obsidian, four of the tier's material or cable, an ender core; the starter cell's material is an iron **nugget**, a gate craft is four) — read from the carry in the pin's string form, with the jar's unlock advancements |
+| tags | the jar's `powah:ender_cells` and `powah:ender_gates` block and item tags; the fourteen join `minecraft:mineable/pickaxe` and `minecraft:needs_iron_tool` |
+| creative tab | the fourteen and the core join `data/powah/horizon/creative_tab/machines.json`, after the solar panels (84 items) |
+| lang | unchanged: the carry's `en_us.json` already has every `block.powah.ender_*` and `item.powah.ender_core` key |
+
+Two notes on what is **not** here:
+
+1. The jar's fourteen `ender_{cell,gate}_<tier>_2` recipes are not carried: each is the jar's own
+   datagen self-recipe (one cell into one cell), a no-op because `keepEnergy()` is false and the
+   item carries no data for it to preserve (see `notes.md`, slice 11, deviation 6).
+2. No asset or model is invented: everything except the two written block definitions and the core's
+   energizing row is byte-for-byte the carry's, which is what `tools/carry_slice11.py --check`
+   proves for all **149** files.
+
 ## Where this content lives now (0.2.0)
 
 Since the SDK migration the carried tree **is the package root**: `assets/powah/` and

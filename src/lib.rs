@@ -185,6 +185,52 @@ impl Hooks for Mod {
             }
             declare_item(registrar, block);
         }
+        // Every ender cell tier: three slots (an extender and two charge slots), and the `ENERGY`
+        // capability that *is* the owner's channel — upstream's `AbstractEnderTile.getEnergy()`
+        // handing every block on a channel the one shared `Energy`. A cell answers all six faces
+        // and takes an extender into slot 0 (upstream's `devices.ender_cells`, `batteryTransfer`).
+        for (index, (block, name)) in powah::ENDER_CELLS.into_iter().enumerate() {
+            let tier =
+                runtime::ender_cell_tier(index).expect("every ender cell id is on the ladder");
+            let cell = registrar.block_key(block);
+            registrar.block_container(&cell, powah::ender_container());
+            registrar.block_capability_before_game(
+                &mod_api::ENERGY,
+                &cell,
+                move |host, at, state, entity| {
+                    powah::ender_capability(host, at, state, entity, powah::Kind::EnderCell(tier))
+                },
+            );
+            let kind = powah::declare(registrar, name);
+            let part = powah::EnderPart::new(Arc::clone(&self.queue), powah::Kind::EnderCell(tier));
+            if let Err(error) = registrar.block_entity_part(&kind, part) {
+                context.refuse(&error.to_string());
+            }
+            declare_item(registrar, block);
+        }
+        // Every ender gate tier: the same three slots and the same channel, but its capability and
+        // its pushes answer only the face its `facing` names (`EnderGateTile.isEnergyPresent`), and
+        // it never extends the network (`getExtendedCapacity` on its item is nothing: it is not an
+        // `IEnderExtender`). Upstream's `devices.ender_gates` transfer at `cableTransfer`.
+        for (index, (block, name)) in powah::ENDER_GATES.into_iter().enumerate() {
+            let tier =
+                runtime::ender_gate_tier(index).expect("every ender gate id is on the ladder");
+            let gate = registrar.block_key(block);
+            registrar.block_container(&gate, powah::ender_container());
+            registrar.block_capability_before_game(
+                &mod_api::ENERGY,
+                &gate,
+                move |host, at, state, entity| {
+                    powah::ender_capability(host, at, state, entity, powah::Kind::EnderGate(tier))
+                },
+            );
+            let kind = powah::declare(registrar, name);
+            let part = powah::EnderPart::new(Arc::clone(&self.queue), powah::Kind::EnderGate(tier));
+            if let Err(error) = registrar.block_entity_part(&kind, part) {
+                context.refuse(&error.to_string());
+            }
+            declare_item(registrar, block);
+        }
         // The energizing orb: the seven slots and the insert-only buffer a rod fills.
         let orb = registrar.block_key(powah::ORB);
         registrar.block_container(&orb, powah::orb_container());
@@ -280,6 +326,7 @@ impl Hooks for Mod {
         let literals: Vec<&str> = event.command.literals.iter().map(String::as_str).collect();
         let pos = powah::block_pos(event.command.argument("pos"));
         let amount = powah::integer(event.command.argument("amount"));
+        let channel = powah::integer(event.command.argument("channel"));
         let line = match (literals.as_slice(), pos) {
             (["powah", "info"], Some(pos)) => {
                 powah::info_line(host, pos).unwrap_or_else(|| "No Powah block there.".to_owned())
@@ -309,6 +356,17 @@ impl Hooks for Mod {
                         "The charge slot holds no item that carries FE.".to_owned()
                     }
                     powah::SetItemOutcome::NoBlock => "No Powah block there.".to_owned(),
+                }
+            }
+            (["powah", "channel"], Some(pos)) => {
+                let Some(channel) = channel else {
+                    return Flow::Continue;
+                };
+                match powah::set_channel_index(host, pos, channel) {
+                    powah::ChannelOutcome::Set(set, channels) => {
+                        format!("Channel set to {set} of 0..={}.", channels - 1)
+                    }
+                    powah::ChannelOutcome::NoBlock => "No ender cell or gate there.".to_owned(),
                 }
             }
             _ => return Flow::Continue,
