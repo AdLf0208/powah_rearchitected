@@ -31,9 +31,9 @@ use crate::runtime::{
     DischargerTier, ENDER_TIER_COUNT, EnderTier, EnergizingRecipe, FURNATOR_TIER_COUNT, Furnator,
     FurnatorTier, HOPPER_TIER_COUNT, HopperTier, MAX_CHANNELS, Neighbour, ORB_MAX_ENERGY,
     ORB_OUTPUT_SLOT, ORB_SLOTS, ROD_TIER_COUNT, RedstoneMode, RodTier, SOLAR_TIER_COUNT, Sky,
-    SolarTier, TRANSMITTER_TIER_COUNT, cable_tier, cell_tier, check_redstone, clamp_energy,
-    comparator_strength, discharger_tier, ender_cell_tier, ender_gate_tier, furnator_tier,
-    network_moves, push_amount, rod_tier,
+    SolarTier, TRANSMITTER_TIER_COUNT, TransferType, cable_tier, cell_tier, check_redstone,
+    clamp_energy, comparator_strength, default_sides, discharger_tier, ender_cell_tier,
+    ender_gate_tier, furnator_tier, network_moves, push_amount, rod_tier,
 };
 
 /// The energizing orb block and its item.
@@ -519,6 +519,11 @@ const KEY_OWNER: &str = "owner";
 /// `redstone_mode`, an int ordinal) — the sync compound's key, so a broken machine's item
 /// carries its buffer but never its mode, as upstream's `writeStorable` leaves it out too.
 const KEY_REDSTONE_MODE: &str = "redstone_mode";
+/// The six per-face transfer types (`SideConfig.write`'s `side_transfer_type`, an int
+/// array of `Transfer` ordinals, in `Direction.get3DDataValue()` order) — the sync
+/// compound's key, as upstream's is, so a broken machine's item carries its buffer
+/// but never its side config.
+const KEY_SIDE_TRANSFER: &str = "side_transfer_type";
 
 /// The three machines, as a readout has to tell them apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -781,6 +786,139 @@ pub(crate) fn faces_open(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 
         }
         _ => true,
     }
+}
+
+// ---------------------------------------------------------------------------
+// The side config: `SideConfig` / `Transfer` on every face
+// ---------------------------------------------------------------------------
+
+/// Whether the machine `block` names has a `SideConfig` at all. Upstream's
+/// `AbstractEnergyStorage` owns one, so every tile that extends it does: the cell,
+/// the furnator (`AbstractEnergyProvider`), the solar panel (`AbstractGeneratorBlock`),
+/// the discharger, the hopper, the transmitter, the rods, the ender cell and gate.
+/// The energizing orb owns its own energy field (no `SideConfig`) and a cable stores
+/// nothing, so neither has one.
+pub(crate) fn has_side_config(block: &str) -> bool {
+    matches!(
+        Kind::of(block),
+        Some(
+            Kind::Furnator(_)
+                | Kind::Cell(_)
+                | Kind::Discharger(_)
+                | Kind::Hopper(_)
+                | Kind::Solar(_)
+                | Kind::EnderCell(_)
+                | Kind::EnderGate(_)
+                | Kind::Transmitter(_)
+                | Kind::Rod(_)
+        )
+    )
+}
+
+/// The transfer type upstream's `SideConfig.init` fills every face with: the tile's
+/// `getTransferType()`. It is **not** the same for every machine — an energy storage
+/// (cell, hopper, transmitter, rod, ender cell/gate) defaults to `ALL`, while a
+/// furnator (`AbstractEnergyProvider`), a solar panel (`AbstractGeneratorBlock`) and
+/// a discharger default to `EXTRACT` (give only).
+pub(crate) fn default_transfer(kind: Kind) -> TransferType {
+    match kind {
+        Kind::Furnator(_) | Kind::Solar(_) | Kind::Discharger(_) => TransferType::Extract,
+        _ => TransferType::All,
+    }
+}
+
+/// The six face types held in `saved`, or the machine's default when no valid
+/// `side_transfer_type` is saved yet (upstream's `init` before the first tick).
+pub(crate) fn side_types(block: &str, saved: &Compound) -> [TransferType; 6] {
+    let default = Kind::of(block).map_or(TransferType::None, default_transfer);
+    match saved.get(&KEY_SIDE_TRANSFER.into()) {
+        Some(Tag::IntArray(values)) if values.len() == 6 => {
+            std::array::from_fn(|index| TransferType::from_ordinal(values[index]))
+        }
+        _ => default_sides(default),
+    }
+}
+
+/// Whether FE may cross `face` on the machine at `pos`, from the side config in its
+/// own compound: `canExtractEnergy`/`canReceiveEnergy`'s second half (the declared
+/// buffer's face booleans and `isEnergyPresent` are the first). A block with no side
+/// config — and a block entity that cannot be read — never blocks a move.
+fn face_allows(
+    host: &dyn Host,
+    level: LevelRef,
+    pos: [i32; 3],
+    face: Direction,
+    extract: bool,
+) -> bool {
+    let Some(block) = block_at(host, level, pos) else {
+        return true;
+    };
+    if !has_side_config(&block) {
+        return true;
+    }
+    let Some(saved) = host
+        .block_entity(level, pos)
+        .and_then(|entity| entity.data(host))
+    else {
+        return true;
+    };
+    let kind = side_types(&block, &saved)[face as usize];
+    if extract {
+        kind.can_extract()
+    } else {
+        kind.can_receive()
+    }
+}
+
+/// [`face_allows`] for a giver.
+pub(crate) fn can_extract_at(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+    face: Direction,
+) -> bool {
+    face_allows(&*host, level, pos, face, true)
+}
+
+/// [`face_allows`] for a taker.
+pub(crate) fn can_receive_at(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+    face: Direction,
+) -> bool {
+    face_allows(&*host, level, pos, face, false)
+}
+
+/// A machine's readout field for its side config, as a new opt-in line (never added
+/// to `/powah info`, whose every line the earlier legs assert byte-for-byte).
+pub(crate) fn side_text(pos: [i32; 3], types: [TransferType; 6], time: i64) -> String {
+    let [x, y, z] = pos;
+    let faces = Direction::ALL
+        .iter()
+        .map(|face| format!("{}={}", facing_name(*face), types[*face as usize].name()))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("Machine at {x},{y},{z} (side {faces}, t={time})")
+}
+
+/// The side-config readout for the machine at `pos`, or the reason there is none.
+pub(crate) fn side_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> String {
+    let Some(level) = level_now(host) else {
+        return "No Powah block there.".to_owned();
+    };
+    let Some(block) = block_at(&*host, level, pos) else {
+        return "No Powah block there.".to_owned();
+    };
+    if !has_side_config(&block) {
+        return "That block has no side config.".to_owned();
+    }
+    let default = Kind::of(&block).map_or(TransferType::None, default_transfer);
+    let types = host
+        .block_entity(level, pos)
+        .and_then(|entity| entity.data(&*host))
+        .map_or(default_sides(default), |saved| side_types(&block, &saved));
+    side_text(pos, types, level.game_time(&*host).unwrap_or(0))
 }
 
 /// A machine's readout field for its redstone gate: `, redstone off (powered)` when the mode is not
@@ -2328,6 +2466,13 @@ pub(crate) fn declare_commands(commands: &mut Vec<Command>) {
             2,
         ));
     }
+    // The side config's readout and its setter (the wrench button's replacement). Face
+    // and type are words, not literals, so two usages cover all six faces × four types.
+    commands.push(Command::op("powah side <pos:block_pos>", 2));
+    commands.push(Command::op(
+        "powah side <face:word> <type:word> <pos:block_pos>",
+        2,
+    ));
 }
 
 /// What `/powah channel` did, so the command can answer honestly.
@@ -2406,6 +2551,55 @@ pub(crate) fn set_redstone_mode(
     match entity.merge_data(host, patch) {
         Ok(_) => RedstoneOutcome::Set(mode),
         Err(_) => RedstoneOutcome::NoBlock,
+    }
+}
+
+/// What `/powah side` did, so the command can answer honestly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SideOutcome {
+    /// The face holds this type now.
+    Set(Direction, TransferType),
+    /// The block is this mod's, but has no side config (the orb, a cable).
+    NoMode,
+    /// No Powah machine stands there.
+    NoBlock,
+}
+
+/// Set one face's transfer type — the effect of the wrench clicking a machine's side
+/// (`NextEnergyConfigPacket`: `tile.getSideConfig().nextType(side); tile.sync()`). The
+/// GUI is not ported, so this command is its replacement, as `/powah redstone` is.
+pub(crate) fn set_side_type(
+    host: &mut dyn ServerHost,
+    pos: [i32; 3],
+    face: Direction,
+    kind: TransferType,
+) -> SideOutcome {
+    let Some(level) = level_now(host) else {
+        return SideOutcome::NoBlock;
+    };
+    let Some(block) = block_at(&*host, level, pos) else {
+        return SideOutcome::NoBlock;
+    };
+    if !has_side_config(&block) {
+        return SideOutcome::NoMode;
+    }
+    let Some(entity) = host.block_entity(level, pos) else {
+        return SideOutcome::NoBlock;
+    };
+    let default = Kind::of(&block).map_or(TransferType::None, default_transfer);
+    let mut types = host
+        .block_entity(level, pos)
+        .and_then(|entity| entity.data(&*host))
+        .map_or(default_sides(default), |saved| side_types(&block, &saved));
+    types[face as usize] = kind;
+    let mut patch = Compound::new();
+    patch.insert(
+        KEY_SIDE_TRANSFER.into(),
+        Tag::IntArray(types.iter().map(|kind| kind.ordinal()).collect()),
+    );
+    match entity.merge_data(host, patch) {
+        Ok(_) => SideOutcome::Set(face, kind),
+        Err(_) => SideOutcome::NoBlock,
     }
 }
 
@@ -3977,6 +4171,12 @@ fn push_out_on(
         return;
     }
     for &side in faces {
+        // Upstream's `canExtractEnergy(side)` is
+        // `isEnergyPresent(side) && sideConfig.getType(side).canExtract`: the six saved
+        // face types gate this machine's own push as well as a neighbour's fill.
+        if !can_extract_at(host, level, pos, side) {
+            continue;
+        }
         let neighbour = offset(pos, side);
         // Upstream's `extractFromSides` skips a side whose neighbour refuses a fill; this
         // mod's own blocks say so in their declaration (`furnator_battery` has no insert
@@ -3984,6 +4184,12 @@ fn push_out_on(
         // Upstream's `canReceiveEnergy` on a cell or an ender block is `checkRedstone() && super…`:
         // a machine whose gate is shut takes nothing through its faces.
         if !faces_open(host, level, neighbour) {
+            continue;
+        }
+        // The neighbour's own `canReceiveEnergy(side.opposite())` includes its side
+        // config: a face set to `none` or `extract` refuses the fill even though the
+        // declared block buffer still advertises that face.
+        if !can_receive_at(host, level, neighbour, side.opposite()) {
             continue;
         }
         let Some(target_block) = block_at(&*host, level, neighbour) else {
@@ -4287,13 +4493,21 @@ fn neighbour(
     let capacity = i32::try_from(handler.capacity(host)).unwrap_or(i32::MAX);
     let buffer = battery_of(&block);
     let face = side as usize;
+    // A face's saved transfer type narrows the declared buffer's face booleans:
+    // `canReceiveEnergy`/`canExtractEnergy` are `isEnergyPresent && type.can…`.
+    let types = host
+        .block_entity(level, pos)
+        .and_then(|entity| entity.data(&*host))
+        .map(|saved| side_types(&block, &saved));
+    let receive = types.is_none_or(|types| types[face].can_receive());
+    let extract = types.is_none_or(|types| types[face].can_extract());
     Some(Neighbour {
         energy,
         capacity,
         max_insert: buffer.as_ref().map_or(i32::MAX, |b| b.max_insert),
         max_extract: buffer.as_ref().map_or(i32::MAX, |b| b.max_extract),
-        can_insert: buffer.as_ref().is_none_or(|b| b.insert_faces[face]),
-        can_extract: buffer.as_ref().is_none_or(|b| b.extract_faces[face]),
+        can_insert: buffer.as_ref().is_none_or(|b| b.insert_faces[face]) && receive,
+        can_extract: buffer.as_ref().is_none_or(|b| b.extract_faces[face]) && extract,
     })
 }
 
@@ -4319,6 +4533,14 @@ pub(crate) fn integer(argument: Option<&CommandArgumentValue>) -> Option<i32> {
     }
 }
 
+/// `/powah`'s word argument (a face or a transfer type).
+pub(crate) fn word(argument: Option<&CommandArgumentValue>) -> Option<String> {
+    match argument? {
+        CommandArgumentValue::String(value) => Some(value.clone()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4334,9 +4556,9 @@ mod tests {
         declare_commands(&mut commands);
         assert_eq!(
             commands.len(),
-            7,
-            "every usage is declared: `info`, `set`, the item charge control, the channel control \
-             and the three redstone modes"
+            9,
+            "every usage is declared: `info`, `set`, the item charge control, the channel control, \
+             the three redstone modes and the side-config readout and setter"
         );
         let usages: Vec<&str> = commands
             .iter()
@@ -4357,6 +4579,14 @@ mod tests {
                 "the {mode:?} gate control is the GUI button's replacement: {usages:?}"
             );
         }
+        assert!(
+            usages.contains(&"powah side <pos:block_pos>"),
+            "the six-face readout is opt-in, never a field on `info`: {usages:?}"
+        );
+        assert!(
+            usages.contains(&"powah side <face:word> <type:word> <pos:block_pos>"),
+            "the wrench button's replacement sets one face: {usages:?}"
+        );
         for command in &commands {
             assert!(
                 command.usage.starts_with("powah "),
@@ -4369,6 +4599,101 @@ mod tests {
                 command.usage
             );
         }
+    }
+
+    #[test]
+    fn every_machine_has_upstreams_own_default_transfer_type() {
+        // `AbstractEnergyBlock`/`AbstractEnergyStorage` default to ALL; a furnator
+        // (`AbstractEnergyProvider`), a solar panel (`AbstractGeneratorBlock`) and a
+        // discharger default to EXTRACT (give only). The orb and the cable have none.
+        for block in [
+            CELL,
+            "powah:energy_cell_basic",
+            "powah:energy_hopper_starter",
+            "powah:player_transmitter_starter",
+            "powah:energizing_rod_starter",
+            "powah:ender_cell_starter",
+            "powah:ender_gate_starter",
+        ] {
+            assert!(has_side_config(block), "{block} has a SideConfig");
+            assert_eq!(
+                default_transfer(Kind::of(block).unwrap_or_else(|| panic!("{block} is ours"))),
+                TransferType::All,
+                "{block} defaults to give and take on every face"
+            );
+        }
+        for block in [
+            FURNATOR,
+            "powah:furnator_basic",
+            "powah:solar_panel_starter",
+            "powah:energy_discharger_starter",
+        ] {
+            assert!(has_side_config(block), "{block} has a SideConfig");
+            assert_eq!(
+                default_transfer(Kind::of(block).unwrap_or_else(|| panic!("{block} is ours"))),
+                TransferType::Extract,
+                "{block} defaults to give only"
+            );
+        }
+        assert!(
+            !has_side_config(ORB),
+            "the orb owns its energy field, no SideConfig"
+        );
+        assert!(
+            !has_side_config("powah:energy_cable_starter"),
+            "a cable stores nothing"
+        );
+        assert!(
+            !has_side_config("minecraft:stone"),
+            "a foreign block is not ours"
+        );
+    }
+
+    #[test]
+    fn the_side_config_reads_and_writes_upstreams_saved_int_array() {
+        let fresh = Compound::new();
+        assert_eq!(side_types(CELL, &fresh), [TransferType::All; 6]);
+        assert_eq!(side_types(FURNATOR, &fresh), [TransferType::Extract; 6]);
+        let mut saved = Compound::new();
+        saved.insert(
+            KEY_SIDE_TRANSFER.into(),
+            Tag::IntArray(vec![0, 0, 3, 0, 1, 2]),
+        );
+        assert_eq!(
+            side_types(CELL, &saved),
+            [
+                TransferType::All,
+                TransferType::All,
+                TransferType::None,
+                TransferType::All,
+                TransferType::Extract,
+                TransferType::Receive,
+            ],
+            "the int array is indexed by Direction's 3D data value"
+        );
+        // A short or malformed array is ignored rather than aborting a machine's tick.
+        let mut short = Compound::new();
+        short.insert(KEY_SIDE_TRANSFER.into(), Tag::IntArray(vec![0, 1]));
+        assert_eq!(side_types(CELL, &short), [TransferType::All; 6]);
+    }
+
+    #[test]
+    fn the_side_readout_names_all_six_faces_in_direction_order() {
+        assert_eq!(
+            side_text(
+                [-4, 100, 60],
+                [
+                    TransferType::All,
+                    TransferType::All,
+                    TransferType::None,
+                    TransferType::All,
+                    TransferType::Extract,
+                    TransferType::Receive,
+                ],
+                732
+            ),
+            "Machine at -4,100,60 (side down=all,up=all,north=none,south=all,west=extract,east=receive, t=732)"
+        );
     }
 
     #[test]

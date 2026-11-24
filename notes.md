@@ -3965,17 +3965,241 @@ Version: **0.2.14 → 0.2.15** (one patch). The published `[[versions]]` record 
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
 
+## Slice 16 — the side config (2026-11-24)
+
+### The slice, quoted from this port's own gaps
+
+`## Deviations and gaps (slice 1)`, item 6, the half slice 13 did not take:
+
+> **6. No side config or redstone modes.** Upstream's six per-side transfer types
+> and redstone IGNORE/ON/OFF default to `ALL`/`IGNORE`; this slice ships only
+> those defaults.
+
+and the sentence this port's own `## Next slice` carried forward:
+
+> The side config stays open: a `ModEnergyBuffer` declares six face booleans, not six per-side transfer types.
+
+Slice 13 closed the redstone half and slices 14–15 the comparator family; this closes the last
+half of gap 6. **Why it fits `machines`:** six saved face values plus one gate in the per-face
+transfer path the port already has, the same shape as `redstone_mode` — no new block, item,
+renderer, hook family or content file.
+
+### The artefact (upstream tag `v6.2.10`, commit `a5a8f25`)
+
+Read from `ports/_shared/upstream/powah/src/main/java/owmii/powah/`:
+
+- `lib/logistics/Transfer.java`: `ALL(true,true)`, `EXTRACT(true,false)`, `RECEIVE(false,true)`,
+  `NONE(false,false)`, ordinals 0…3. `next(ALL)` cycles 0→1→2→3→0; `next(EXTRACT)` and
+  `next(RECEIVE)` toggle that type with `NONE`.
+- `lib/logistics/energy/SideConfig.java`: six `Transfer`s, saved under **`side_transfer_type`**
+  as an int array of ordinals (in `Direction.get3DDataValue()` order — the SDK's `Direction`
+  `Down=0, Up=1, North=2, South=3, West=4, East=5` is the same order). `init()` fills all six
+  faces from `storage.getTransferType()`; `setType` refuses a side where `!isEnergyPresent(side)`.
+- `lib/block/AbstractEnergyStorage.java:143-149`: `canExtractEnergy(side)` /
+  `canReceiveEnergy(side)` are `isEnergyPresent(side) && sideConfig.getType(side).canExtract/canReceive`.
+- **The six defaults are not all the same** (the brief's explicit warning): `AbstractEnergyBlock`
+  and `AbstractEnergyStorage`'s `getTransferType()` is `ALL`; `AbstractEnergyProvider` (furnator),
+  `AbstractGeneratorBlock` (solar) and `EnergyDischargerTile` return `EXTRACT` — give only.
+  `isEnergyPresent` is `DOWN` only for a solar panel, and the block's `facing` only for a rod and
+  an ender gate (already carried in `solar_battery`, `rod_battery` and the gate declaration).
+  The energizing orb owns its own energy field (no `SideConfig`) and a cable stores nothing.
+
+### The six defaults, as read from the jar/source (not assumed)
+
+| Machine | Default on all six faces | Faces that exist (`isEnergyPresent`) |
+|---|---|---|
+| `energy_cell_*` | `all` (give and take) | all six |
+| `energy_hopper_*`, `player_transmitter_*`, `ender_cell_*`, `energizing_rod_*` | `all` | all six (rod: `facing` only) |
+| `furnator_*` | `extract` (give only) | all six |
+| `solar_panel_*` | `extract` | `down` only |
+| `energy_discharger_*` | `extract` | all six |
+| `energizing_orb`, `energy_cable_*` | no side config | — |
+
+### What it ships
+
+| File | Change |
+|---|---|
+| `src/runtime.rs` | `TransferType` (four ordinals, `can_extract`/`can_receive`, `next(default)`, `named`, `default_sides`) + 3 tests |
+| `src/powah.rs` | `KEY_SIDE_TRANSFER`, `has_side_config`, `default_transfer`, `side_types`, `face_allows`/`can_extract_at`/`can_receive_at` wired into `push_out_on` and the cable's `neighbour`, `side_text`/`side_line`, `SideOutcome`/`set_side_type`, `word`, 2 new usages, 4 tests (incl. the operator-only count 7→9) |
+| `src/lib.rs` | `powah side <pos>` (opt-in readout) and `powah side <face:word> <type:word> <pos>` |
+| `tools/e2e.sh` | `side`/`side_field`/`side_reply` helpers and the slice-16 phase with `SELFTEST=side` |
+| `horizon-mod.toml`, `Cargo.toml`, `README.md` | version 0.2.16 and the slice's paragraph |
+
+No content file changed: the config is data and one rule, not blocks or items. **No existing
+`/powah info` line changed** — the six faces are a separate opt-in readout, so all earlier legs
+stay byte-identical.
+
+### TDD: the red proof, quoted
+
+`TransferType`'s methods and `default_sides` were declared `todo!()` and three tests written
+against them; `cargo test` printed (`ports/_shared/evidence/powah/slice16-test-red.log`):
+
+```text
+---- runtime::tests::the_four_transfer_types_are_upstreams_ordinals_flags_and_names stdout ----
+thread 'runtime::tests::the_four_transfer_types_are_upstreams_ordinals_flags_and_names' panicked at src/runtime.rs:1058:9:
+not yet implemented: slice 16: a transfer type's saved ordinal
+
+---- runtime::tests::a_face_cycles_its_type_in_upstreams_order_for_each_default stdout ----
+thread 'runtime::tests::a_face_cycles_its_type_in_upstreams_order_for_each_default' (149562) panicked at src/runtime.rs:1090:9:
+not yet implemented: slice 16: a face's next transfer type
+
+---- runtime::tests::a_fresh_machines_six_faces_all_start_at_its_own_default_type stdout ----
+thread 'runtime::tests::a_fresh_machines_six_faces_all_start_at_its_own_default_type' (149563) panicked at src/runtime.rs:1098:5:
+not yet implemented: slice 16: a fresh machine's six face types
+
+test result: FAILED. 101 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+```
+
+After the implementation the same command printed **107 passed, 0 failed**
+(`sdk-test.log`, regenerated for 0.2.16).
+
+### The rule in the port
+
+`saved side_transfer_type` is upstream's int array; a machine with no valid array uses
+`default_sides(default_transfer(kind))`. `face_allows` reads it for one face and answers
+`Transfer.can_extract`/`can_receive`; it is called for the giver's face in `push_out_on`, for the
+taker's opposite face there, and through `neighbour`'s `can_insert`/`can_extract` in the cable
+planner. A block entity that cannot be read, and a block with no side config, never blocks a move.
+
+**The pin cannot express the config in the declaration.** `ModEnergyBuffer` has
+`insert_faces`/`extract_faces` only — six face booleans per direction, shared by every instance of
+the block — so the four-type config is carried as six saved ordinals and enforced by the port's own
+movers. Exactly as slice 13 recorded for redstone, a *foreign* mover still sees the declared
+buffer; this port's own push and cable relay ask the config first.
+
+### Ladder (0.2.16, pin `0a875da`)
+
+Every compile step ran in `ports/powah`, `CARGO_INCREMENTAL=0`, through
+`ports/tools/build-slot.sh run --job W1-powah --port ports/powah --step …` (compile steps
+forwarded to `AdLf-PC`); logs in `ports/_shared/evidence/powah/`.
+
+| Check | Result |
+|---|---|
+| `cargo test --offline` | **107 passed, 0 failed** (`sdk-test.log`, regenerated for 0.2.16) |
+| `cargo clippy --all-targets --offline -- -D warnings` | `CLIPPY_EXIT:0`, 0 warnings (`slice16-clippy.log`) |
+| `cargo fmt --check` | `FMT_EXIT:0`, clean (`slice16-fmt.log`) |
+| two builds, `rm -f Cargo.lock` before each | `BUILD1_EXIT:0`, `BUILD2_EXIT:0`, **`cmp`-identical**, 545,626 B (`slice16-build{,-second}.log`) |
+| `cargo horizon-mod check powah.hmod` | `powah 0.2.16 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)` · `545626 bytes, SHA-256 41c3456e…`, `CHECK_EXIT:0` |
+| `cargo horizon-mod fits powah.hmod --build 0a875da` | `Powah:` / `0a875da  made for`, `FITS_PIN_EXIT:0` |
+| `cargo horizon-mod fits powah.hmod --build 0b14f8a` | `Powah:` / `0b14f8a  fits`, `FITS_OTHER_EXIT:0` |
+| `python3 ports/tools/verify-sdk-package.py powah` | **1/1**, `package matches the tree`, `no packed Cargo.lock  860 entries`, `SDK-only dependencies (R9)`, `tests 107 passed`, `skills gate PASS` |
+
+The delivered `powah.hmod` is **545,626 B**, sha256
+`41c3456e743ad4cf85d68812a086532f1afc0429cb0c1033f1bbcc415f90a225`, **860 entries**, no packed
+`Cargo.lock`. Both fits lines are real: the pin prints `made for` (a tautology), the other pinned
+build prints `fits`. No local type or variant named `Block`/`Item` was introduced, so `fits` had no
+false failure.
+
+### In-game (parity rule)
+
+Launcher build `native-0a875da-29829d6c3057`, instance `powah-e2e`, `Compiling powah (1 of 1)`
+(`launcher-build-0.2.16.log`); the single stale tag carrying this mod
+(`native-0a875da-8d7947c713ed`, 0.2.15) was removed first so the launcher recompiled.
+
+**The full 62-log replay ran once** and reached slice 16 with every earlier phase green; it then
+`FAIL`ed at this slice's *own* readout parse, `a fresh cell's up face is not all`, because the
+harness's `side_field` helper required a space before the face word while the readout separates
+faces with commas (`…down=all,up=all,…`). The readout itself showed `up=all`. That run is kept as
+`discarded-side-field-harness-bug-0.2.16.log` (outside the `e2e*.log` strict set) and is **not
+evidence**. The helper was fixed to accept `[ ,]` as the separator, and the three verdict legs
+then ran as a **bounded side-config scenario** (`tools/e2e-side.sh`) rather than three more
+~20-minute full replays: it launches the same game and asserts exactly the slice-16 family. The
+earlier families' evidence is the unchanged 0.2.15 replay; this slice changed only Rust logic in
+the side gate and the two new commands, and the full replay proved those earlier phases green on
+0.2.16 before the harness bug.
+
+| Leg | Command | Result |
+|---|---|---|
+| main | `build-slot.sh run --step e2e -- bash tools/e2e-side.sh` | **`PASS` + `EXIT:0`** (`e2e-side-0.2.16.log`) |
+| control (same Nightly, no package) | `LAUNCH_GAME=$CONTROL_GAME …` | `FAIL: expected powah:energy_cell_starter at -4,100,60, got 'minecraft:air'` + `EXIT:1` (`e2e-side-control-0.2.16.log`) |
+| `SELFTEST=side` | `SELFTEST=side …` | `FAIL: SELFTEST flipped: a none face kept its sink at 0 FE, as it should` + `EXIT:1` (`e2e-selftest-side-0.2.16.log`) |
+| `SELFTEST=1` (slice-1 flip) | `SELFTEST=1 …` | `FAIL: SELFTEST flipped: the unfuelled furnator made no FE, as it should` + `EXIT:1` (`e2e-selftest-1-0.2.16.log`) |
+| log gate | `python3 ports/tools/check-e2e-logs.py powah-e2e --strict` | `logs=66 ok=66 missing-exit=0 bad-exit=0`, exit 0 |
+
+Quoted from `e2e-side-0.2.16.log` (the per-face readouts are parsed from the reply, never "no
+error"):
+
+```text
+  fresh cell: Machine at -4,100,60 (side down=all,up=all,north=all,south=all,west=all,east=all, t=77)
+  fresh furnator: Machine at 6,100,60 (side down=extract,up=extract,north=extract,south=extract,west=extract,east=extract, t=83)
+  side(-4,100,59) reply: That block has no side config.
+  side(-4,100,60) reply: Side north set to none.
+  after north=none: Machine at -4,100,60 (side down=all,up=all,north=none,south=all,west=all,east=all, t=111)
+  set(-4,100,58) reply: Energy set to 200000 FE.
+  blocked over 20 ticks: cell 0 FE, sink 0 FE
+  south face: 994000 FE at t=181 -> 986000 FE at t=197, lost 8000 over dt=16 (want 8000)
+  frozen: cell 983500 + sink 16500 = 1000000, source 200000
+  after north=all: Machine at -4,100,60 (side down=all,up=all,north=all,south=all,west=all,east=all, t=241)
+  after the flip: cell 8500 FE
+```
+
+The `500 × dt` leg lost **8,000 FE over dt=16** exactly; the broken-cable freeze shows the cell's
+983,500 plus the sink's 16,500 equals the 1,000,000 set, with the source behind the blocked face
+untouched at 200,000; and opening the face again charged 8,500 FE.
+
+### Deviations this slice records
+
+1. **The GUI wrench button is a command.** Upstream cycles a face with
+   `NextEnergyConfigPacket` from a screen; this port has no GUI (slice 1's gap 1), so
+   `/powah side <face> <type> <pos>` sets one face and `/powah side <pos>` reads all six. Both are
+   operator-only (level 2), like the other harness controls, because they act at chosen coordinates.
+2. **A foreign mover still sees a declared face.** The pin's `block_energy` declaration is per
+   block, not per instance, so another mod's mover can still pull through a face this port set to
+   `none`. Expressed with the closest supported API, recorded rather than faked (slice 13's
+   deviation 2).
+3. **The config lives in the sync compound.** Upstream writes `side_transfer_type` in
+   `writeSync`, not `writeStorable`, so a broken machine's item carries its buffer but never its
+   face types — faithful to the mod. A picked-up/placed machine starts at its default types again.
+
+**Upstream defects fixed: none.** The four types, the cycle and the per-machine defaults are the
+artefact's own; no defect was found while measuring them.
+
+### Coverage (parity rule, the family this slice adds)
+
+| Family (from the jar) | Status |
+|---|---|
+| four transfer types and the ordinals/flags/cycle | **tested** — unit tests pin 0/1/2/3, the two flags and both cycle rules; in game all six faces are parsed from `/powah side`'s reply |
+| the six defaults (storage `all`, furnator/solar/discharger `extract`) | **tested** — unit test per machine kind; in game a fresh cell reads `all` on six faces and a fresh furnator `extract` |
+| `side_transfer_type` saved compound | **tested** — unit test of the int array and a fresh/malformed fallback; the in-game phase writes `north=none` and reads it back, then flips it to `all` |
+| the per-face gate on a cell's receive face | **tested** — a charged source on the `none` face leaves the cell and its sink at 0 FE over 20 ticks; opening the face starts the charge |
+| the per-face gate on the give face | **tested** — the cell's south face delivers exactly `500 × dt` out of its own buffer while north is blocked; broken-cable conservation shows no FE created or lost |
+| the GUI's wrench button | `not ported` — slice 1's GUI gap; the two `/powah side` commands are its replacement |
+| a foreign mover's view of a `none` face | `blocked(pin: block_energy has no per-instance hook)` — the declaration is per block (deviation 2) |
+
+### Harness findings this slice measured (for the next port)
+
+1. The side readout carries its own `t=` clock so the harness's fresh-reply guard works; without
+   it a stale chat line from an earlier `/powah side` would be accepted as the new state.
+2. `/powah set` on a cell that is actively pushing cannot be polled for exact equality (slice 4's
+   finding); use the command's reply and take the next readout's own value as the starting point.
+3. **A readout parser must accept the separators the readout actually uses.** The first `side_field`
+   matched only `" <face>="`, so `down=all` parsed while `,up=all` and `,north=all` did not — a
+   harness false failure whose message showed the correct value in the very line it rejected. The
+   regex is now `[ ,]<face>=`, and the false failure is kept in a discarded (non-`e2e*.log`) file.
+
+Version: **0.2.15 → 0.2.16** (one patch). The published `[[versions]]` record keeps 0.2.15 and
+gains 0.2.16 at publish time — this port does not touch the registry entry. Title:
+`Update powah 0.2.16` (the entry is ours on `main`).
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+
 ## Next slice
 
-**Family:** the side-config half of slice 1's gap 6. **`## Slice 14` deviation 1 and slice 13's own
-notes** close the comparator family and the redstone half; the same gap line says *"The side config
-stays open: a `ModEnergyBuffer` declares six face booleans, not six per-side transfer types."* No
-later slice touches it. **Why it fits `machines`:** it is six booleans in the block entity's saved
-compound plus one gate in the existing per-face insert/extract path and the command surface — no new
-block, item, renderer or hook family, the same shape as slice 13's `redstone_mode`. **In-game
-assertion:** place a starter cell, set its north face to `none` with the new command, put a charged
-source cell behind a cable on that face and an empty cell behind a second cable on the south face;
-read `/powah info` at the sink and assert it stays at **0 FE** over 20 ticks while the south face
-delivers exactly **500 × dt**, then flip the north face back and assert it begins charging — a
-`SELFTEST=side` leg must invert the 0 and end `EXIT:1`.
+**Family:** the creative energy cell. `## Slice 4 — the energy cell ladder`'s coverage row is the
+gap line, verbatim:
+
+> `energy_cell_creative` | **not ported** — a source, not a storage tier (gap 11)
+
+and `## Deviations and gaps (slice 1)`, item 11 names it: *"The other 6 tiers, the creative cell
+and ~15 machines are unported."* Slice 16 closed the last half of gap 6 and slices 13–15 the
+redstone/comparator families, so this is the next machine in the port's own list. **Why it fits
+`machines`:** one storage block with the cell's declared `block_energy` buffer and idle tick, a
+source whose `getTransferType()` is `EXTRACT` (upstream `EnergyCellTile.isCreative()`), carried
+content from the same jar, no renderer, GUI, entity or new hook. **In-game assertion:** place
+`powah:energy_cell_creative`, put an empty starter cell behind a cable, read the source's
+`/powah info` (its `FE/t a side` names the creative tier) at t1 and the sink at t2, and assert the
+sink gains exactly **500 × dt** while the source's readout still shows its full 2,147,483,647 FE
+and never drops — a `SELFTEST=creative` leg must invert the "never drops" half and end `EXIT:1`.
+The generators (Magmator/Thermo) remain `blocked(mod-fluid-tank)`, the reactors
+`blocked(uraninite-worldgen)` and the GUIs out of the machines tier.
 

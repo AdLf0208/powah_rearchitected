@@ -429,6 +429,33 @@ impl Hooks for Mod {
                     powah::RedstoneOutcome::NoBlock => "No Powah block there.".to_owned(),
                 }
             }
+            // `powah side <pos>` is an opt-in readout of all six face types (never
+            // added to `info`, whose lines every earlier leg asserts byte-for-byte).
+            // `powah side <face> <type> <pos>` sets one, like the wrench button.
+            (["powah", "side"], Some(pos)) => {
+                let face = powah::word(event.command.argument("face"));
+                let kind = powah::word(event.command.argument("type"));
+                match (face, kind) {
+                    (None, None) => powah::side_line(host, pos),
+                    (Some(face), Some(kind)) => {
+                        let (Some(face), Some(kind)) =
+                            (powah::facing_of(&face), runtime::TransferType::named(&kind))
+                        else {
+                            return Flow::Continue;
+                        };
+                        match powah::set_side_type(host, pos, face, kind) {
+                            powah::SideOutcome::Set(face, kind) => {
+                                format!("Side {} set to {}.", powah::facing_name(face), kind.name())
+                            }
+                            powah::SideOutcome::NoMode => {
+                                "That block has no side config.".to_owned()
+                            }
+                            powah::SideOutcome::NoBlock => "No Powah block there.".to_owned(),
+                        }
+                    }
+                    _ => return Flow::Continue,
+                }
+            }
             _ => return Flow::Continue,
         };
         let _ = host.commands().feedback(Text::literal(line));

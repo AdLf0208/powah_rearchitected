@@ -1,4 +1,29 @@
-# Validation — Powah slices 1 to 15
+# Validation — Powah slices 1 to 16
+
+> **0.2.16 (slice 16, the side config)** is recorded in
+> [`notes.md`](notes.md#slice-16--the-side-config-2026-11-24): the slice and the gap line it
+> comes from (the remaining half of slice 1's gap 6), the artefact read at tag `v6.2.10`
+> (`SideConfig`'s six per-face `Transfer`s saved as `side_transfer_type`, `Transfer`'s four
+> ordinals and `next()` cycle, and `canExtractEnergy`/`canReceiveEnergy` =
+> `isEnergyPresent && type.can…`), the **exact defaults from the jar** (a storage is `all` on six
+> faces; a furnator, a solar panel and a discharger default to `extract` — not all six the same),
+> the red proof (three `todo!()` rules, **101 passed / 3 failed**, quoted verbatim), the ladder at
+> pin `0a875da` (**107 tests**, clippy 0 warnings, `fmt --check` clean, two `cmp`-identical builds
+> of **545,626 B**, `check`, `fits` against the pin **and** `0b14f8a`, gate **1/1** with
+> `package matches the tree`, 860 entries, no packed `Cargo.lock`, `tests 107 passed`,
+> `skills gate PASS`) and the in-game legs (main `PASS`+`EXIT:0` on the delivered archive; the
+> control game red at the first powah block; `SELFTEST=1` and `SELFTEST=side` at `EXIT:1`; the log
+> gate `logs=66 ok=66 --strict`). The full replay ran once to slice 16 with all earlier phases
+> green, then false-failed on a harness `side_field` regex (it required a space before a face word
+> while the readout uses commas); that run is discarded and the three verdict legs used the bounded
+> `tools/e2e-side.sh` instead of three more ~20-minute full replays. Package: `powah.hmod`, 545,626 B, sha256
+> `41c3456e743ad4cf85d68812a086532f1afc0429cb0c1033f1bbcc415f90a225`. Launcher build:
+> `Compiling powah (1 of 1)`, `native-0a875da-29829d6c3057`, instance `powah-e2e`. What it proves:
+> a cell's fresh six faces read `all` while a furnator's read `extract`; `/powah side` parses all
+> six values with a fresh clock; a north face set to `none` keeps its cell and its sink at 0 FE
+> over 20 ticks with the source still charged, while the south face delivers exactly `500 × dt`
+> without creating FE (broken-cable conservation), and opening the north face again starts the
+> charge. No `/powah info` line changed.
 
 > **0.2.15 (slice 15, finishing the comparator family)** is recorded in
 > [`notes.md`](notes.md#slice-15--finishing-the-comparator-family-the-orb-s-stack-count-and-a-rod-s-fraction-2026-11-24):

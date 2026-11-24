@@ -1032,6 +1032,103 @@ pub fn check_redstone(mode: RedstoneMode, powered: bool) -> bool {
     }
 }
 
+/// Upstream's `owmii.powah.lib.logistics.Transfer`: the four modes a `SideConfig`
+/// holds on each of a machine's six faces. The pin's `ModEnergyBuffer` only has
+/// face booleans (`insert_faces`/`extract_faces`), so the four-type config is
+/// carried here and saved per face in the block entity's `side_transfer_type`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferType {
+    /// Both directions: the machine's default as an energy *storage*.
+    All,
+    /// Give only (upstream's `EXTRACT`, shown as "push" in its GUI).
+    Extract,
+    /// Take only (upstream's `RECEIVE`, shown as "pull" in its GUI).
+    Receive,
+    /// Neither direction.
+    None,
+}
+
+impl TransferType {
+    /// Upstream's `Transfer.values()`, in ordinal order.
+    pub const ALL: [Self; 4] = [Self::All, Self::Extract, Self::Receive, Self::None];
+
+    /// The ordinal `SideConfig.write` saves (`transfer.ordinal()`).
+    #[must_use]
+    pub fn ordinal(self) -> i32 {
+        match self {
+            Self::All => 0,
+            Self::Extract => 1,
+            Self::Receive => 2,
+            Self::None => 3,
+        }
+    }
+
+    /// The type a saved ordinal names, defaulting to `NONE` for an out-of-range value
+    /// (upstream indexes `Transfer.values()` directly; a corrupt save must not abort a tick).
+    #[must_use]
+    pub fn from_ordinal(value: i32) -> Self {
+        Self::ALL
+            .get(usize::try_from(value).unwrap_or(usize::MAX))
+            .copied()
+            .unwrap_or(Self::None)
+    }
+
+    /// The command word and readout spelling, upstream's lowercase enum name.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Extract => "extract",
+            Self::Receive => "receive",
+            Self::None => "none",
+        }
+    }
+
+    /// The type a command word names, `None` for anything else (the dispatcher cannot
+    /// enumerate these words as literals, so the command body resolves them).
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.name() == name)
+    }
+
+    /// Whether FE may leave through a face of this type (`Transfer.canExtract`).
+    #[must_use]
+    pub fn can_extract(self) -> bool {
+        matches!(self, Self::All | Self::Extract)
+    }
+
+    /// Whether FE may enter through a face of this type (`Transfer.canReceive`).
+    #[must_use]
+    pub fn can_receive(self) -> bool {
+        matches!(self, Self::All | Self::Receive)
+    }
+
+    /// `Transfer.next(default)`: with `ALL` the button cycles all→extract→receive→none→all;
+    /// with `EXTRACT` or `RECEIVE` it toggles that type and `NONE`.
+    #[must_use]
+    pub fn next(self, default: Self) -> Self {
+        match default {
+            Self::All => Self::ALL[(self.ordinal() as usize + 1) % Self::ALL.len()],
+            Self::Extract | Self::Receive => {
+                if self == Self::None {
+                    default
+                } else {
+                    Self::None
+                }
+            }
+            // Upstream's `next` returns NONE for a storage whose own type is NONE.
+            Self::None => Self::None,
+        }
+    }
+}
+
+/// The six faces a fresh machine starts with: upstream's `SideConfig.init` fills every
+/// face with the storage's own `getTransferType()` (before NBT is read).
+#[must_use]
+pub fn default_sides(default: TransferType) -> [TransferType; 6] {
+    [default; 6]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1103,6 +1200,81 @@ mod tests {
         assert!(
             check_redstone(RedstoneMode::Off, false),
             "OFF with no power is open"
+        );
+    }
+
+    #[test]
+    fn the_four_transfer_types_are_upstreams_ordinals_flags_and_names() {
+        // `Transfer.java`: ALL(true,true), EXTRACT(true,false), RECEIVE(false,true), NONE(false,false).
+        let expected = [
+            (TransferType::All, 0, "all", true, true),
+            (TransferType::Extract, 1, "extract", true, false),
+            (TransferType::Receive, 2, "receive", false, true),
+            (TransferType::None, 3, "none", false, false),
+        ];
+        for (kind, ordinal, name, extract, receive) in expected {
+            assert_eq!(kind.ordinal(), ordinal, "{name}'s saved ordinal");
+            assert_eq!(
+                TransferType::from_ordinal(ordinal),
+                kind,
+                "ordinal {ordinal}"
+            );
+            assert_eq!(kind.name(), name);
+            assert_eq!(kind.can_extract(), extract, "{name}'s canExtract");
+            assert_eq!(kind.can_receive(), receive, "{name}'s canReceive");
+        }
+        assert_eq!(TransferType::ALL.len(), 4, "upstream has exactly four");
+        assert_eq!(
+            TransferType::from_ordinal(-1),
+            TransferType::None,
+            "a corrupt saved ordinal must not abort a tick"
+        );
+        assert_eq!(TransferType::from_ordinal(9), TransferType::None);
+    }
+
+    #[test]
+    fn a_face_cycles_its_type_in_upstreams_order_for_each_default() {
+        // `Transfer.next(type)`: with ALL it cycles 0→1→2→3→0; with EXTRACT/RECEIVE
+        // it toggles NONE and that type, as the wrench button does on a generator.
+        let all = [
+            TransferType::All,
+            TransferType::Extract,
+            TransferType::Receive,
+            TransferType::None,
+            TransferType::All,
+        ];
+        for pair in all.windows(2) {
+            assert_eq!(pair[0].next(TransferType::All), pair[1]);
+        }
+        assert_eq!(
+            TransferType::Extract.next(TransferType::Extract),
+            TransferType::None
+        );
+        assert_eq!(
+            TransferType::None.next(TransferType::Extract),
+            TransferType::Extract
+        );
+        assert_eq!(
+            TransferType::Receive.next(TransferType::Receive),
+            TransferType::None
+        );
+        assert_eq!(
+            TransferType::None.next(TransferType::Receive),
+            TransferType::Receive
+        );
+        assert_eq!(
+            TransferType::All.next(TransferType::Extract),
+            TransferType::None
+        );
+    }
+
+    #[test]
+    fn a_fresh_machines_six_faces_all_start_at_its_own_default_type() {
+        assert_eq!(default_sides(TransferType::All), [TransferType::All; 6]);
+        assert_eq!(
+            default_sides(TransferType::Extract),
+            [TransferType::Extract; 6],
+            "a furnator, a solar panel and a discharger default to give only"
         );
     }
 

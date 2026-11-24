@@ -1,4 +1,4 @@
-# Powah for Horizon — slices 1–14
+# Powah for Horizon — slices 1–16
 
 A clean-room Rust rewrite of **Powah! (Rearchitected) 6.2.10** (`Technici4n/Powah`,
 **LGPL-3.0-only**) for Horizon 26.3, as one flat SDK package (`api = "0.2"`): the
@@ -114,6 +114,19 @@ whose readout prints a comparator (every furnator, cell, discharger, hopper, sol
 ender gate and player transmitter) only: a cable stores nothing, and the orb and the rods print no
 comparator, so they answer none rather than a wrong number.
 
+Slice 15 finishes that family: the orb answers the **number of its non-empty stacks** (capped at
+15) and a rod the fraction of its own buffer (a half-full starter rod reads 7, a full one 15),
+while a cable with a full container behind it still reads 0.
+
+Slice 16 is the **side config**: every machine with a `SideConfig` saves six per-face transfer
+types — `all`, `extract` (give only), `receive` (take only) and `none` — and the port's own
+per-face movers honour them. The defaults are upstream's own: a storage is `all` on six faces,
+while a furnator, a solar panel and a discharger default to `extract`. The pin's `ModEnergyBuffer`
+can only declare face booleans, so the four-type config is carried as six saved ordinals under
+`side_transfer_type`. `/powah side <pos>` reads all six faces (with a fresh `t=` clock, so no
+existing `/powah info` line changed) and `/powah side <face> <type> <pos>` replaces the wrench
+button: a face set to `none` takes nothing, and opening it again starts the transfer.
+
 Every machine declares a real `Capabilities.Energy.BLOCK` buffer (the amount is the int
 `energy` in the block entity's saved compound), so other machines can fill and drain a
 furnator, a cell, a discharger, a hopper, a solar panel or a transmitter; an ender cell or
@@ -171,6 +184,9 @@ block's GUI channel buttons (`SetChannelPacket`):
 /powah set <amount> <x> <y> <z>    # set a furnator's or a cell's stored FE (an ender block's channel)
 /powah item <amount> <x> <y> <z>   # set the charge of the item in a machine's first charge slot
 /powah channel <n> <x> <y> <z>     # move an ender cell or gate to channel n (clamped to its tier)
+/powah redstone <ignore|on|off> <x> <y> <z>  # the GUI redstone button (slice 13)
+/powah side <x> <y> <z>            # the six face types, with their own t= clock (slice 16)
+/powah side <face> <type> <x> <y> <z>  # set one face to all|extract|receive|none (the wrench button)
 ```
 
 ## Running the in-game check
@@ -192,6 +208,10 @@ SELFTEST=drain GAME=<that game> tools/e2e.sh                       # the dischar
 SELFTEST=hopper GAME=<that game> tools/e2e.sh                      # the hopper's charge rate
 SELFTEST=solar GAME=<that game> tools/e2e.sh                       # the panel's sky reads
 SELFTEST=ender GAME=<that game> tools/e2e.sh                       # the shared channel (a peer left behind)
+SELFTEST=redstone GAME=<that game> tools/e2e.sh                    # the shut gate charged nothing
+SELFTEST=comparator GAME=<that game> tools/e2e.sh                  # the comparator's reading
+SELFTEST=orb-comparator GAME=<that game> tools/e2e.sh              # the orb's stack count
+SELFTEST=side GAME=<that game> tools/e2e.sh                        # the none face stayed at 0 FE
 ```
 
 Give the port **its own launcher instance** (e.g. `--instance powah-e2e`, and the

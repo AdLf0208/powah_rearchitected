@@ -578,6 +578,56 @@ redstone_reply() { # redstone_reply X Y Z MODE SUBSTRING
     fail "expected /powah redstone $4 at $1,$2,$3 to answer '$5', got '$line'"
 }
 
+# side X Y Z: the opt-in six-face readout (`/powah side <pos>`), re-asked until its
+# own `t=` is newer than the one read before the command was sent — the same guard
+# `info` uses against a stale reply on a loaded box. Its last field is the t= clock.
+side() { # side X Y Z
+    local out line before before_t line_t tries
+    before=$(ctl messages 20 | jq -r '.chat[]' | grep -E " at $1,$2,$3 \(side " | head -1)
+    before_t=$(time_of "$before")
+    for tries in 1 2 3 4 5; do
+        say "powah side $1 $2 $3"
+        for _ in $(seq 1 12); do
+            ctl wait 4 >/dev/null
+            out=$(ctl messages 20)
+            line=$(jq -r '.chat[]' <<<"$out" |
+                grep -E " at $1,$2,$3 \(side |no side config|No Powah block" | head -1)
+            [ -n "$line" ] || continue
+            line_t=$(time_of "$line")
+            if [ -n "$line_t" ] && [ -n "$before_t" ]; then
+                [ "$line_t" -gt "$before_t" ] && { echo "$line"; return; }
+            elif [ "$line" != "$before" ]; then
+                echo "$line"
+                return
+            fi
+        done
+        before=$line
+        before_t=$line_t
+    done
+    echo "NO-SIDE $(jq -c '{chat,action_bar}' <<<"$out")"
+}
+
+# side_field LINE FACE: the type a side readout names on FACE, parsed from the reply
+# (never "the command did not error").
+side_field() { sed -nE "s/.*[ ,]$2=([a-z]+).*/\1/p" <<<"$1"; }
+
+# side_reply X Y Z FACE TYPE SUBSTRING: `/powah side <face> <type> <pos>`, the
+# wrench button's replacement, asserting the command's own parsed reply.
+side_reply() { # side_reply X Y Z FACE TYPE SUBSTRING
+    local out line=""
+    say "powah side $4 $5 $1 $2 $3"
+    for _ in $(seq 1 30); do
+        ctl wait 10
+        out=$(ctl messages 20)
+        line=$(jq -r '.chat[]' <<<"$out" |
+            grep -E "Side (down|up|north|south|west|east) set to|no side config|No Powah block" | head -1)
+        case "$line" in
+            *"$6"*) echo "  side($1,$2,$3) reply: $line"; return 0 ;;
+        esac
+    done
+    fail "expected /powah side $4 $5 at $1,$2,$3 to answer '$6', got '$line'"
+}
+
 # set_reply X Y Z AMOUNT SUBSTRING: `/powah set`, asserting the command's own
 # reply. Used where the target feeds something and an equality poll on its buffer
 # can never settle (a rod beside an orb with a recipe drains the same tick).
@@ -3258,4 +3308,111 @@ ctl command "gamemode creative @s" >/dev/null
 ctl command "clear @s" >/dev/null
 ctl wait 3
 
-echo "PASS: a fuelled furnator made FE, the cable carried it into the cell, an unfuelled furnator made nothing, a cell without a cable stayed empty, a full cell stayed full, a charged cell drained through a cable into an empty one, a three-cable network carried a charge across its run with the two cells' sum unchanged and a cell off the network empty, the six material items exist, every material and machine recipe crafted its declared output and consumed its ingredients, each machine dropped itself, every energy cell tier clamped 2,000,000,000 FE at its own capacity and carried its own transfer, two adjacent cells swapped within their own transfer cap without creating FE, every cell tier dropped itself, a starter rod filled the orb to exactly its recipe's 10,000 FE and stood at 0, an orb with no rod and an orb with no recipe produced nothing while its rod kept its charge, a nitro rod made a blazing crystal at exactly 120,000 FE and kept the other 80,000, the blaze-rod blazing recipe, the niotic, spirited and nitro crystals all energised, every new block and item exists, every carried recipe including the five previously blocked cells crafts its declared output and consumes its ingredients, every furnator tier clamped 2,000,000,000 FE at its own generation capacity, a nitro furnator made exactly 40,000 FE in one tick of a coal and a starter furnator kept energy + carbon at 48,000 while filling slowly, every cable tier read back its own rate, a basic network refused to relay through a starter cable and delivered once that cable was basic, every new furnator, cable and discharger tier dropped itself, a starter furnator charged the item in its charge slot at exactly min(transfer, stored, room) with the FE coming out of its own buffer and left an item with no buffer alone, a cell charged two slots out of one budget, a 5,000 FE furnator and a 4,000 FE cell broken in survival carried their buffers on their own items and gave them back on placement while their spilled stacks did not, an item doctored to 2,000,000,000 FE clamped to its tier's 20,000 on placement and a fresh item placed an empty machine, a starter hopper spent exactly 500 FE a tick on the cell item in the chest it faced and the two halves of the 5,000 it held added up, a hopper facing away from the chest charged nothing and a stone in the chest took nothing, every hopper tier dropped itself, a 7,000 FE hopper carried its buffer back on its own item, a starter solar panel under an open noon sky generated exactly 20 FE a tick measured against the game clock and filled its last 20 of room without overflowing, a stone above it and midnight each left it at exactly 5,000 for 60 ticks, a cell under a panel charged while a cell beside it stayed empty and the panel took no fill, a nitro panel clamped 2,000,000,000 FE at 40,000,000 and named its 2,000 FE/t, every solar panel tier dropped itself, the photoelectric pane and all seven panels crafted, two ender cells on one channel held and showed the same 100,000 FE while a cell on another channel read 0, a cell moved to the fresh channel read 0 while its peer kept exactly 100,000 and moving it back found the channel's FE again, an ender cell's extender item gave its channel 4,000,000 FE of capacity and its charge slot took 1,000 a tick out of the channel, the channel gave its tier's 4,000 a tick and lost exactly what the sink gained, an ender gate fed only the hopper on its facing side at the cable row's 500 a tick, the nitro ender cell and gate named 12 channels and their 2,000,000/1,000,000 FE a tick, both ender tags matched in game, every ender cell and gate tier dropped itself, a starter player transmitter read its slot empty with no card, a card bound to the operator by its own use named them in the transmitter's readout, the transmitter spent exactly 500 FE a tick out of its 10,000 on the cell item in that player's inventory and the item gained whole 500 FE steps with the two halves adding up, a blank card charged nothing and spent nothing, a nitro transmitter clamped 2,000,000,000 FE and named its 1,000,000 FE/t charging rate, powah:player_transmitters matched in game, a broken 7,000 FE transmitter carried its buffer back on its own item, every transmitter tier dropped itself, an aerial pearl used on a zombie gave the player aerial pearl and killed it, the redstone mode saved and read back through /powah redstone with the readout naming it only when it was not the default, a shut gate holding the transmitter, the furnator, the cell, the cable, the discharger, the hopper, the solar panel and the ender cell at their own work and every one of them running again when the gate opened, a comparator beside a 500,000 FE cell read the strength its readout printed, the reading tracked the buffer to 15 at full and 3 at a quarter, a stone read nothing, a cable answered nothing even with a full chest behind it, a full rod answered its own buffer fraction 15 and a half-full rod 7 even though its readout prints no comparator, an orb with three blaze powder read its three non-empty stacks as 3, a cable still answered nothing, and every guessed id is unknown without the package"
+echo "== slice 16: a cell's side config saves six per-face transfer types =="
+# The rig: a charged source cell, a cable, the cell under test, a cable, an empty
+# sink cell — in one z-row so the test cell's NORTH face is the one the source
+# reaches through. Set that face to `none` and the source cannot fill it; its
+# SOUTH face stays `all`, so it can still give to the sink.
+place -4 100 58 powah:energy_cell_starter
+place -4 100 59 powah:energy_cable_starter
+place -4 100 60 powah:energy_cell_starter
+place -4 100 61 powah:energy_cable_starter
+place -4 100 62 powah:energy_cell_starter
+place 6 100 60 powah:furnator_starter
+ctl wait 6
+
+fresh=$(side -4 100 60)
+echo "  fresh cell: $fresh"
+for face in down up north south west east; do
+    [ "$(side_field "$fresh" "$face")" = all ] ||
+        fail "a fresh cell's $face face is not all: $fresh"
+done
+# Upstream's defaults are NOT the same for every machine: a furnator
+# (AbstractEnergyProvider) defaults to EXTRACT (give only) on all six faces.
+furn=$(side 6 100 60)
+echo "  fresh furnator: $furn"
+[ "$(side_field "$furn" north)" = extract ] ||
+    fail "a furnator defaults to give only, not all: $furn"
+# A cable stores nothing and the orb owns its energy field: neither has a
+# SideConfig, so the command answers that rather than pretending one exists.
+side_reply -4 100 59 north none "no side config"
+side_reply 0 100 20 north none "no side config"
+
+side_reply -4 100 60 north none "Side north set to none."
+blocked=$(side -4 100 60)
+echo "  after north=none: $blocked"
+[ "$(side_field "$blocked" north)" = none ] ||
+    fail "the readout did not show the parsed north=none: $blocked"
+[ "$(side_field "$blocked" south)" = all ] ||
+    fail "setting north must not change south: $blocked"
+[ "$(time_of "$blocked" | wc -c)" -gt 1 ] ||
+    fail "the side readout carries no fresh t= clock: $blocked"
+
+# Phase A — a charged source on the blocked face, over 20 ticks.
+set_reply -4 100 58 200000 "Energy set to"
+set_energy -4 100 60 0
+set_energy -4 100 62 0
+ctl wait 20
+north_line=$(info -4 100 60)
+south_line=$(info -4 100 62)
+echo "  blocked over 20 ticks: cell $(energy_of "$north_line") FE, sink $(energy_of "$south_line") FE"
+if [ "$SELFTEST" = side ]; then
+    [ "$(energy_of "$north_line")" -gt 0 ] ||
+        fail "SELFTEST flipped: a none face kept its sink at 0 FE, as it should"
+else
+    [ "$(energy_of "$north_line")" = 0 ] ||
+        fail "a cell whose north face is none took FE through that face: $north_line"
+    [ "$(energy_of "$south_line")" = 0 ] ||
+        fail "the sink behind a blocked face gained FE: $south_line"
+fi
+
+# Phase B — the SOUTH face still gives exactly 500 x dt out of the cell's own
+# buffer while the NORTH face stays blocked. Two live readouts carry their own
+# game clock; the FE lost must be exactly the cable's 500 a tick times dt.
+set_reply -4 100 60 1000000 "Energy set to"
+read_a=$(info -4 100 60)
+a_t=$(time_of "$read_a"); a_e=$(energy_of "$read_a")
+ctl wait 10
+read_b=$(info -4 100 60)
+b_t=$(time_of "$read_b"); b_e=$(energy_of "$read_b")
+dt=$((b_t - a_t)); lost=$((a_e - b_e)); want=$((500 * dt))
+echo "  south face: $a_e FE at t=$a_t -> $b_e FE at t=$b_t, lost $lost over dt=$dt (want $want)"
+if [ "$SELFTEST" != side ]; then
+    [ "$dt" -gt 0 ] || fail "the two rate readouts carry no distinct t= clock"
+    [ "$lost" -eq "$want" ] ||
+        fail "the south face did not deliver exactly 500 x dt: lost $lost over $dt ticks"
+fi
+# Freeze the transfer, then assert no FE was created or lost: what the cell gave
+# the sink took, and the source behind the blocked face kept its whole charge.
+ctl command "setblock -4 100 61 minecraft:air" >/dev/null
+ctl wait 4
+held=$(energy_of "$(info -4 100 60)")
+gained=$(energy_of "$(info -4 100 62)")
+src=$(energy_of "$(info -4 100 58)")
+echo "  frozen: cell $held + sink $gained = $((held + gained)), source $src"
+if [ "$SELFTEST" != side ]; then
+    [ $((held + gained)) -eq 1000000 ] ||
+        fail "the south transfer created or lost FE: $held + $gained != 1000000"
+    [ "$gained" -gt 0 ] || fail "the south face gave nothing"
+    [ "$src" -eq 200000 ] || fail "a blocked north face let the source lose FE: $src"
+fi
+
+# Phase C — flipping the north face back starts the charge.
+set_energy -4 100 60 0
+side_reply -4 100 60 north all "Side north set to all."
+opened=$(side -4 100 60)
+echo "  after north=all: $opened"
+[ "$(side_field "$opened" north)" = all ] ||
+    fail "the readout did not show north=all after the flip: $opened"
+charged=0
+for _ in $(seq 1 15); do
+    charged=$(energy_of "$(info -4 100 60)")
+    [ "$charged" -gt 0 ] && break
+    ctl wait 10
+done
+echo "  after the flip: cell $charged FE"
+if [ "$SELFTEST" != side ]; then
+    [ "$charged" -gt 0 ] || fail "opening the north face again did not start the charge"
+fi
+
+echo "PASS: a fuelled furnator made FE, the cable carried it into the cell, an unfuelled furnator made nothing, a cell without a cable stayed empty, a full cell stayed full, a charged cell drained through a cable into an empty one, a three-cable network carried a charge across its run with the two cells' sum unchanged and a cell off the network empty, the six material items exist, every material and machine recipe crafted its declared output and consumed its ingredients, each machine dropped itself, every energy cell tier clamped 2,000,000,000 FE at its own capacity and carried its own transfer, two adjacent cells swapped within their own transfer cap without creating FE, every cell tier dropped itself, a starter rod filled the orb to exactly its recipe's 10,000 FE and stood at 0, an orb with no rod and an orb with no recipe produced nothing while its rod kept its charge, a nitro rod made a blazing crystal at exactly 120,000 FE and kept the other 80,000, the blaze-rod blazing recipe, the niotic, spirited and nitro crystals all energised, every new block and item exists, every carried recipe including the five previously blocked cells crafts its declared output and consumes its ingredients, every furnator tier clamped 2,000,000,000 FE at its own generation capacity, a nitro furnator made exactly 40,000 FE in one tick of a coal and a starter furnator kept energy + carbon at 48,000 while filling slowly, every cable tier read back its own rate, a basic network refused to relay through a starter cable and delivered once that cable was basic, every new furnator, cable and discharger tier dropped itself, a starter furnator charged the item in its charge slot at exactly min(transfer, stored, room) with the FE coming out of its own buffer and left an item with no buffer alone, a cell charged two slots out of one budget, a 5,000 FE furnator and a 4,000 FE cell broken in survival carried their buffers on their own items and gave them back on placement while their spilled stacks did not, an item doctored to 2,000,000,000 FE clamped to its tier's 20,000 on placement and a fresh item placed an empty machine, a starter hopper spent exactly 500 FE a tick on the cell item in the chest it faced and the two halves of the 5,000 it held added up, a hopper facing away from the chest charged nothing and a stone in the chest took nothing, every hopper tier dropped itself, a 7,000 FE hopper carried its buffer back on its own item, a starter solar panel under an open noon sky generated exactly 20 FE a tick measured against the game clock and filled its last 20 of room without overflowing, a stone above it and midnight each left it at exactly 5,000 for 60 ticks, a cell under a panel charged while a cell beside it stayed empty and the panel took no fill, a nitro panel clamped 2,000,000,000 FE at 40,000,000 and named its 2,000 FE/t, every solar panel tier dropped itself, the photoelectric pane and all seven panels crafted, two ender cells on one channel held and showed the same 100,000 FE while a cell on another channel read 0, a cell moved to the fresh channel read 0 while its peer kept exactly 100,000 and moving it back found the channel's FE again, an ender cell's extender item gave its channel 4,000,000 FE of capacity and its charge slot took 1,000 a tick out of the channel, the channel gave its tier's 4,000 a tick and lost exactly what the sink gained, an ender gate fed only the hopper on its facing side at the cable row's 500 a tick, the nitro ender cell and gate named 12 channels and their 2,000,000/1,000,000 FE a tick, both ender tags matched in game, every ender cell and gate tier dropped itself, a starter player transmitter read its slot empty with no card, a card bound to the operator by its own use named them in the transmitter's readout, the transmitter spent exactly 500 FE a tick out of its 10,000 on the cell item in that player's inventory and the item gained whole 500 FE steps with the two halves adding up, a blank card charged nothing and spent nothing, a nitro transmitter clamped 2,000,000,000 FE and named its 1,000,000 FE/t charging rate, powah:player_transmitters matched in game, a broken 7,000 FE transmitter carried its buffer back on its own item, every transmitter tier dropped itself, an aerial pearl used on a zombie gave the player aerial pearl and killed it, the redstone mode saved and read back through /powah redstone with the readout naming it only when it was not the default, a shut gate holding the transmitter, the furnator, the cell, the cable, the discharger, the hopper, the solar panel and the ender cell at their own work and every one of them running again when the gate opened, a comparator beside a 500,000 FE cell read the strength its readout printed, the reading tracked the buffer to 15 at full and 3 at a quarter, a stone read nothing, a cable answered nothing even with a full chest behind it, a full rod answered its own buffer fraction 15 and a half-full rod 7 even though its readout prints no comparator, an orb with three blaze powder read its three non-empty stacks as 3, a cable still answered nothing, a cell's six face types were read back from the opt-in readout with a fresh clock, a cell defaults to all on six faces while a furnator defaults to give-only, a north face set to none kept its cell and sink at 0 FE over 20 ticks while the source stayed charged, the south face still delivered exactly 500 x dt without creating FE, and opening the north face again started the charge, and every guessed id is unknown without the package"
