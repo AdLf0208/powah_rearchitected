@@ -282,7 +282,10 @@ impl Hooks for Mod {
                     transfer: tier.transfer,
                     slots: powah::kind_item_slots(powah::Kind::Rod(tier)),
                 }),
-                false,
+                // Slice 15: upstream's rod is an `AbstractEnergyStorage` and inherits
+                // `AbstractEnergyBlock`'s analog output — its own buffer fraction. 0.2.14
+                // declared none; the hook now answers `(int)(stored / capacity * 15)`.
+                true,
             );
             declare_item(registrar, block);
         }
@@ -291,7 +294,9 @@ impl Hooks for Mod {
         // move phase. Every furnator tier, cell tier and rod was declared above,
         // where its buffer is.
         let orb_kind = powah::declare(registrar, powah::ORB_TYPE);
-        if let Err(error) = registrar.block_entity_part(&orb_kind, powah::OrbPart) {
+        if let Err(error) =
+            registrar.block_entity_part(&orb_kind, powah::OrbPart::new(Arc::clone(&self.queue)))
+        {
             context.refuse(&error.to_string());
         }
         for (block, name) in powah::CABLES {

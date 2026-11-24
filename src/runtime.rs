@@ -472,6 +472,14 @@ pub fn comparator_strength(energy: i32, capacity: i32) -> i32 {
     strength.clamp(0, 15)
 }
 
+/// Upstream `EnergizingOrbBlock.getAnalogOutputSignal`: the count of non-empty stacks in the orb's
+/// inventory, capped at 15. The orb has seven slots upstream, so the cap is a guard rather than a
+/// reachable value; the rule is a count, not a fraction of the buffer.
+#[must_use]
+pub fn stack_comparator(non_empty_stacks: usize) -> i32 {
+    non_empty_stacks.min(15) as i32
+}
+
 /// Upstream's `extractFromSides`: at most the transfer, and never more than is
 /// stored.
 #[must_use]
@@ -1254,6 +1262,22 @@ mod tests {
         assert_eq!(comparator_strength(CELL_CAPACITY, CELL_CAPACITY), 15);
         assert_eq!(comparator_strength(CELL_CAPACITY / 2, CELL_CAPACITY), 7);
         assert_eq!(comparator_strength(5, 0), 0);
+    }
+
+    #[test]
+    fn the_orb_comparator_counts_non_empty_stacks_capped_at_15() {
+        assert_eq!(stack_comparator(0), 0);
+        assert_eq!(stack_comparator(3), 3);
+        assert_eq!(stack_comparator(7), 7);
+        assert_eq!(stack_comparator(20), 15);
+    }
+
+    #[test]
+    fn a_rods_comparator_is_its_own_buffer_fraction_truncated() {
+        // Upstream's rod is an `AbstractEnergyStorage`: (int)(stored / capacity * 15).
+        assert_eq!(comparator_strength(5_000, 10_000), 7);
+        assert_eq!(comparator_strength(10_000, 10_000), 15);
+        assert_eq!(comparator_strength(0, 10_000), 0);
     }
 
     #[test]

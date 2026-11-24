@@ -654,11 +654,10 @@ pub(crate) fn has_redstone_mode(block: &str) -> bool {
     )
 }
 
-/// Whether a comparator gets a reading from the machine `kind` at all: exactly the machines whose
-/// `/powah info` line prints a `comparator` field, which is the strength
-/// `runtime::comparator_strength` computes for them. A cable stores nothing, and the energizing orb
-/// (upstream's own rule is its non-empty stack count) and the rods print no comparator, so they
-/// answer no signal — a comparator beside them is left to vanilla instead of being told a number.
+/// Whether the machine `kind`'s `/powah info` line prints a `comparator` field: the eight buffered
+/// machines, whose reading is `runtime::comparator_strength`. This is the *readout* set, not the
+/// full set of blocks that answer a comparator — since slice 15 the orb (stack count) and a rod
+/// (its own fraction) answer through [`analog_reading`] too, and a cable still answers nothing.
 pub(crate) fn has_comparator(kind: Kind) -> bool {
     matches!(
         kind,
@@ -685,6 +684,28 @@ pub(crate) fn comparator_of(kind: Kind, stored: i32, capacity: i32) -> Option<i3
         clamp_energy(stored, capacity),
         capacity,
     ))
+}
+
+/// The analog signal a comparator gets from a Powah block, closing slice 14's deviation 1.
+/// Upstream declares an output on `AbstractEnergyBlock` for the buffered machines, for a rod
+/// (its own fraction) and for a cable (zero, no storage); `EnergizingOrbBlock` overrides with its
+/// non-empty stack count. `None` means the block declares no signal, so a comparator beside it
+/// keeps vanilla's reading instead of a faked number.
+pub(crate) fn analog_reading(
+    kind: Kind,
+    stored: i32,
+    capacity: i32,
+    non_empty_stacks: usize,
+) -> Option<i32> {
+    match kind {
+        Kind::Orb => Some(crate::runtime::stack_comparator(non_empty_stacks)),
+        Kind::Rod(_) => Some(crate::runtime::comparator_strength(stored, capacity)),
+        // Upstream's cable does answer through `AbstractEnergyBlock`, but its storage is 0, so the
+        // number is 0. Declaring no signal keeps vanilla's own zero rather than faking a reading,
+        // exactly as 0.2.14 measured with a full chest behind the cable.
+        Kind::Cable(_) => None,
+        _ => comparator_of(kind, stored, capacity),
+    }
 }
 
 /// What `/powah redstone` finds at a position. Upstream's `NextRedstoneModePacket` acts only on an
@@ -2648,7 +2669,14 @@ pub(crate) fn set_energy(host: &mut dyn ServerHost, pos: [i32; 3], amount: i32) 
     // changed, which is the `setChanged` the retired bundle had to fake.
     match entity.merge_data(host, patch) {
         Ok(_) => {
-            if let Some(reading) = kind.and_then(|kind| comparator_of(kind, energy, capacity)) {
+            // Slice 15: a rod's own fraction changes with `/powah set`, so announce it. An orb's
+            // comparator counts stacks, not FE, so a set leaves its cached count untouched.
+            let reading = match kind {
+                Some(Kind::Rod(_)) => Some(crate::runtime::comparator_strength(energy, capacity)),
+                Some(kind) => comparator_of(kind, energy, capacity),
+                None => None,
+            };
+            if let Some(reading) = reading {
                 publish_strength(host, level, pos, reading);
             }
             SetOutcome::Set(energy)
@@ -2749,8 +2777,9 @@ pub(crate) struct IdleRules {
 pub(crate) struct IdlePart {
     queue: Arc<Mutex<Queue>>,
     rules: Option<IdleRules>,
-    /// Whether this block's readout prints a comparator, which is what a comparator gets: a cell
-    /// and a discharger do; a cable stores nothing and a rod prints none, so both answer none.
+    /// Whether this block's readout prints a comparator: a cell and a discharger do. A cable
+    /// stores nothing and answers none; a rod prints no field but answers its own buffer fraction
+    /// since slice 15, declared in `lib.rs` rather than through this flag.
     comparator: bool,
 }
 
@@ -2770,8 +2799,9 @@ impl IdlePart {
 
 #[mod_api::horizon_part]
 impl BlockPart for IdlePart {
-    /// A cell and a discharger print a comparator and answer one; a cable and a rod answer none, so
-    /// a comparator beside them keeps vanilla's reading rather than a wrong number.
+    /// A cell and a discharger answer here; a cable answers none, so a comparator beside one keeps
+    /// vanilla's reading. A rod's `BlockPart` is this same type with `comparator` set — slice 15's
+    /// fraction — and is declared separately in `lib.rs`.
     fn has_analog_output(&self, _level: &dyn LevelHost, event: &mut HasAnalogOutputEvent) {
         if self.comparator {
             event.output = true;
@@ -3232,9 +3262,28 @@ impl ItemPart for PearlPart {
 
 /// The orb: a block entity with the seven slots and the recipe-gated buffer, which
 /// ticks to fill itself and to turn a full buffer into its result.
-pub(crate) struct OrbPart;
+pub(crate) struct OrbPart {
+    queue: Arc<Mutex<Queue>>,
+}
+
+impl OrbPart {
+    pub(crate) fn new(queue: Arc<Mutex<Queue>>) -> OrbPart {
+        OrbPart { queue }
+    }
+}
+
 #[mod_api::horizon_part]
-impl BlockPart for OrbPart {}
+impl BlockPart for OrbPart {
+    /// Slice 15: upstream's `EnergizingOrbBlock` answers a comparator with its non-empty stack
+    /// count, so the orb declares an output (0.2.14 declared none and a comparator beside it
+    /// silently kept vanilla's reading).
+    fn has_analog_output(&self, _level: &dyn LevelHost, event: &mut HasAnalogOutputEvent) {
+        event.output = true;
+    }
+    fn analog_output(&self, _level: &dyn LevelHost, event: &mut AnalogOutputEvent) {
+        event.output = cached_reading(event.dimension, [event.pos.x, event.pos.y, event.pos.z]);
+    }
+}
 
 #[mod_api::horizon_part]
 impl BlockEntityPart for OrbPart {
@@ -3243,8 +3292,15 @@ impl BlockEntityPart for OrbPart {
     }
 
     /// One server tick: the recipe the inputs match, the buffer's value and the
-    /// result, as `EnergizingOrbTile` decides them.
+    /// result, as `EnergizingOrbTile` decides them. The position is queued so the level tick's
+    /// drain can record the stack count a comparator reads (an item insert changes no block state).
     fn block_entity_tick(&self, host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
+        if let Some(level) = level_now(host) {
+            self.queue
+                .lock()
+                .expect("the powah queue lock is held for one insert")
+                .push(level, event.pos);
+        }
         if !orb_tick(host, event) {
             *event.reply = BlockEntityTickReply::Unchanged;
         }
@@ -3706,29 +3762,50 @@ fn remaining(host: &dyn Host, stack: &mod_api::ItemStack) -> Option<mod_api::Ite
 /// world during its own tick, so every machine reads its neighbours here, where
 /// they are all back in the world.
 /// The reading the machine at `pos` holds now, `None` where the block answers no comparator (a
-/// cable, the orb, a rod — or nothing at all).
+/// cable, or nothing at all). The orb reads its stack count and a rod its own buffer fraction
+/// since slice 15; both are recorded here from the block entity, which the hook's level cannot reach.
 fn strength_at(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Option<i32> {
     let block = block_at(&*host, level, pos)?;
     let kind = Kind::of(&block)?;
-    let (stored, capacity) = match kind {
-        Kind::Furnator(tier) => (saved_energy(host, level, pos)?, tier.capacity),
+    // `stored`/`capacity` feed a rod's and the eight machines' fraction; `stacks` feeds the orb's
+    // different rule. A cable declares no signal, so its zeros are never read.
+    let (stored, capacity, stacks) = match kind {
+        Kind::Furnator(tier) => (saved_energy(host, level, pos)?, tier.capacity, 0),
         Kind::Cell(tier) | Kind::Discharger(tier) => {
-            (saved_energy(host, level, pos)?, tier.capacity)
+            (saved_energy(host, level, pos)?, tier.capacity, 0)
         }
-        Kind::Hopper(tier) => (saved_energy(host, level, pos)?, tier.capacity),
-        Kind::Solar(tier) => (saved_energy(host, level, pos)?, tier.capacity),
-        Kind::Transmitter(tier) => (saved_energy(host, level, pos)?, tier.capacity),
+        Kind::Hopper(tier) => (saved_energy(host, level, pos)?, tier.capacity, 0),
+        Kind::Solar(tier) => (saved_energy(host, level, pos)?, tier.capacity, 0),
+        Kind::Transmitter(tier) => (saved_energy(host, level, pos)?, tier.capacity, 0),
+        // Slice 15: a rod answers its own buffer fraction, not "no comparator".
+        Kind::Rod(tier) => (saved_energy(host, level, pos)?, tier.capacity, 0),
+        // The orb's rule is `getInventory().getNonEmptyStacks().size()`, not its buffer's FE.
+        Kind::Orb => (0, 0, orb_stack_count(host, level, pos)?),
         // An ender block's buffer is the owner's channel, not its own compound.
         Kind::EnderCell(_) | Kind::EnderGate(_) => {
             let entity = host.block_entity(level, pos)?;
             let saved = Tag::Compound(entity.data(&*host)?);
             let key = channel_key(&saved);
             let channel = read_channels(host).get(&key);
-            (channel.stored, channel.capacity)
+            (channel.stored, channel.capacity, 0)
         }
-        Kind::Cable(_) | Kind::Orb | Kind::Rod(_) => return None,
+        Kind::Cable(_) => (0, 0, 0),
     };
-    comparator_of(kind, stored, capacity)
+    analog_reading(kind, stored, capacity, stacks)
+}
+
+/// The orb's non-empty inventory stacks across all seven slots (0 is the result, 1..6 the
+/// inputs) — upstream's `getInventory().getNonEmptyStacks().size()`. A slot the entity has not
+/// grown yet reads as empty, the same way [`read_orb`] treats its input slots.
+fn orb_stack_count(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Option<usize> {
+    let entity = host.block_entity(level, pos)?;
+    let mut count = 0;
+    for slot in 0..ORB_SLOTS as u32 {
+        if let Ok(Some(_stack)) = entity.item_slot(&*host, slot) {
+            count += 1;
+        }
+    }
+    Some(count)
 }
 
 /// The FE a machine keeps in its own saved compound (the readout clamps it into the tier).
@@ -5960,18 +6037,25 @@ mod tests {
     }
 
     #[test]
-    fn a_cable_the_orb_and_the_rods_answer_no_comparator() {
-        for kind in [
-            Kind::Cable(cable_of("powah:energy_cable_starter").unwrap()),
-            Kind::Orb,
-            Kind::Rod(rod_of("powah:energizing_rod_starter").unwrap()),
-        ] {
-            assert!(
-                !has_comparator(kind),
-                "{kind:?} answers none: no buffer, or no printed comparator"
-            );
-            assert_eq!(comparator_of(kind, 1_000, 20_000), None);
-        }
+    fn the_orb_and_the_rods_answer_a_comparator_and_the_cable_does_not() {
+        // Slice 15 closes 0.2.14's deviation 1: upstream's orb answers its non-empty stack count
+        // and a rod answers its own buffer fraction; a cable still stores nothing.
+        assert_eq!(analog_reading(Kind::Orb, 0, 0, 3), Some(3));
+        assert_eq!(analog_reading(Kind::Orb, 0, 0, 20), Some(15));
+        let rod = Kind::Rod(rod_of("powah:energizing_rod_starter").unwrap());
+        assert_eq!(analog_reading(rod, 5_000, 10_000, 0), Some(7));
+        assert_eq!(analog_reading(rod, 10_000, 10_000, 0), Some(15));
+        assert_eq!(analog_reading(rod, 0, 10_000, 0), Some(0));
+        assert_eq!(
+            analog_reading(
+                Kind::Cable(cable_of("powah:energy_cable_starter").unwrap()),
+                0,
+                0,
+                0
+            ),
+            None,
+            "a cable stores nothing and is not given a signal to make the family look complete"
+        );
     }
 
     #[test]

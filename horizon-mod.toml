@@ -1,11 +1,11 @@
-# Slices 1-14 of the Powah port, as one flat SDK package: the carried blocks, items, models,
+# Slices 1-15 of the Powah port, as one flat SDK package: the carried blocks, items, models,
 # textures, recipes, loot, tags and lang are the `assets/` and `data/` beside `src/`, and the
 # behaviour is the one `impl Hooks` there. Licence: LGPL-3.0-only (Technici4n/Powah); the full
 # text and its provenance are in LICENSE and LICENSE-NOTICE.md inside this package. Local-only
 # until the maintainer approves publishing (ARCHITECTURE.md §8).
 id = "powah"
 name = "Powah"
-version = "0.2.14"
+version = "0.2.15"
 description = """A port of Powah! (Rearchitected) for Horizon, slice 1: the starter tier of the energy
 chain. The Furnator burns a furnace fuel into carbon and makes 20 FE/t into a 20,000 FE buffer
 (one coal is 48,000 FE); the Energy Cell is a 1,000,000 FE capacitor that takes and gives 1,000
@@ -66,6 +66,10 @@ beside the machine to read it again. It is declared for the machines whose reado
 comparator (every furnator, cell, discharger, hopper, solar panel, ender cell, ender gate and
 player transmitter); a cable stores nothing and the orb and the rods print no comparator, so they
 answer none rather than a wrong number.
+Slice 15 finishes the family: the energizing orb answers the number of its non-empty inventory
+stacks (capped at 15), and an energizing rod answers the fraction of its own buffer (upstream's
+`AbstractEnergyStorage`: `(int)(stored / capacity * 15)`, so half full reads 7). A cable stores
+nothing and still answers no signal.
 Not yet ported: the creative cell, the magmator and thermo generators, the reactors, the Lens of
 Ender, the dimensional binding card, side config and the GUIs."""
 authors = ["owmii", "Technici4n", "AdLf0208"]

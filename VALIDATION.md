@@ -1,4 +1,24 @@
-# Validation — Powah slices 1 to 14
+# Validation — Powah slices 1 to 15
+
+> **0.2.15 (slice 15, finishing the comparator family)** is recorded in
+> [`notes.md`](notes.md#slice-15--finishing-the-comparator-family-the-orb-s-stack-count-and-a-rod-s-fraction-2026-11-24):
+> the slice and the gap line it comes from (slice 14's deviation 1: upstream's orb answers its
+> non-empty stack count and a rod its own buffer fraction, recorded rather than faked), the two
+> upstream reading rules (`EnergizingOrbBlock.getAnalogOutputSignal` = `min(15, getNonEmptyStacks().size())`;
+> a rod's `AbstractEnergyStorage` fraction = `(int)(stored/capacity*15)`, truncating so 5,000/10,000
+> reads 7), the red proof (two `todo!()` rules, **99 passed / 2 failed**, quoted verbatim), the ladder
+> at pin `0a875da` (**101 tests**, clippy 0 warnings, `fmt --check` clean, two `cmp`-identical builds
+> of **539,968 B**, `check`, `fits` against the pin **and** `0b14f8a`, gate **1/1** with
+> `package matches the tree`, 860 entries, no packed `Cargo.lock`, `check-recipe-types` ok) and the
+> in-game legs (main `PASS`+`EXIT:0` on the delivered archive; the control game red at the first
+> powah block; `SELFTEST=1`, `SELFTEST=comparator` and `SELFTEST=orb-comparator` all at `EXIT:1`; the
+> log gate **62/62 `--strict`**). Package: `powah.hmod`, 539,968 B, sha256
+> `f954aa9099f1ab550176602d406c1a71cba78fde765f881a65c75e58206cbd40`. Launcher build:
+> `Compiling powah (1 of 1)`, `native-0a875da-8d7947c713ed`, instance `powah-e2e`. What it proves:
+> an orb with three blaze powder (three non-empty stacks, no complete recipe) is `powered=true` with
+> wire **3**, a starter rod at 10,000/10,000 reads **15** and at 5,000/10,000 reads **7**, while a
+> cable with a full chest behind it still reads **0** — the comparator family closes without a
+> signal invented for the storage-less cable.
 
 > **0.2.14 (slice 14, the comparator reading)** is recorded in
 > [`notes.md`](notes.md#slice-14--the-comparator-reading-analog_output-2026-11-23): the slice and the

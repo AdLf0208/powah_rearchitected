@@ -3771,3 +3771,211 @@ Version: **0.2.13 → 0.2.14** (one patch). The published `[[versions]]` record 
 gains 0.2.14 at publish time — this port does not touch the registry entry.
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+
+## Slice 15 — finishing the comparator family (the orb's stack count and a rod's fraction, 2026-11-24)
+
+### The slice, quoted from this port's own gaps
+
+`## Slice 14 — the comparator reading`, `### Deviations and upstream defects this slice records`,
+item 1 (the notes' own next-slice authority):
+
+> **1. Only the printed-comparator machines answer one.** Upstream's `AbstractEnergyBlock` also
+> answers for a cable (0, no storage) and a rod (its own fraction), and the orb answers its stack
+> count. The brief restricts the hook to the blocks whose `/powah info` line prints a comparator, so
+> a comparator beside a full rod reads 0 here where upstream would read 15, and the orb's stack count
+> is not carried. Recorded rather than faked; the orb's and rods' readings are the family's next
+> slice if it is asked for.
+
+Slice 14's coverage table has the same two rows: `the orb's own comparator (non-empty stack count)`
+and `a rod's fraction, a cable's 0` marked `not carried`. This slice asks for them, so it closes both.
+
+**Chosen:** the orb's non-empty-stack count and a rod's own buffer fraction. **Why it fits
+`machines`:** no new content, no new block entity, no renderer or GUI — the orb's `Part` and both
+rods' block entities already tick; only one pure rule and two readings are new. The cable is left at
+zero (it stores nothing), so the family is complete without inventing a signal for it.
+
+### The two upstream reading rules (tag `v6.2.10`, commit `a5a8f25`)
+
+1. **`EnergizingOrbBlock.getAnalogOutputSignal`** overrides `AbstractEnergyBlock`: it returns
+   `Math.min(15, getInventory().getNonEmptyStacks().size())` — a **count**, not a fraction of the
+   buffer. Read in `FINDINGS.md` §Slice 5 (`block/energizing/EnergizingOrbBlock.java`,
+   `EnergizingOrbTile.java`; line 146: *"Comparator output is the count of non-empty stacks."*). The
+   orb's seven slots are slot 0 (result) and 1–6 (inputs), so all seven are counted.
+2. **A rod inherits `AbstractEnergyBlock`**, whose `getAnalogOutputSignal` is `Energy.toComparatorPower()`
+   — `(int)(stored / capacity * 15)`, **truncating** (`lib/logistics/energy/Energy.java:227-233`).
+   This is the same arithmetic slice 14 already uses (`runtime::comparator_strength`,
+   `src/runtime.rs:467-473`): a starter rod at 5,000 of 10,000 reads **7**, not 8; a full rod reads 15.
+   `EnergizingRodTile` is an `AbstractEnergyStorage` over `devices.energizing_rods`.
+3. **A cable's storage is 0**, so upstream's fraction would be 0. The port keeps its 0.2.14 behaviour
+   (no declaration, so a comparator beside a cable still reads the vanilla zero) rather than adding a
+   faked signal to make the family look complete.
+
+### What it ships
+
+| File | Change |
+|---|---|
+| `src/runtime.rs` | `stack_comparator(non_empty_stacks) = min(15, count)` and 2 tests |
+| `src/powah.rs` | `analog_reading(kind, stored, capacity, stacks)` (orb count / rod fraction / 8 machines / cable `None`), `orb_stack_count` over all seven slots, `strength_at` uses it, `OrbPart` queues its position and answers `has_analog_output`/`analog_output`, `/powah set` announces a rod's changed fraction; 1 rewritten test |
+| `src/lib.rs` | the orb's Part gets the two comparator hooks; a rod's `IdlePart` is declared `comparator = true` |
+| `tools/e2e.sh` | the slice-15 phase, `SELFTEST=orb-comparator`, and the full-rod leg's assertion changed from 0 to 15 |
+| `horizon-mod.toml`, `Cargo.toml`, `README.md` | version 0.2.15 and the slice's paragraph |
+
+No content change: the two readings are data and one rule, not blocks or items.
+
+### TDD: the red proof, quoted
+
+`stack_comparator`, `analog_reading` and the rewritten test were declared `todo!()` first; `cargo test`
+then printed (`ports/_shared/evidence/powah/slice15-test-red.log`, **99 passed / 2 failed**):
+
+```
+---- powah::tests::the_orb_and_the_rods_answer_a_comparator_and_the_cable_does_not stdout ----
+
+thread 'powah::tests::the_orb_and_the_rods_answer_a_comparator_and_the_cable_does_not' (20065) panicked at src/powah.rs:701:5:
+not yet implemented
+
+---- runtime::tests::the_orb_comparator_counts_non_empty_stacks_capped_at_15 stdout ----
+
+thread 'runtime::tests::the_orb_comparator_counts_non_empty_stacks_capped_at_15' (20119) panicked at src/runtime.rs:480:5:
+not yet implemented
+
+failures:
+    powah::tests::the_orb_and_the_rods_answer_a_comparator_and_the_cable_does_not
+    runtime::tests::the_orb_comparator_counts_non_empty_stacks_capped_at_15
+
+test result: FAILED. 99 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+```
+
+The rod's arithmetic test (`a_rods_comparator_is_its_own_buffer_fraction_truncated`) passed as written
+because `comparator_strength` already computes the truncated fraction; it pins the 5,000→7 value the
+in-game leg asserts. After implementation: **101 passed, 0 failed**.
+
+### The rule in the port
+
+The comparator hooks get a read-only `LevelHost` and cannot reach the block entity, so — as in slice
+14 — the number is recorded in `OUTPUTS` and announced on change. `strength_at` now reads the orb's
+seven item slots (`orb_stack_count`) and a rod's saved `energy` with its tier's capacity, and passes
+them to `analog_reading`; `publish_outputs` at the level tick's end records and notifies. `/powah set`
+publishes a rod's new fraction immediately (an orb's set changes FE, not the stack count, so its
+cached count is left alone). `has_comparator` is unchanged — it is the *readout* set of eight machines,
+not the set of blocks that answer an analog signal.
+
+### Ladder (0.2.15, pin `0a875da`)
+
+Every compile step ran in `ports/powah`, `CARGO_INCREMENTAL=0`, inside a
+`ports/tools/build-slot.sh run --job W1-powah --port ports/powah --step …` lease with `BUILD_LOCAL=1`;
+logs in `ports/_shared/evidence/powah/`.
+
+| Step | Result |
+|---|---|
+| `cargo test --offline` | **101 passed, 0 failed** (`sdk-test.log`, regenerated for 0.2.15) |
+| `cargo clippy --all-targets --offline -- -D warnings` | 0 warnings, exit 0 (`slice15-clippy.log`) |
+| `cargo fmt --check` | clean, exit 0 (`slice15-fmt.log`) |
+| two builds, `rm -f Cargo.lock` before each | `BUILD1_EXIT:0`, `BUILD2_EXIT:0`, **`cmp`-identical** — **539,968 B**, sha256 `f954aa9099f1ab550176602d406c1a71cba78fde765f881a65c75e58206cbd40`, 860 entries, `version = "0.2.15"`, `LOCKLINE:0`, `WORKSPACE:0` (`slice15-build-twice.log`) |
+| `cargo horizon-mod check powah.hmod` | `powah 0.2.15 (native-mod, format native-1/0a875da…/e59da909…, for 26.3)` · `539968 bytes, SHA-256 f954aa90…`, `CHECK_EXIT:0` (`slice15-check.log`) |
+| `fits --build 0a875da` | `0a875da  made for`, `FITS_PIN_EXIT:0` (`slice15-fits.log`) |
+| `fits --build 0b14f8a` | `0b14f8a  fits`, `FITS_OTHER_EXIT:0` (`slice15-fits-nightly.log`) |
+| `python3 ports/tools/verify-sdk-package.py powah` | **1/1**, `package matches the tree`, `SDK-only dependencies (R9)`, `no packed Cargo.lock  860 entries`, `tests 101 passed`, `skills gate PASS` (`slice15-verify.log`) |
+| `python3 ports/tools/check-recipe-types.py powah` | `powah: ok`, exit 0 |
+| log gate | `python3 ports/tools/check-e2e-logs.py powah-e2e --strict` → `logs=62 ok=62 missing-exit=0 bad-exit=0`, exit 0 |
+
+The delivered `powah.hmod` is **539,968 B**, sha256
+`f954aa9099f1ab550176602d406c1a71cba78fde765f881a65c75e58206cbd40`, **860 entries**, no packed
+`Cargo.lock`. Both fits lines are real: `--build 0a875da` prints `made for` (a tautology), while
+`--build 0b14f8a` prints `fits` — every API item still resolves on the other pinned build. No local
+type or variant named `Block`/`Item` was introduced, so `fits` had no false failure.
+
+### In-game (parity rule)
+
+Launcher build `native-0a875da-8d7947c713ed`, instance `powah-e2e`, `Compiling powah (1 of 1)`
+(`ports/_shared/evidence/powah-e2e/launcher-build-0.2.15.log`). Every `native-*` tag carrying this mod
+was removed first (`879d8e38abee` 0.2.8, `2417ecf27009` 0.2.14, `02302726280a` 0.2.10, then the first
+build of this slice) so the launcher recompiled instead of reusing an older install. The main leg is
+`ports/_shared/evidence/powah-e2e/e2e-launcher-0.2.15.log`, **`PASS` + `EXIT:0`** on the delivered
+archive (`package: powah.hmod (539968 B, sha256 f954aa90…)`), quoted:
+
+```
+== slice 14: a comparator answers nothing, even with a full container behind it ==
+  chest: wire 1, powered true
+  cable: wire 0, powered false (the full chest sits behind it at 0,100,53)
+== slice 15: a full rod answers its own buffer fraction (15) ==
+  set(2,100,52) = Energizing Rod at 2,100,52: 10000/10000 FE (100 FE/t a side, no orb, t=5664)
+  full rod: Energizing Rod at 2,100,52: 10000/10000 FE (100 FE/t a side, no orb, t=5671) -> wire 15
+== slice 15: an orb's comparator reads its non-empty stack count ==
+  block(-4,100,52) = powah:energizing_orb
+  orb: Energizing Orb at -4,100,52: 0/0 FE (no recipe, t=5741)
+  comparator(-4,100,51) = powered true, the wire in front reads 3
+== slice 15: a half-full rod reads 7 on the wire ==
+  set(2,100,52) = Energizing Rod at 2,100,52: 5000/10000 FE (100 FE/t a side, no orb, t=5779)
+  half rod: Energizing Rod at 2,100,52: 5000/10000 FE (100 FE/t a side, no orb, t=5786) -> wire 7
+```
+
+Three blaze powder are three of the blazing recipe's **four** inputs, so the orb holds no complete
+recipe (`0/0 FE`) — the signal is the stack count, not the buffer, which is the point of the rule.
+The readout at each rig shows no comparator field for an orb or a rod (0.2.14's assertion stays
+byte-identical); the readings are taken at the consumer wire, since a comparator has no block entity
+at this pin (slice 14 deviation 3).
+
+| Leg | Result |
+|---|---|
+| main | `PASS` + `EXIT:0` (`e2e-launcher-0.2.15.log`) |
+| control (same Nightly, no package) | `FAIL: expected powah:furnator_starter at 0,100,0, got 'minecraft:air'` + `EXIT:1` (`e2e-control-0.2.15.log`); the main log's own control phase shows every powah id unknown |
+| `SELFTEST=1` | `FAIL: SELFTEST flipped: the unfuelled furnator made no FE, as it should` + `EXIT:1` (`e2e-selftest-0.2.15.log`) |
+| `SELFTEST=comparator` | `FAIL: SELFTEST flipped: the comparator read 7, the readout's own 7, as it should` + `EXIT:1` (`e2e-selftest-comparator-0.2.15.log`) |
+| `SELFTEST=orb-comparator` | `FAIL: SELFTEST flipped: the orb comparator read 3, the three non-empty stacks, as it should` + `EXIT:1` (`e2e-selftest-orb-comparator-0.2.15.log`) |
+
+The first `SELFTEST=orb-comparator` attempt ran in parallel with another game and the client exited
+during slice 13 (`{"error":"game exited"}`) before reaching the new assertion; it was re-run alone
+under its own lease and failed at the orb assertion above. The discarded run is not kept as evidence.
+
+### Coverage (parity rule, the family this slice closes)
+
+| Family (from the jar) | Status |
+|---|---|
+| orb comparator (`EnergizingOrbBlock.getAnalogOutputSignal`) | **tested** — three blaze powder in three input slots read 3 on the wire, comparator `powered=true`; unit test pins 0/3/7/20→0/3/7/15 |
+| rod comparator (`AbstractEnergyStorage` fraction) | **tested** — a full starter rod reads 15 and a 5,000/10,000 rod reads 7; unit test pins the truncation and 0 |
+| cable (0, no storage) | **tested** — unchanged slice-14 rig: a full chest reads 1, the cable in the same spot reads 0 |
+| the eight machines' printed fraction (slice 14) | **tested** — unchanged: 7 at half a cell, 15 at full, 3 at a quarter |
+| orb's GUI/particles, rod's wrench link, client renderers | **not ported** — recorded slice-5 gaps, unchanged by this data-and-rule slice |
+
+### Deviations and upstream defects this slice records
+
+1. **The cable still answers nothing** rather than declaring upstream's explicit zero. Observably the
+   same (a comparator beside one reads 0), and it keeps 0.2.14's measured rig byte-identical.
+2. **Orb and rod readings are end-of-tick values**, like slice 14's machines: the hook's level is
+   read-only, so an item insert or a rod's fill is recorded at the level tick's end and announced on
+   change. A comparator reads what the block entity held at the last completed move phase.
+3. **The orb counts all seven slots**, including slot 0 (the result). Upstream's
+   `getNonEmptyStacks()` does the same; the in-game rig has no result yet, so its three inputs are the
+   whole count.
+
+**Upstream defects fixed: none.** The two readings are upstream's own rules; no defect was found
+while measuring them.
+
+### Harness findings this slice measured (for the next port)
+
+1. **Two headless games in parallel on a busy box can exit mid-leg** (`{"error":"game exited"}` at
+   tick ~4,900 with five slots occupied by other ports' e2e legs). Run each leg under its own lease,
+   one at a time when `MemAvailable` is low; a slot is a concurrency permit, not a promise of RAM.
+2. `SELFTEST` modes must invert the assertion they are meant to prove *at the assertion's own phase*;
+   the orb mode branches around the normal equality so the run reaches the orb rig before failing.
+
+Version: **0.2.14 → 0.2.15** (one patch). The published `[[versions]]` record keeps 0.2.14 and gains
+0.2.15 at publish time — this port does not touch the registry entry. Title: `Update powah 0.2.15`
+(the entry is ours on `main`).
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+
+## Next slice
+
+**Family:** the side-config half of slice 1's gap 6. **`## Slice 14` deviation 1 and slice 13's own
+notes** close the comparator family and the redstone half; the same gap line says *"The side config
+stays open: a `ModEnergyBuffer` declares six face booleans, not six per-side transfer types."* No
+later slice touches it. **Why it fits `machines`:** it is six booleans in the block entity's saved
+compound plus one gate in the existing per-face insert/extract path and the command surface — no new
+block, item, renderer or hook family, the same shape as slice 13's `redstone_mode`. **In-game
+assertion:** place a starter cell, set its north face to `none` with the new command, put a charged
+source cell behind a cable on that face and an empty cell behind a second cable on the south face;
+read `/powah info` at the sink and assert it stays at **0 FE** over 20 ticks while the south face
+delivers exactly **500 × dt**, then flip the north face back and assert it begins charging — a
+`SELFTEST=side` leg must invert the 0 and end `EXIT:1`.
+

@@ -238,6 +238,16 @@
 #  - a full energizing rod reads nothing, because its readout prints no comparator.
 # SELFTEST=comparator expects the cell's comparator to read something other than its readout
 # (it must FAIL), proving the equality and its notification can fail.
+#
+# Slice 15 (finishing the comparator family, 0.2.14 deviation 1) adds:
+#  - an energizing orb with three blaze powder in its input slots: a `minecraft:comparator` on its
+#    north face reads the count of non-empty stacks (3), so the wire in front carries 3 and the
+#    comparator is `powered=true` (upstream's `EnergizingOrbBlock.getAnalogOutputSignal`);
+#  - a starter rod set to 5,000 of 10,000 reads 7 on that wire, and a full rod reads 15 — its own
+#    buffer fraction, upstream's `AbstractEnergyStorage` arithmetic, truncated;
+#  - a cable still answers nothing (stores nothing), asserted by the slice-14 phase above.
+# SELFTEST=orb-comparator expects the orb's wire NOT to read 3 (it must FAIL), proving the new
+# stack-count assertion can fail.
 set -euo pipefail
 export LC_ALL=C
 
@@ -2911,7 +2921,9 @@ echo "  cable: wire $cable_signal, powered $cable_powered (the full chest sits b
 [ "$cable_signal" = 0 ] || fail "a cable stores nothing and must answer no comparator signal, got $cable_signal"
 [ "$cable_powered" = false ] || fail "a comparator beside a cable must not be powered, got '$cable_powered'"
 
-echo "== slice 14: a full rod answers nothing (its readout prints no comparator) =="
+echo "== slice 15: a full rod answers its own buffer fraction (15) =="
+# 0.2.14 declared no output for a rod; slice 15 closes that deviation with upstream's
+# `AbstractEnergyStorage` fraction. Its readout still prints no comparator field.
 place 2 100 52 powah:energizing_rod_starter
 set_energy 2 100 52 10000
 rod_line=$(info 2 100 52)
@@ -2921,11 +2933,59 @@ esac
 comparator_rig 2 100 52
 rod_signal=$(cmp_signal 2 100 51)
 echo "  full rod: $rod_line -> wire $rod_signal"
-[ "$rod_signal" = 0 ] ||
-    fail "a rod may hold FE but prints no comparator, so it answers none; the comparator reads $rod_signal"
+[ "$rod_signal" = 15 ] ||
+    fail "a full starter rod is 10,000/10,000, so its comparator reads 15; got $rod_signal"
 
 # The readings are data, not blocks: nothing this slice added is left standing.
 for block in "-4 100 50" "-4 100 51" "-4 100 52" "-2 100 50" "-2 100 51" "-2 100 52" "0 100 50" "0 100 51" "0 100 52" "0 100 53" "2 100 50" "2 100 51" "2 100 52"; do
+    set -- $block
+    ctl command "setblock $1 $2 $3 minecraft:air" >/dev/null
+done
+ctl command "fill -6 99 48 4 99 53 minecraft:air" >/dev/null
+ctl wait 3
+
+echo "== slice 15: an orb's comparator reads its non-empty stack count =="
+# Upstream's `EnergizingOrbBlock.getAnalogOutputSignal` is `min(15, getNonEmptyStacks().size())`,
+# not a fraction of the buffer. Three of the four blaze powder the blazing energizing recipe asks
+# for are deliberately not a complete recipe (the buffer stays 0) — the signal is the stack count.
+ctl command "fill -6 99 48 4 99 53 minecraft:stone" >/dev/null
+ctl wait 3
+place -4 100 52 powah:energizing_orb
+orb_put -4 100 52 1 minecraft:blaze_powder 1
+orb_put -4 100 52 2 minecraft:blaze_powder 1
+orb_put -4 100 52 3 minecraft:blaze_powder 1
+orb_line=$(info -4 100 52)
+echo "  orb: $orb_line"
+comparator_rig -4 100 52
+orb_signal=$(cmp_signal -4 100 51)
+orb_powered=$(cmp_powered -4 100 51)
+echo "  comparator(-4,100,51) = powered $orb_powered, the wire in front reads $orb_signal"
+[ "$orb_powered" = true ] ||
+    fail "a comparator beside an orb with three inputs must be powered, got '$orb_powered'"
+if [ "$SELFTEST" = orb-comparator ]; then
+    echo "  SELFTEST: expecting the orb's wire not to read 3 (this must fail)"
+    [ "$orb_signal" != 3 ] ||
+        fail "SELFTEST flipped: the orb comparator read $orb_signal, the three non-empty stacks, as it should"
+else
+    [ "$orb_signal" = 3 ] ||
+        fail "three blaze powder are three non-empty stacks, so the orb's comparator must read 3; got $orb_signal"
+fi
+
+echo "== slice 15: a half-full rod reads 7 on the wire =="
+place 2 100 52 powah:energizing_rod_starter
+set_energy 2 100 52 5000
+half_rod_line=$(info 2 100 52)
+case "$half_rod_line" in
+    *comparator*) fail "a rod's readout prints no comparator, got '$half_rod_line'" ;;
+esac
+comparator_rig 2 100 52
+half_signal=$(cmp_signal 2 100 51)
+echo "  half rod: $half_rod_line -> wire $half_signal"
+[ "$half_signal" = 7 ] ||
+    fail "a starter rod at 5,000/10,000 reads (int)(0.5*15) = 7; got $half_signal"
+
+# The new rig is output data too: leave the arena as we found it.
+for block in "-4 100 50" "-4 100 51" "-4 100 52" "2 100 50" "2 100 51" "2 100 52"; do
     set -- $block
     ctl command "setblock $1 $2 $3 minecraft:air" >/dev/null
 done
@@ -3198,4 +3258,4 @@ ctl command "gamemode creative @s" >/dev/null
 ctl command "clear @s" >/dev/null
 ctl wait 3
 
-echo "PASS: a fuelled furnator made FE, the cable carried it into the cell, an unfuelled furnator made nothing, a cell without a cable stayed empty, a full cell stayed full, a charged cell drained through a cable into an empty one, a three-cable network carried a charge across its run with the two cells' sum unchanged and a cell off the network empty, the six material items exist, every material and machine recipe crafted its declared output and consumed its ingredients, each machine dropped itself, every energy cell tier clamped 2,000,000,000 FE at its own capacity and carried its own transfer, two adjacent cells swapped within their own transfer cap without creating FE, every cell tier dropped itself, a starter rod filled the orb to exactly its recipe's 10,000 FE and stood at 0, an orb with no rod and an orb with no recipe produced nothing while its rod kept its charge, a nitro rod made a blazing crystal at exactly 120,000 FE and kept the other 80,000, the blaze-rod blazing recipe, the niotic, spirited and nitro crystals all energised, every new block and item exists, every carried recipe including the five previously blocked cells crafts its declared output and consumes its ingredients, every furnator tier clamped 2,000,000,000 FE at its own generation capacity, a nitro furnator made exactly 40,000 FE in one tick of a coal and a starter furnator kept energy + carbon at 48,000 while filling slowly, every cable tier read back its own rate, a basic network refused to relay through a starter cable and delivered once that cable was basic, every new furnator, cable and discharger tier dropped itself, a starter furnator charged the item in its charge slot at exactly min(transfer, stored, room) with the FE coming out of its own buffer and left an item with no buffer alone, a cell charged two slots out of one budget, a 5,000 FE furnator and a 4,000 FE cell broken in survival carried their buffers on their own items and gave them back on placement while their spilled stacks did not, an item doctored to 2,000,000,000 FE clamped to its tier's 20,000 on placement and a fresh item placed an empty machine, a starter hopper spent exactly 500 FE a tick on the cell item in the chest it faced and the two halves of the 5,000 it held added up, a hopper facing away from the chest charged nothing and a stone in the chest took nothing, every hopper tier dropped itself, a 7,000 FE hopper carried its buffer back on its own item, a starter solar panel under an open noon sky generated exactly 20 FE a tick measured against the game clock and filled its last 20 of room without overflowing, a stone above it and midnight each left it at exactly 5,000 for 60 ticks, a cell under a panel charged while a cell beside it stayed empty and the panel took no fill, a nitro panel clamped 2,000,000,000 FE at 40,000,000 and named its 2,000 FE/t, every solar panel tier dropped itself, the photoelectric pane and all seven panels crafted, two ender cells on one channel held and showed the same 100,000 FE while a cell on another channel read 0, a cell moved to the fresh channel read 0 while its peer kept exactly 100,000 and moving it back found the channel's FE again, an ender cell's extender item gave its channel 4,000,000 FE of capacity and its charge slot took 1,000 a tick out of the channel, the channel gave its tier's 4,000 a tick and lost exactly what the sink gained, an ender gate fed only the hopper on its facing side at the cable row's 500 a tick, the nitro ender cell and gate named 12 channels and their 2,000,000/1,000,000 FE a tick, both ender tags matched in game, every ender cell and gate tier dropped itself, a starter player transmitter read its slot empty with no card, a card bound to the operator by its own use named them in the transmitter's readout, the transmitter spent exactly 500 FE a tick out of its 10,000 on the cell item in that player's inventory and the item gained whole 500 FE steps with the two halves adding up, a blank card charged nothing and spent nothing, a nitro transmitter clamped 2,000,000,000 FE and named its 1,000,000 FE/t charging rate, powah:player_transmitters matched in game, a broken 7,000 FE transmitter carried its buffer back on its own item, every transmitter tier dropped itself, an aerial pearl used on a zombie gave the player aerial pearl and killed it, the redstone mode saved and read back through /powah redstone with the readout naming it only when it was not the default, a shut gate holding the transmitter, the furnator, the cell, the cable, the discharger, the hopper, the solar panel and the ender cell at their own work and every one of them running again when the gate opened, a comparator beside a 500,000 FE cell read the strength its readout printed, the reading tracked the buffer to 15 at full and 3 at a quarter, a stone read nothing, a cable answered nothing even with a full chest behind it, a full rod answered nothing because its readout prints no comparator, and every guessed id is unknown without the package"
+echo "PASS: a fuelled furnator made FE, the cable carried it into the cell, an unfuelled furnator made nothing, a cell without a cable stayed empty, a full cell stayed full, a charged cell drained through a cable into an empty one, a three-cable network carried a charge across its run with the two cells' sum unchanged and a cell off the network empty, the six material items exist, every material and machine recipe crafted its declared output and consumed its ingredients, each machine dropped itself, every energy cell tier clamped 2,000,000,000 FE at its own capacity and carried its own transfer, two adjacent cells swapped within their own transfer cap without creating FE, every cell tier dropped itself, a starter rod filled the orb to exactly its recipe's 10,000 FE and stood at 0, an orb with no rod and an orb with no recipe produced nothing while its rod kept its charge, a nitro rod made a blazing crystal at exactly 120,000 FE and kept the other 80,000, the blaze-rod blazing recipe, the niotic, spirited and nitro crystals all energised, every new block and item exists, every carried recipe including the five previously blocked cells crafts its declared output and consumes its ingredients, every furnator tier clamped 2,000,000,000 FE at its own generation capacity, a nitro furnator made exactly 40,000 FE in one tick of a coal and a starter furnator kept energy + carbon at 48,000 while filling slowly, every cable tier read back its own rate, a basic network refused to relay through a starter cable and delivered once that cable was basic, every new furnator, cable and discharger tier dropped itself, a starter furnator charged the item in its charge slot at exactly min(transfer, stored, room) with the FE coming out of its own buffer and left an item with no buffer alone, a cell charged two slots out of one budget, a 5,000 FE furnator and a 4,000 FE cell broken in survival carried their buffers on their own items and gave them back on placement while their spilled stacks did not, an item doctored to 2,000,000,000 FE clamped to its tier's 20,000 on placement and a fresh item placed an empty machine, a starter hopper spent exactly 500 FE a tick on the cell item in the chest it faced and the two halves of the 5,000 it held added up, a hopper facing away from the chest charged nothing and a stone in the chest took nothing, every hopper tier dropped itself, a 7,000 FE hopper carried its buffer back on its own item, a starter solar panel under an open noon sky generated exactly 20 FE a tick measured against the game clock and filled its last 20 of room without overflowing, a stone above it and midnight each left it at exactly 5,000 for 60 ticks, a cell under a panel charged while a cell beside it stayed empty and the panel took no fill, a nitro panel clamped 2,000,000,000 FE at 40,000,000 and named its 2,000 FE/t, every solar panel tier dropped itself, the photoelectric pane and all seven panels crafted, two ender cells on one channel held and showed the same 100,000 FE while a cell on another channel read 0, a cell moved to the fresh channel read 0 while its peer kept exactly 100,000 and moving it back found the channel's FE again, an ender cell's extender item gave its channel 4,000,000 FE of capacity and its charge slot took 1,000 a tick out of the channel, the channel gave its tier's 4,000 a tick and lost exactly what the sink gained, an ender gate fed only the hopper on its facing side at the cable row's 500 a tick, the nitro ender cell and gate named 12 channels and their 2,000,000/1,000,000 FE a tick, both ender tags matched in game, every ender cell and gate tier dropped itself, a starter player transmitter read its slot empty with no card, a card bound to the operator by its own use named them in the transmitter's readout, the transmitter spent exactly 500 FE a tick out of its 10,000 on the cell item in that player's inventory and the item gained whole 500 FE steps with the two halves adding up, a blank card charged nothing and spent nothing, a nitro transmitter clamped 2,000,000,000 FE and named its 1,000,000 FE/t charging rate, powah:player_transmitters matched in game, a broken 7,000 FE transmitter carried its buffer back on its own item, every transmitter tier dropped itself, an aerial pearl used on a zombie gave the player aerial pearl and killed it, the redstone mode saved and read back through /powah redstone with the readout naming it only when it was not the default, a shut gate holding the transmitter, the furnator, the cell, the cable, the discharger, the hopper, the solar panel and the ender cell at their own work and every one of them running again when the gate opened, a comparator beside a 500,000 FE cell read the strength its readout printed, the reading tracked the buffer to 15 at full and 3 at a quarter, a stone read nothing, a cable answered nothing even with a full chest behind it, a full rod answered its own buffer fraction 15 and a half-full rod 7 even though its readout prints no comparator, an orb with three blaze powder read its three non-empty stacks as 3, a cable still answered nothing, and every guessed id is unknown without the package"
