@@ -27,14 +27,14 @@ use mod_api::{
 };
 
 use crate::runtime::{
-    CABLE_TIER_COUNT, CELL_TIER_COUNT, CableTier, CellTier, Channel, CreativeCellTier,
-    DISCHARGER_TIER_COUNT, DischargerTier, ENDER_TIER_COUNT, EnderTier, EnergizingRecipe,
-    FURNATOR_TIER_COUNT, Furnator, FurnatorTier, HOPPER_TIER_COUNT, HopperTier, MAX_CHANNELS,
-    Neighbour, ORB_MAX_ENERGY, ORB_OUTPUT_SLOT, ORB_SLOTS, ROD_TIER_COUNT, RedstoneMode, RodTier,
-    SOLAR_TIER_COUNT, Sky, SolarTier, TRANSMITTER_TIER_COUNT, TransferType, cable_tier, cell_tier,
-    check_redstone, clamp_energy, comparator_strength, creative_after_give, creative_cell_tier,
-    default_sides, discharger_tier, ender_cell_tier, ender_gate_tier, furnator_tier, network_moves,
-    push_amount, rod_tier,
+    BATTERY_TIER_COUNT, BatteryTier, CABLE_TIER_COUNT, CELL_TIER_COUNT, CableTier, CellTier,
+    Channel, CreativeCellTier, DISCHARGER_TIER_COUNT, DischargerTier, ENDER_TIER_COUNT, EnderTier,
+    EnergizingRecipe, FURNATOR_TIER_COUNT, Furnator, FurnatorTier, HOPPER_TIER_COUNT, HopperTier,
+    MAX_CHANNELS, Neighbour, ORB_MAX_ENERGY, ORB_OUTPUT_SLOT, ORB_SLOTS, ROD_TIER_COUNT,
+    RedstoneMode, RodTier, SOLAR_TIER_COUNT, Sky, SolarTier, TRANSMITTER_TIER_COUNT, TransferType,
+    battery_tier, cable_tier, cell_tier, check_redstone, clamp_energy, comparator_strength,
+    creative_after_give, creative_cell_tier, default_sides, discharger_tier, ender_cell_tier,
+    ender_gate_tier, furnator_tier, network_moves, push_amount, rod_tier,
 };
 
 /// The energizing orb block and its item.
@@ -106,6 +106,19 @@ pub(crate) const CELLS: [(&str, &str); CELL_TIER_COUNT] = [
     ("powah:energy_cell_niotic", "energy_cell_niotic"),
     ("powah:energy_cell_spirited", "energy_cell_spirited"),
     ("powah:energy_cell_nitro", "energy_cell_nitro"),
+];
+
+/// Every battery item's id, in the ladder's order (the index [`battery_tier`]
+/// takes). A battery is a plain `ITEM_ENERGY` item, not a block: it has no
+/// block entity type, unlike the machine arrays below.
+pub(crate) const BATTERIES: [&str; BATTERY_TIER_COUNT] = [
+    "powah:battery_starter",
+    "powah:battery_basic",
+    "powah:battery_hardened",
+    "powah:battery_blazing",
+    "powah:battery_niotic",
+    "powah:battery_spirited",
+    "powah:battery_nitro",
 ];
 
 /// Every energy discharger tier's block id and block entity type name, in the
@@ -265,6 +278,11 @@ pub(crate) struct ItemBuffer {
 /// The item buffer of the machine `block` names, `None` for a block whose item
 /// holds none (the cable stores nothing and the orb is not an energy block).
 pub(crate) fn item_buffer(block: &str) -> Option<ItemBuffer> {
+    // A battery is a plain item (`Itms.BATTERY`), not a machine block: its id
+    // never names a `Kind`, so it is looked up before the block table.
+    if let Some(buffer) = battery_item_buffer(block) {
+        return Some(buffer);
+    }
     match Kind::of(block)? {
         // `AbstractEnergyProvider.getTransferType` is `Transfer.EXTRACT`: a furnator's
         // own item gives and never takes.
@@ -604,6 +622,24 @@ pub(crate) fn cable_of(block: &str) -> Option<CableTier> {
 pub(crate) fn cell_of(block: &str) -> Option<CellTier> {
     let index = CELLS.iter().position(|(id, _)| *id == block)?;
     cell_tier(index)
+}
+
+/// The battery tier an **item** id names, with its numbers; `None` for any other
+/// item. Batteries are plain items (`Itms.BATTERY`), so their ids are not blocks.
+pub(crate) fn battery_item_of(item: &str) -> Option<BatteryTier> {
+    let index = BATTERIES.iter().position(|id| *id == item)?;
+    battery_tier(index)
+}
+
+/// The `ITEM_ENERGY` buffer of a battery item: upstream's `EnergyItem.getEnergyInfo()`
+/// gives it the tier's capacity and the transfer as both its insert and extract
+/// limit (`isChargeable()` is true for every battery).
+pub(crate) fn battery_item_buffer(item: &str) -> Option<ItemBuffer> {
+    battery_item_of(item).map(|tier| ItemBuffer {
+        capacity: tier.capacity,
+        max_insert: tier.transfer,
+        max_extract: tier.transfer,
+    })
 }
 
 /// The energy discharger a block id names, with its tier's numbers; `None` for any other
@@ -2511,6 +2547,7 @@ pub(crate) fn sky_at(host: &dyn Host, level: LevelRef, pos: [i32; 3]) -> Sky {
 pub(crate) fn declare_commands(commands: &mut Vec<Command>) {
     commands.push(Command::op("powah info <pos:block_pos>", 2));
     commands.push(Command::op("powah set <amount:integer> <pos:block_pos>", 2));
+    commands.push(Command::op("powah item <pos:block_pos>", 2));
     commands.push(Command::op(
         "powah item <amount:integer> <pos:block_pos>",
         2,
@@ -4052,6 +4089,38 @@ pub(crate) fn set_item_energy(
     }
 }
 
+/// `/powah item <pos>` — the charge of the energy item in a machine's charge
+/// slot, with its tier's capacity and transfer and the level's own clock. An
+/// opt-in readout: it is never added to `/powah info`, whose lines every earlier
+/// leg asserts byte-for-byte. The battery ladder is proven through this reply.
+pub(crate) fn item_charge_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> String {
+    let Some(level) = level_now(host) else {
+        return "No Powah block there.".to_owned();
+    };
+    let Some(block) = block_at(&*host, level, pos) else {
+        return "No Powah block there.".to_owned();
+    };
+    if item_slots(&block) == 0 {
+        return "That machine has no item charge slot.".to_owned();
+    }
+    let Some(entity) = host.block_entity(level, pos) else {
+        return "No Powah block there.".to_owned();
+    };
+    let Ok(Some(stack)) = entity.item_slot(&*host, CHARGE_SLOT as u32) else {
+        return "The charge slot holds no item that carries FE.".to_owned();
+    };
+    let item = stack.item().id(&*host).to_owned();
+    let Some(buffer) = item_buffer(&item) else {
+        return "The charge slot holds no item that carries FE.".to_owned();
+    };
+    let held = clamp_energy(held_energy(&stack), buffer.capacity);
+    let time = level.game_time(&*host).unwrap_or(0);
+    format!(
+        "Charge on {item}: {held}/{} FE ({} FE/t, t={time})",
+        buffer.capacity, buffer.max_extract
+    )
+}
+
 /// The fuel slot, as `AbstractGeneratorBlock.initBurn` reads it: the item's
 /// smelting burn time and the shrink (or the crafting remainder) that takes it.
 struct FuelSlot<'a, 'g> {
@@ -4733,14 +4802,18 @@ mod tests {
         declare_commands(&mut commands);
         assert_eq!(
             commands.len(),
-            9,
-            "every usage is declared: `info`, `set`, the item charge control, the channel control, \
-             the three redstone modes and the side-config readout and setter"
+            10,
+            "every usage is declared: `info`, `set`, the item charge readout and control, the \
+             channel control, the three redstone modes and the side-config readout and setter"
         );
         let usages: Vec<&str> = commands
             .iter()
             .map(|command| command.usage.as_str())
             .collect();
+        assert!(
+            usages.contains(&"powah item <pos:block_pos>"),
+            "the battery readout is opt-in, never a field on `info`: {usages:?}"
+        );
         assert!(
             usages.contains(&"powah item <amount:integer> <pos:block_pos>"),
             "the item charge control is a usage of its own: {usages:?}"
@@ -5041,6 +5114,54 @@ mod tests {
         let mut doctored = Compound::new();
         doctored.insert(KEY_CHANNEL.into(), Tag::Int(99));
         assert_eq!(channel_key(&Tag::Compound(doctored)).channel, 11);
+    }
+
+    #[test]
+    fn every_battery_item_is_one_of_the_ladder_with_its_own_buffer() {
+        // `BATTERIES` are seven plain items, one per config row; each is a
+        // chargeable ITEM_ENERGY buffer with insert/extract = the tier's transfer.
+        let expected = [
+            ("powah:battery_starter", 1_000_000, 1_000),
+            ("powah:battery_basic", 4_000_000, 4_000),
+            ("powah:battery_hardened", 10_000_000, 10_000),
+            ("powah:battery_blazing", 40_000_000, 40_000),
+            ("powah:battery_niotic", 100_000_000, 100_000),
+            ("powah:battery_spirited", 400_000_000, 400_000),
+            ("powah:battery_nitro", 2_000_000_000, 2_000_000),
+        ];
+        for (index, (id, capacity, transfer)) in expected.into_iter().enumerate() {
+            assert_eq!(BATTERIES[index], id, "the ladder's item id {index}");
+            let tier = battery_item_of(id).unwrap_or_else(|| panic!("{id} is a battery"));
+            assert_eq!(
+                (tier.capacity, tier.transfer),
+                (capacity, transfer),
+                "{id}'s numbers"
+            );
+            assert_eq!(
+                item_buffer(id),
+                Some(ItemBuffer {
+                    capacity,
+                    max_insert: transfer,
+                    max_extract: transfer,
+                }),
+                "a battery is chargeable both ways at its transfer"
+            );
+        }
+        assert_eq!(
+            battery_item_of("minecraft:stone"),
+            None,
+            "a stone is not a battery"
+        );
+        assert_eq!(
+            battery_item_of(CELL),
+            None,
+            "an energy cell is not a battery item"
+        );
+        assert_eq!(
+            battery_item_of(BINDING_CARD),
+            None,
+            "a card is not a battery"
+        );
     }
 
     #[test]

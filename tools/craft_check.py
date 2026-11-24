@@ -110,6 +110,22 @@ CELL_HARDENED = cell("powah:steel_energized", "powah:capacitor_hardened",
                      "powah:energy_cell_basic")
 
 
+def battery(kind, capacitor_id, below):
+    """`"oko"/"iri"/"oco"`: the tier's material on the corners, its capacitor
+    beside the redstone block in the middle row, and the previous battery at
+    the bottom. The starter is the jar's exception — `"oio"/"ici"/"oio"`."""
+    return {"powah:dielectric_paste": [100, 102, 106, 108],
+            kind: [101],
+            capacitor_id: [103, 105],
+            "minecraft:redstone_block": [104],
+            below: [107]}
+
+
+BATTERY_STARTER = {"powah:dielectric_paste": [100, 102, 106, 108],
+                   "powah:capacitor_basic": [101, 103, 105, 107],
+                   "minecraft:redstone_block": [104]}
+
+
 def furnator(material, capacitor_id, below):
     """`ggg/cdc/gfg`: the tier's material round the ring, its capacitor beside
     the casing, and the previous tier's furnator in the bottom middle."""
@@ -503,6 +519,27 @@ CASES = [
             "minecraft:iron_bars": [101, 103, 105, 107],
             "minecraft:ender_pearl": [104]},
            "powah:aerial_pearl", 1),
+    # --- slice 18: the seven battery items (the jar's own shaped recipes) ----
+    shaped("paste + capacitor + redstone -> a starter battery",
+           BATTERY_STARTER, "powah:battery_starter", 1),
+    shaped("iron + large capacitor + starter battery -> a basic battery",
+           battery("minecraft:iron_ingot", "powah:capacitor_basic_large",
+                   "powah:battery_starter"), "powah:battery_basic", 1),
+    shaped("steel + hardened capacitor + basic battery -> a hardened battery",
+           battery("powah:steel_energized", "powah:capacitor_hardened",
+                   "powah:battery_basic"), "powah:battery_hardened", 1),
+    shaped("blazing crystal + blazing capacitor + hardened battery -> a blazing battery",
+           battery("powah:crystal_blazing", "powah:capacitor_blazing",
+                   "powah:battery_hardened"), "powah:battery_blazing", 1),
+    shaped("niotic crystal + niotic capacitor + blazing battery -> a niotic battery",
+           battery("powah:crystal_niotic", "powah:capacitor_niotic",
+                   "powah:battery_blazing"), "powah:battery_niotic", 1),
+    shaped("spirited crystal + spirited capacitor + niotic battery -> a spirited battery",
+           battery("powah:crystal_spirited", "powah:capacitor_spirited",
+                   "powah:battery_niotic"), "powah:battery_spirited", 1),
+    shaped("nitro crystal + nitro capacitor + spirited battery -> a nitro battery",
+           battery("powah:crystal_nitro", "powah:capacitor_nitro",
+                   "powah:battery_spirited"), "powah:battery_nitro", 1),
 ]
 
 
@@ -608,7 +645,13 @@ def main():
         failures.append(message)
         print(f"FAIL: {message}", file=sys.stderr)
 
-    for index, case in enumerate(CASES):
+    # `CRAFT_ONLY=battery` limits a bounded verdict leg to the family it adds;
+    # with no filter the full replay proves every carried recipe as before.
+    only = os.environ.get("CRAFT_ONLY", "")
+    cases = [case for case in CASES if not only or only in case["want"][0]]
+    if not cases:
+        raise SystemExit(f"CRAFT_ONLY={only!r} matched no recipe")
+    for index, case in enumerate(cases):
         want_item, want_count = case["want"]
         # One item per grid slot, plus the count the pattern repeats a slot by.
         given = {}
@@ -697,6 +740,10 @@ def main():
 
     if failures:
         raise SystemExit(1)
+    if only:
+        print(f"recipe PASS: all {len(cases)} {only} recipes craft their declared output id and "
+              "count, and every ingredient is consumed")
+        return
     print("recipe PASS: every carried recipe — the eight material recipes, the three machines, "
           "the basic cell, slice 5's orb, seven rods, six capacitors, five cells and the blazing "
           "crystal block both ways, slice 6's six furnator tiers and twelve cable recipes, "

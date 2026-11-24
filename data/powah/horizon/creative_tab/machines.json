@@ -97,6 +97,13 @@
     "powah:capacitor_niotic",
     "powah:capacitor_spirited",
     "powah:capacitor_nitro",
-    "powah:energy_cell_creative"
+    "powah:energy_cell_creative",
+    "powah:battery_starter",
+    "powah:battery_basic",
+    "powah:battery_hardened",
+    "powah:battery_blazing",
+    "powah:battery_niotic",
+    "powah:battery_spirited",
+    "powah:battery_nitro"
   ]
 }

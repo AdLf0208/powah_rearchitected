@@ -4354,21 +4354,233 @@ gains 0.2.17 at publish time — this port does not touch the registry entry. Ti
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
 
+## Slice 18 — the energy battery ladder (2026-11-24)
+
+### The slice, quoted from this port's own gaps
+
+`## Next slice` (the previous one) named it verbatim, from `## Deviations and gaps (slice 1)`,
+item 11 — *"The other 6 tiers, the creative cell and ~15 machines are unported"* — and from
+slice 2's deferred item charging: *"Powah's batteries are unported, so nothing in the package
+can be charged"*. Slice 17 closed the creative cell, so the battery items are the next thing
+this port's existing item-energy family can act on. **Why it fits `machines`:** a battery is
+`BatteryItem extends EnergyItem` over `devices.batteries = EnergyConfig(batteryCapacity(),
+batteryTransfer())` — the cell's 1M/1,000 starter row — with an `ITEM_ENERGY` buffer (slice 7's
+family already declares that capability for machine items), seven carried recipes and no
+block, renderer, GUI or new hook. The creative-cell clamp shape was the precedent for the
+i32 check.
+
+### The artefact (upstream tag `v6.2.10`, commit `a5a8f25`)
+
+Read from `ports/_shared/upstream/powah/src/main/java/owmii/powah/`:
+
+- `item/BatteryItem.java:21-29` — `BatteryItem extends EnergyItem<…>` and `getConfig()` returns
+  `Powah.config().devices.batteries`.
+- `config/v2/PowahConfig.java:90-92` — `devices.batteries = new EnergyConfig(batteryCapacity(),
+  batteryTransfer())`: the **same two functions** as `energy_cells` (`:104-106`) and `dischargers`
+  (`:95-97`).
+- `config/v2/DefaultEnergies.java:62-72` — `batteryCapacity() = reactorProduction() * 4000`
+  (`baseScaling × 250 × 4000 = baseScaling × 1,000,000`) and `batteryTransfer() =
+  cableTransfer() * 2` (`baseScaling × 250 × 4 = baseScaling × 1,000`), with `baseScaling()`
+  `:15-17` = `[1, 4, 10, 40, 100, 400, 2000]`.
+- `lib/item/EnergyItem.java:25-37` — `getEnergyInfo()` gives the tier's capacity as both the
+  insert and extract limit, and `isChargeable()` is true.
+- `item/Itms.java:34-35` — `Itms.BATTERY = new VarReg<>(…, variant -> new BatteryItem(new
+  Item.Properties().stacksTo(1), variant), Tier.getNormalVariants())`: seven normal tiers, **stack 1**.
+
+| Tier | capacity (FE) | transfer (FE) |
+|---|---:|---:|
+| starter | 1,000,000 | 1,000 |
+| basic | 4,000,000 | 4,000 |
+| hardened | 10,000,000 | 10,000 |
+| blazing | 40,000,000 | 40,000 |
+| niotic | 100,000,000 | 100,000 |
+| spirited | 400,000,000 | 400,000 |
+| nitro | 2,000,000,000 | 2,000,000 |
+
+**No clamp:** upstream's largest row is 2,000,000,000, below the SDK's `i32::MAX`
+(2,147,483,647), so every tier is expressible. The creative cell's 9e18 was the case that
+needed a deviation; this one does not. Recorded by `the_battery_ladder_fits_the_sdks_i32_energy_type`.
+
+### What it ships
+
+| File | Change |
+|---|---|
+| `src/runtime.rs` | `BATTERY_TIER_COUNT`, `BatteryTier`, `battery_tier(index)` derived from `baseScaling` + the two config functions; 3 tests |
+| `src/powah.rs` | `BATTERIES` (seven plain item ids), `battery_item_of`, `battery_item_buffer`, `item_buffer` recognizes batteries before the block table, `/powah item <pos>` opt-in readout `item_charge_line`, 2 new tests (incl. the operator-only count 9→10) |
+| `src/lib.rs` | `declare_battery` registers each battery's `ITEM_ENERGY` handler (`MachineEnergy`, the same one a machine item uses); the new read usage is operator-only (level 2) |
+| `tools/carry_slice18.py` | 42 carried/written files and the creative tab, `--check` reproducible |
+| `tools/craft_check.py` | the seven jar recipes + `CRAFT_ONLY=<family>` for bounded verdict legs |
+| `tools/e2e-battery.sh` | the bounded verdict leg: tiers, rate, 5,000-FE conservation, stone, recipes, control, two selftests |
+| `horizon-mod.toml`, `Cargo.toml`, `README.md` | version 0.2.18 and the slice's paragraph |
+
+No existing `/powah info` line changed: the battery readout is a new **opt-in** `/powah item
+<pos>` form, so every earlier e2e assertion stays byte-identical. The existing `/powah item
+<amount> <pos>` setter now clamps at the **item's** buffer (a battery's capacity), which is what
+exposes the tier's capacity in game.
+
+### TDD: the red proof, quoted
+
+`battery_tier` and `battery_item_of` were declared with `todo!()` and four tests written against
+them before any implementation; `cargo test` printed (`evidence/powah/slice18-test-red.log`):
+
+```text
+---- powah::tests::every_battery_item_is_one_of_the_ladder_with_its_own_buffer stdout ----
+
+thread 'powah::tests::every_battery_item_is_one_of_the_ladder_with_its_own_buffer' (372870) panicked at src/powah.rs:626:5:
+not yet implemented: slice 18: the battery item ids
+
+---- runtime::tests::batteries_and_cells_share_the_devices_config_row stdout ----
+
+thread 'runtime::tests::batteries_and_cells_share_the_devices_config_row' (372942) panicked at src/runtime.rs:156:5:
+not yet implemented: slice 18: the battery tier ladder
+
+---- runtime::tests::every_battery_tier_is_the_battery_config_ladder stdout ----
+
+thread 'runtime::tests::every_battery_tier_is_the_battery_config_ladder' (372944) panicked at src/runtime.rs:156:5:
+not yet implemented: slice 18: the battery tier ladder
+
+---- runtime::tests::the_battery_ladder_fits_the_sdks_i32_energy_type stdout ----
+
+thread 'runtime::tests::the_battery_ladder_fits_the_sdks_i32_energy_type' (372957) panicked at src/runtime.rs:156:5:
+not yet implemented: slice 18: the battery tier ladder
+
+test result: FAILED. 110 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+```
+
+After the implementation the same command printed **114 passed, 0 failed**
+(`sdk-test.log`, regenerated for 0.2.18).
+
+### Ladder (0.2.18, pin `0a875da`)
+
+Every compile step ran in `ports/powah`, `CARGO_INCREMENTAL=0`, through
+`ports/tools/build-slot.sh run --job W1-powah --port ports/powah --step …` (forwarded to
+AdLf-PC — no `BUILD_LOCAL=1`); logs in `ports/_shared/evidence/powah/`.
+
+| Check | Result |
+|---|---|
+| `cargo test --offline` | **114 passed, 0 failed** (`sdk-test.log`) |
+| `cargo clippy --all-targets --offline -- -D warnings` | `CLIPPY_EXIT:0`, 0 warnings (`slice18-clippy.log`) |
+| `cargo fmt --check` | `FMT_EXIT:0`, clean (`slice18-fmt.log`) |
+| two builds, `rm -f Cargo.lock` before each | `BUILD1_EXIT:0`, `BUILD2_EXIT:0`, **`cmp`-identical**, 572,490 B (`slice18-build{,-second}.log`) |
+| `cargo horizon-mod check powah.hmod` | `powah 0.2.18 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)` · `572490 bytes, SHA-256 44fc077c…f454f`, `CHECK_EXIT:0` |
+| `cargo horizon-mod fits powah.hmod --build 0a875da` | `Powah:` / `0a875da  made for`, `FITS_PIN_EXIT:0` |
+| `cargo horizon-mod fits powah.hmod --build 0b14f8a` | `Powah:` / `0b14f8a  fits`, `FITS_OTHER_EXIT:0` |
+| `python3 ports/tools/verify-sdk-package.py powah` | **1/1**, `package matches the tree`, `no packed Cargo.lock  909 entries`, `SDK-only dependencies (R9)`, `tests 114 passed`, `skills gate PASS` |
+| `python3 ports/tools/check_261_dialect.py ports/powah/powah.hmod` | exit 0: 281 recipe/loot files in the 26.3 dialect |
+
+The delivered `powah.hmod` is **572,490 B**, sha256
+`44fc077ccc114dfe21220bfc2fda526718202c261c6aee5d3e754740c84f454f`, **909 entries**, no packed
+`Cargo.lock`. Both fits lines are real: the pin prints `made for` (a tautology), the other pinned
+build prints `fits`. No local type or variant named `Block`/`Item` was introduced, so `fits` had
+no false failure. Two harness defects were found and fixed **before** the final build (the
+`charge_of` regex stopped at the namespace colon; the recipe leg had no arena floor and the player
+fell away from the table), so the packed tree and the tree the legs ran are the same bytes.
+
+### In-game (parity rule)
+
+Launcher build `native-0a875da-e176cccc4898`, instance `powah-e2e`, `Compiling powah (1 of 1)`
+(`launcher-build-0.2.18.log`); the one stale tag carrying 0.2.17
+(`native-0a875da-dc83d34e7ff0`) was removed first. The full ~20-minute replay of slices 1–17 was
+not repeated: this slice changed no earlier family, and all earlier verdict logs stay green under
+the strict gate (74/74 with the four new legs). The battery scenario is its own bounded leg
+(`tools/e2e-battery.sh`), as slices 16–17 used `e2e-side.sh` / `e2e-creative.sh`.
+
+| Leg | Command | Result |
+|---|---|---|
+| main | `build-slot.sh run --step e2e -- ports/powah/tools/e2e-battery.sh` | **`PASS` + `EXIT:0`** (`e2e-battery-0.2.18.log`) |
+| control (same Nightly, no package) | `LAUNCH_GAME=$CONTROL_GAME …` | `FAIL: expected powah:energy_discharger_starter at 30,100,60, got 'minecraft:air'` + `EXIT:1` (`e2e-battery-control-0.2.18.log`) |
+| `SELFTEST=battery` | `SELFTEST=battery …` | `FAIL: SELFTEST flipped: the battery kept its charge, as it should` + `EXIT:1` (`e2e-selftest-battery-0.2.18.log`) |
+| `SELFTEST=1` (slice-1 flip) | `SELFTEST=1 …` | `FAIL: SELFTEST flipped: the unfuelled furnator made no FE, as it should` + `EXIT:1` (`e2e-selftest-1-0.2.18.log`) |
+| log gate | `check-e2e-logs.py powah-e2e --strict` | `logs=74 ok=74 missing-exit=0 bad-exit=0`, exit 0 |
+
+Quoted from `e2e-battery-0.2.18.log`:
+
+```text
+  item(30,100,60) reply: Charge set to 1000000 FE on powah:battery_starter.
+  battery before: Charge on powah:battery_starter: 983000/1000000 FE (1000 FE/t, t=123)
+  cell before: Energy Cell at 31,100,60: 28000/1000000 FE (comparator 0, charge empty, empty, 1000 FE/t a side, t=134)
+  battery after: Charge on powah:battery_starter: 943000/1000000 FE (1000 FE/t, t=163)
+  cell after: Energy Cell at 31,100,60: 69000/1000000 FE (comparator 1, charge empty, empty, 1000 FE/t a side, t=175)
+  battery: 983000 -> 943000, lost 40000 over dt=40 (want 40000)
+  cell: 28000 -> 69000, gained 41000 over dt=41 (want 41000)
+  5000 FE case: battery 0 FE, cell 5000 FE
+  stone slot, cell after 20 ticks: 0 FE
+  battery_starter: Charge on powah:battery_starter: 1000000/1000000 FE (1000 FE/t, t=332)
+  battery_basic: Charge on powah:battery_basic: 4000000/4000000 FE (4000 FE/t, t=355)
+  battery_hardened: Charge on powah:battery_hardened: 10000000/10000000 FE (10000 FE/t, t=379)
+  battery_blazing: Charge on powah:battery_blazing: 40000000/40000000 FE (40000 FE/t, t=404)
+  battery_niotic: Charge on powah:battery_niotic: 100000000/100000000 FE (100000 FE/t, t=428)
+  battery_spirited: Charge on powah:battery_spirited: 400000000/400000000 FE (400000 FE/t, t=454)
+  battery_nitro: Charge on powah:battery_nitro: 2000000000/2000000000 FE (2000000 FE/t, t=488)
+  recipe PASS: all 7 battery recipes craft their declared output id and count, and every ingredient is consumed
+```
+
+The rate is **exact** on each reply's own clock: the battery lost exactly 1,000 per tick over its
+40 ticks and the cell gained exactly 1,000 per tick over its 41 ticks. The brief's 5,000 FE example
+conserves (battery 0, cell 5,000) but a 5,000 FE battery empties in five ticks — shorter than one
+chat round trip — so the `1000 × Δt` leg uses the full 1,000,000 FE capacity; this adjustment is
+recorded rather than hidden. Every tier's capacity is proved behaviourally (`/powah item
+2000000000` clamps at the tier's number) and its transfer is read from the same opt-in readout.
+
+### Coverage (parity rule, the family this slice adds)
+
+| Family (from the jar) | Status |
+|---|---|
+| `battery_starter` … `battery_nitro` block? — plain items | **tested** — each given into a cell's charge slot, `/powah item 2000000000` clamps at its exact capacity, and `/powah item <pos>` reads capacity + transfer back with the level's clock |
+| `ITEM_ENERGY` buffer (capacity, insert/extract = transfer) | **tested** — a starter battery in a discharger gives exactly 1,000 FE/t into an adjacent cell while losing the same; a stone gives nothing |
+| `devices.batteries` config row (capacity/transfer for seven tiers) | **tested** — unit tests pin all seven rows, that they equal the cell row, and that the largest fits i32; in game all seven readouts match |
+| seven jar battery recipes | **tested** — `craft_check.py` (`CRAFT_ONLY=battery`) crafts each in a real table: output id + count, every ingredient consumed, four off-pattern controls empty |
+| creative tab / lang | **not asserted in game** — no `ctl` command reads a tab; `check` validates it and the leg proves every id is giveable |
+| `BatteryItem.inventoryTick` charging other player-inventory items while shift-toggled, its energy bar (`isBarVisible`/`getBarWidth`), the `ENERGY_STORED` tooltip | **not ported** — the item's client/player-inventory behaviour (no GUI, no keybind hook at this pin); the machine-slot `ITEM_ENERGY` half is the ported mechanic |
+
+### Deviations and upstream defects this slice records
+
+1. **One store, not two.** Upstream keeps a battery's charge in `PowahComponents.ENERGY_STORED`
+   while `BatteryItem.inventoryTick`'s charge pass uses the item's `Energy.Item` handler — the
+   port's single `minecraft:block_entity_data {id, energy}` store is read and written by the same
+   `ITEM_ENERGY` handler, so a battery charged in a machine slot is a battery a machine can drain.
+   This is the same fix slice 7 recorded for machine items, extended to plain energy items.
+2. **The 5,000 FE example cannot span a chat round trip**, so the exact-rate leg uses the full
+   capacity (recorded above). The 5,000 case is kept as a separate conservation leg.
+3. **Shift-right-click charging mode and the item bar are not ported** (client/player-inventory
+   tier, recorded in the coverage table); the seven tiers' numbers and the machine-slot transfer
+   are the artefact's own.
+
+**Upstream defects fixed: none.** The config rows, the seven recipes and the `stacksTo(1)` are
+internally consistent with `DefaultEnergies`/`Itms`; no defect was found while measuring them.
+
+### Harness findings this slice measured (for the next port)
+
+1. A `charge_of` regex must not use `[^:]+` for a namespaced item id — it stops at the first
+   colon (`powah`) and silently yields empty fields. Match `[a-z0-9_]+:[a-z0-9_]+` instead.
+2. A bounded recipe leg must lay its own floor (`fill 0 99 65 9 99 75 minecraft:stone`) before
+   `craft_check.py` teleports the player: the full replay has an arena, a bounded leg does not,
+   and the player falls away between `tp` and `interact` (the open menu then reads `playing`,
+   which looks exactly like a broken recipe).
+3. `/powah item` clamps at the item's capacity, so its reply names the clamped value — that is
+   the in-game proof of a tier's capacity; a harness must not expect the raw requested amount.
+4. Two headless games in parallel can still exit mid-leg; each verdict leg ran under its own
+   lease, one at a time.
+
+Version: **0.2.17 → 0.2.18** (one patch). The published `[[versions]]` record keeps 0.2.17 and
+gains 0.2.18 at publish time — this port does not touch the registry entry. Title:
+`Update powah 0.2.18` (the entry is ours on `main`; 0.2.17 is staged on PR #1850).
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+
 ## Next slice
 
-**Family:** the energy battery ladder (`powah:battery_starter` … `powah:battery_nitro`).
-`## Deviations and gaps (slice 1)`, item 11 names it — *"The other 6 tiers, the creative cell and
-~15 machines are unported"* — and slice 2's planning note says item charging was deferred because
-*"Powah's batteries are unported, so nothing in the package can be charged"*. The creative cell is
-now closed, so the battery items are the next thing the port's existing item-energy family can act
-on. **Why it fits `machines`:** a battery is `BatteryItem extends EnergyItem` over
-`devices.batteries = new EnergyConfig(batteryCapacity(), batteryTransfer())` — the cell's 1M/1,000
-starter row — with an `ITEM_ENERGY` buffer (the item-energy family slice 7 already declared for
-machine items), seven carried recipes and no renderer, GUI or new hook. **In-game assertion:** put
-a charged starter battery (5,000 FE via `/powah item`) in a starter discharger beside an empty
-starter cell, read `/powah item` and `/powah info` at t1/t2, and assert the cell gains exactly
-**1,000 × Δt** while the battery loses exactly the same; a stone in the slot takes nothing and
-`SELFTEST=battery` must invert the loss half and end `EXIT:1`.
+**Family:** the wrench (`powah:wrench`) and its side-config action. `## Deviations and gaps (slice
+1)`, item 11 names it verbatim in the unported list (notes.md's slice-2 coverage row: *"…wrench,
+book, upgrades, GUIs, side config…"*), and slice 16's deviation 1 says the GUI's wrench button is
+currently `/powah side`. **Why it fits `machines`:** the wrench is one plain item plus a
+right-click-on-block rule that calls the side-config `set_side_type` the port already has; no new
+block, renderer, GUI or hook family beyond the pin's item-use hook (the first step is to confirm
+`UseItemOnEvent` exposes the clicked face — stop and report `blocked(<gap>)` if it does not).
+**In-game assertion:** right-click the north face of a fresh starter cell at 6,100,60 with
+`powah:wrench`, then read `/powah side 6 100 60` and assert its `north=` field changed from `all`
+to the wrench cycle's next value with a fresh `t=`; right-click a stone at 8,100,60 and assert the
+same readout is unchanged; `SELFTEST=wrench` must invert the changed-face half and end `EXIT:1`.
 
 The generators (Magmator/Thermo) remain `blocked(mod-fluid-tank)`, the reactors
 `blocked(uraninite-worldgen)` and the GUIs out of the machines tier.

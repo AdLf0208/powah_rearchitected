@@ -1,0 +1,18 @@
+{
+  "category": "misc",
+  "key": {
+    "c": "minecraft:redstone_block",
+    "i": "powah:capacitor_basic",
+    "o": "powah:dielectric_paste"
+  },
+  "pattern": [
+    "oio",
+    "ici",
+    "oio"
+  ],
+  "result": {
+    "count": 1,
+    "id": "powah:battery_starter"
+  },
+  "type": "minecraft:crafting_shaped"
+}

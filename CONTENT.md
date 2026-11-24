@@ -316,3 +316,27 @@ The id joins `minecraft:mineable/pickaxe`, `minecraft:needs_iron_tool` and the
 `powah:horizon/creative_tab/machines` list. **No recipe is carried:** the jar has no recipe for the creative tier (it is creative-only). The already-carried
 `assets/powah/lang/en_us.json` has `block.powah.energy_cell_creative` ("Energy Cell (Creative)").
 No asset or model is invented.
+
+## Slice 18 — the seven battery items (2026-11-24)
+
+Forty-two files, reproduced by `tools/carry_slice18.py` (`--check` green). Five per tier are
+carried **byte-for-byte** from the raw carry:
+
+| Path | What |
+|---|---|
+| `assets/powah/textures/item/battery_<tier>.png` | the jar's battery texture |
+| `assets/powah/models/item/battery_<tier>.json` | `item/generated` with the texture as `layer0` |
+| `assets/powah/items/battery_<tier>.json` | the 26.3 item definition |
+| `data/powah/recipe/crafting/battery_<tier>.json` | the jar's shaped recipe (starter's `oio/ici/oio`, the six others' `oko/iri/oco`) |
+| `data/powah/advancement/recipes/misc/crafting/battery_<tier>.json` | the jar's unlock file |
+
+Seven are **written**, not carried:
+
+| Path | Patch |
+|---|---|
+| `data/powah/horizon/item/battery_<tier>.json` | the carry guesses a 64-stack `{"template": "minecraft:stick"}`; `Itms.BATTERY` is `new BatteryItem(new Item.Properties().stacksTo(1), variant)`, so the declaration carries `max_stack_size: 1` |
+
+The seven ids join `powah:horizon/creative_tab/machines`. The already-carried
+`assets/powah/lang/en_us.json` names every `item.powah.battery_<tier>`. No tool tags: a battery is
+an item, not a block. No asset, model, number or recipe is invented; `craft_check.py` crafts all
+seven in game.

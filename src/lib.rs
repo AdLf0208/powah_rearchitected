@@ -77,6 +77,22 @@ fn declare_item(registrar: &mut dyn Registrar, block: &'static str) {
     }
 }
 
+/// Declare one battery item's `Capabilities.Energy.ITEM` buffer (upstream's
+/// `BatteryItem extends EnergyItem` over `devices.batteries`). A battery is a
+/// plain item, not a block: there is no block entity, no Part to restore a
+/// placement and no container — only the charge a machine's slot reads through
+/// this handler, which is the same `MachineEnergy` a machine item uses.
+fn declare_battery(registrar: &mut dyn Registrar, item: &'static str, buffer: powah::ItemBuffer) {
+    registrar.item_key(item);
+    registrar.item_capability(&mod_api::ITEM_ENERGY, item, move |_, place| {
+        Some(Box::new(powah::MachineEnergy::new(
+            place.clone(),
+            item,
+            buffer,
+        )))
+    });
+}
+
 /// The mod's session state: the machines whose block entity ticked this tick,
 /// per level, drained at the end of that level's tick.
 #[derive(Default)]
@@ -319,6 +335,15 @@ impl Hooks for Mod {
             // blocks: it has no payload to restore and the Part simply finds none.
             declare_item(registrar, block);
         }
+        // The seven battery items: plain `ITEM_ENERGY` buffers over the same
+        // `devices.batteries` row the cells use (upstream's `BatteryItem`). They
+        // are what a discharger drains and a cell charges through the item
+        // capability — no block, tick, renderer or new hook is involved.
+        for item in powah::BATTERIES {
+            let buffer = powah::battery_item_buffer(item)
+                .unwrap_or_else(|| panic!("{item} is a battery with a buffer"));
+            declare_battery(registrar, item, buffer);
+        }
     }
 
     /// The components this mod registers: a binding card's bound player (`powah:bound_player`,
@@ -401,11 +426,12 @@ impl Hooks for Mod {
                     SetOutcome::NoBlock => "No Powah block there.".to_owned(),
                 }
             }
-            (["powah", "item"], Some(pos)) => {
-                let Some(amount) = amount else {
-                    return Flow::Continue;
-                };
-                match powah::set_item_energy(host, pos, amount) {
+            (["powah", "item"], Some(pos)) => match amount {
+                // The opt-in readout (slice 18): a battery item's charge, capacity
+                // and transfer with the level's own clock. No existing `/powah info`
+                // line changes, so earlier e2e assertions stay byte-identical.
+                None => powah::item_charge_line(host, pos),
+                Some(amount) => match powah::set_item_energy(host, pos, amount) {
                     powah::SetItemOutcome::Set(item, after) => {
                         format!("Charge set to {after} FE on {item}.")
                     }
@@ -416,8 +442,8 @@ impl Hooks for Mod {
                         "The charge slot holds no item that carries FE.".to_owned()
                     }
                     powah::SetItemOutcome::NoBlock => "No Powah block there.".to_owned(),
-                }
-            }
+                },
+            },
             (["powah", "channel"], Some(pos)) => {
                 let Some(channel) = channel else {
                     return Flow::Continue;

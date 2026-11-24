@@ -1,0 +1,20 @@
+{
+  "category": "misc",
+  "key": {
+    "c": "powah:battery_niotic",
+    "i": "powah:capacitor_spirited",
+    "k": "powah:crystal_spirited",
+    "o": "powah:dielectric_paste",
+    "r": "minecraft:redstone_block"
+  },
+  "pattern": [
+    "oko",
+    "iri",
+    "oco"
+  ],
+  "result": {
+    "count": 1,
+    "id": "powah:battery_spirited"
+  },
+  "type": "minecraft:crafting_shaped"
+}

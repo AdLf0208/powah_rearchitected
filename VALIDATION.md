@@ -1,4 +1,28 @@
-# Validation — Powah slices 1 to 17
+# Validation — Powah slices 1 to 18
+
+> **0.2.18 (slice 18, the energy battery ladder)** is recorded in
+> [`notes.md`](notes.md#slice-18--the-energy-battery-ladder-2026-11-24): the slice and the gap line it
+> comes from (`## Next slice`, from slice 1's gap 11 — *"the other 6 tiers, the creative cell and ~15
+> machines are unported"* — and slice 2's deferred item charging), and the artefact read at tag
+> `v6.2.10` (`BatteryItem.getConfig()` → `devices.batteries = new EnergyConfig(batteryCapacity(),
+> batteryTransfer())` at `PowahConfig.java:90-92`; `DefaultEnergies.java:62-72` derives the two rows
+> from `baseScaling = [1,4,10,40,100,400,2000]` — 1M/1,000 up to 2G/2,000,000). All seven rows fit
+> the SDK's i32, so unlike the creative cell's 9e18 **no clamp was needed**. The red proof (four
+> `todo!()` rules, **110 passed / 4 failed**, quoted verbatim), the ladder at pin `0a875da`
+> (**114 tests**, clippy 0 warnings, `fmt --check` clean, two `cmp`-identical builds of **572,490 B**,
+> `check`, `fits` against the pin **and** `0b14f8a`, gate **1/1** with `package matches the tree`,
+> 909 entries, no packed `Cargo.lock`, R9, `tests 114 passed`, `skills gate PASS`) and the in-game
+> legs (main `PASS`+`EXIT:0` on the delivered archive; the control game red at the first discharger;
+> `SELFTEST=battery` and `SELFTEST=1` at `EXIT:1`; the log gate **74/74 `--strict`**). The full replay
+> was not repeated: this slice changed no earlier family. A bounded `tools/e2e-battery.sh` leg
+> proves a starter battery in a started discharger beside an empty starter cell gives exactly
+> **1,000 × dt** into the cell while losing the same from each reply's own clock (40,000 over dt=40,
+> 41,000 over dt=41 in the recorded run), the brief's 5,000 FE case conserves exactly (battery 0,
+> cell 5,000), a stone transfers nothing, all seven tiers read their exact capacity and transfer
+> through the opt-in `/powah item <pos>`, and all seven jar recipes craft. Package: `powah.hmod`,
+> 572,490 B, sha256 `44fc077ccc114dfe21220bfc2fda526718202c261c6aee5d3e754740c84f454f`. Launcher
+> build: `Compiling powah (1 of 1)`, `native-0a875da-e176cccc4898`, instance `powah-e2e`.
+> No `/powah info` line changed.
 
 > **0.2.17 (slice 17, the creative energy cell)** is recorded in
 > [`notes.md`](notes.md#slice-17--the-creative-energy-cell-2026-11-24): the slice and the gap line it

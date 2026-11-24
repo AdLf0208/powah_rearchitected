@@ -136,6 +136,16 @@ that keeps it full, and a `/powah info` line that keeps the existing cell format
 with a trailing `creative` field; a cable carries 500 FE/t out of it into an empty cell while the
 source's own readout never drops. A stone in its place transfers nothing.
 
+Slice 18 adds the seven **energy battery items** (`powah:battery_starter` … `powah:battery_nitro`).
+`BatteryItem extends EnergyItem` over `devices.batteries = EnergyConfig(batteryCapacity(),
+batteryTransfer())` — the cell's 1M/1,000 starter row up to 2G/2,000,000 at nitro. Each battery is
+a `Capabilities.Energy.ITEM` buffer (capacity and both insert/extract at its tier's transfer), so a
+discharger drains one in a slot and a cell charges one; upstream's `ENERGY_STORED` component and the
+port's single `minecraft:block_entity_data` store are one value, and every tier fits the SDK's i32
+(nitro's 2,000,000,000 is below i32::MAX, so no clamp is needed). The seven jar recipes craft.
+`/powah item <pos>` is an opt-in readout of the item's charge, capacity and transfer with the level's
+own clock — no existing `/powah info` line changed.
+
 Every machine declares a real `Capabilities.Energy.BLOCK` buffer (the amount is the int
 `energy` in the block entity's saved compound), so other machines can fill and drain a
 furnator, a cell, a discharger, a hopper, a solar panel or a transmitter; an ender cell or
@@ -154,7 +164,7 @@ moves FE from the fuller store to the emptier one (a network never takes back wh
 
 ```text
 powah.hmod            the delivered package (horizon-mod.toml + Cargo.toml + src/ + assets/ + data/)
-horizon-mod.toml      the only manifest and identity: id, version 0.2.17, api 0.2, [native] pins
+horizon-mod.toml      the only manifest and identity: id, version 0.2.18, api 0.2, [native] pins
 Cargo.toml            one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 src/lib.rs            the one `#[mod_api::horizon_mod] impl Hooks`
 src/powah.rs          the glue: the block entity Parts, the queue, the tier tables, the buffers, the cable network, the command

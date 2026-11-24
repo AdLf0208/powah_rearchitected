@@ -133,6 +133,39 @@ pub fn cell_tier(index: usize) -> Option<CellTier> {
     })
 }
 
+/// The tiers a battery item has (`Tier.getNormalVariants`, which
+/// `Itms.BATTERY` uses), in order: starter, basic, hardened, blazing, niotic,
+/// spirited, nitro.
+pub const BATTERY_TIER_COUNT: usize = 7;
+
+/// One energy battery item's storage numbers. Upstream's `BatteryItem.getConfig()`
+/// is `PowahConfig.EnergyDevices.batteries = new EnergyConfig(batteryCapacity(),
+/// batteryTransfer())` (`PowahConfig.java:90-92`): the battery row from
+/// `DefaultEnergies.java:62-72`, `baseScaling × 1_000_000` capacity and
+/// `baseScaling × 1_000` transfer. A battery is an `ITEM_ENERGY` buffer, not a
+/// block, and every tier fits the SDK's `i32` energy type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BatteryTier {
+    pub capacity: i32,
+    pub transfer: i32,
+}
+
+/// The battery tier at `index` (0 = starter … 6 = nitro), `None` past the ladder.
+#[must_use]
+pub fn battery_tier(index: usize) -> Option<BatteryTier> {
+    /// `DefaultEnergies.baseScaling`, in `Tier.getNormalVariants` order.
+    const BASE_SCALING: [i32; BATTERY_TIER_COUNT] = [1, 4, 10, 40, 100, 400, 2_000];
+    /// `batteryCapacity` = `reactorProduction * 4000` = `baseScaling * 250 * 4000`.
+    const CAPACITY_PER_SCALING: i32 = 1_000_000;
+    /// `batteryTransfer` = `cableTransfer * 2` = `baseScaling * 250 * 4`.
+    const TRANSFER_PER_SCALING: i32 = 1_000;
+    let scaling = *BASE_SCALING.get(index)?;
+    Some(BatteryTier {
+        capacity: scaling * CAPACITY_PER_SCALING,
+        transfer: scaling * TRANSFER_PER_SCALING,
+    })
+}
+
 /// The creative energy cell's storage numbers. Upstream's
 /// `TieredEnergyValues.get(Tier.CREATIVE)` answers `Energy.MAX`
 /// (9,000,000,000,000,000,000) for **both** the capacity and the transfer row.
@@ -1449,6 +1482,72 @@ mod tests {
             (starter.capacity, starter.transfer),
             (CELL_CAPACITY, CELL_TRANSFER)
         );
+    }
+
+    #[test]
+    fn every_battery_tier_is_the_battery_config_ladder() {
+        // `BatteryItem.getConfig()` is `devices.batteries`, the same two
+        // functions the cells use: `batteryCapacity()` = baseScaling × 1_000_000
+        // and `batteryTransfer()` = baseScaling × 1_000. Read from
+        // `DefaultEnergies.java:62-72` / `PowahConfig.java:90-92`, not from names.
+        let expected = [
+            (1_000_000, 1_000),
+            (4_000_000, 4_000),
+            (10_000_000, 10_000),
+            (40_000_000, 40_000),
+            (100_000_000, 100_000),
+            (400_000_000, 400_000),
+            (2_000_000_000, 2_000_000),
+        ];
+        for (index, (capacity, transfer)) in expected.into_iter().enumerate() {
+            let tier = battery_tier(index).unwrap_or_else(|| panic!("battery tier {index} exists"));
+            assert_eq!(
+                (tier.capacity, tier.transfer),
+                (capacity, transfer),
+                "battery tier {index}'s numbers"
+            );
+        }
+        assert_eq!(battery_tier(BATTERY_TIER_COUNT), None, "seven normal tiers");
+    }
+
+    #[test]
+    fn the_battery_ladder_fits_the_sdks_i32_energy_type() {
+        // The SDK's `ModEnergyBuffer` capacity/insert/extract are i32. Every
+        // `BatteryTier` field is therefore already expressible; what matters is
+        // that upstream's largest row (2,000,000,000) is below i32::MAX
+        // (2,147,483,647), so unlike the creative cell's 9e18 no clamp is needed.
+        const UPSTREAM_MAX: i64 = 9_000_000_000_000_000_000;
+        const NITRO_CAPACITY: i64 = 2_000_000_000;
+        assert!(
+            NITRO_CAPACITY < i32::MAX as i64 && NITRO_CAPACITY < UPSTREAM_MAX,
+            "the nitro row is upstream's largest that still fits the SDK"
+        );
+        for index in 0..BATTERY_TIER_COUNT {
+            let tier = battery_tier(index).expect("a battery tier on the ladder");
+            assert!(tier.capacity > 0, "tier {index}'s capacity is positive");
+            assert!(tier.transfer > 0, "tier {index}'s transfer is positive");
+        }
+        assert_eq!(
+            battery_tier(6).expect("nitro").capacity,
+            2_000_000_000,
+            "the nitro battery is upstream's largest row"
+        );
+    }
+
+    #[test]
+    fn batteries_and_cells_share_the_devices_config_row() {
+        // `devices.batteries` and `devices.energy_cells` both take
+        // `batteryCapacity()` / `batteryTransfer()`, so the ladders are equal.
+        for index in 0..BATTERY_TIER_COUNT {
+            assert_eq!(
+                battery_tier(index),
+                cell_tier(index).map(|cell| BatteryTier {
+                    capacity: cell.capacity,
+                    transfer: cell.transfer,
+                }),
+                "the battery and cell config rows agree at tier {index}"
+            );
+        }
     }
 
     #[test]

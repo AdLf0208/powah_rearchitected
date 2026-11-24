@@ -5,7 +5,7 @@
 # until the maintainer approves publishing (ARCHITECTURE.md §8).
 id = "powah"
 name = "Powah"
-version = "0.2.17"
+version = "0.2.18"
 description = """A port of Powah! (Rearchitected) for Horizon, slice 1: the starter tier of the energy
 chain. The Furnator burns a furnace fuel into carbon and makes 20 FE/t into a 20,000 FE buffer
 (one coal is 48,000 FE); the Energy Cell is a 1,000,000 FE capacitor that takes and gives 1,000
@@ -83,6 +83,11 @@ means giving FE never drops its buffer. Upstream's `Energy.MAX` (9e18) is clampe
 `i32` — 2,147,483,647 FE — for both its capacity and its per-side transfer. Its `/powah info` line
 keeps the cell's exact formatting with a trailing `creative` field, and a cable carries 500 FE/t
 out of it into an empty cell without the source ever losing FE.
+Slice 18 adds the seven energy battery items (starter 1M/1,000 up to nitro 2G/2,000,000 FE): each is
+an ITEM_ENERGY buffer over the same `devices.batteries` config row as the cells, chargeable by a
+machine's slot and drained by a discharger through the item capability. The seven jar recipes craft.
+All seven rows fit the SDK's i32 energy type — upstream's 2,000,000,000 FE nitro capacity is below
+i32::MAX, so no clamp is needed (the creative cell's 9e18 was the case that needed one).
 Not yet ported: the magmator and thermo generators, the reactors, the Lens of Ender, the
 dimensional binding card and the GUIs."""
 authors = ["owmii", "Technici4n", "AdLf0208"]
