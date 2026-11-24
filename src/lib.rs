@@ -363,10 +363,11 @@ impl Hooks for Mod {
         powah::on_block_drops(level, event)
     }
 
-    /// Slice 19: the wrench's CONFIG-mode right-click cycles the clicked face's
-    /// transfer type (`wrench_next_face`), the in-world equivalent of slice 16's
-    /// GUI-button replacement. Only a held `powah:wrench` on a machine with a side
-    /// config changes anything; the item keeps its byte-for-byte earlier behaviour.
+    /// The wrench's right-click action. CONFIG cycles the clicked face's transfer type
+    /// (slice 19); ROTATE steps the machine's own `facing` state (slice 20). The mode is
+    /// chosen with the operator-only `/powah wrench mode <mode>` command, since the hook
+    /// carries no shift-key state. Only a held `powah:wrench` on a Powah machine changes
+    /// anything; the item keeps its byte-for-byte earlier behaviour in CONFIG mode.
     fn use_item_on_block(&self, host: HostSide, event: &mut UseItemOnBlockEvent<'_>) -> Flow {
         powah::on_wrench_use(host, event)
     }
@@ -506,6 +507,19 @@ impl Hooks for Mod {
                     }
                     _ => return Flow::Continue,
                 }
+            }
+            // `powah wrench mode <mode>` replaces the wrench's shift-right-click mode
+            // cycle (the pin has no client→server input path for it). The mode is a
+            // literal of the usage, so an unknown word is refused by the dispatcher.
+            (["powah", "wrench"], None) => {
+                format!("Wrench mode: {}.", powah::wrench_mode().name())
+            }
+            (["powah", "wrench", "mode", mode], None) => {
+                let Some(mode) = runtime::WrenchMode::named(mode) else {
+                    return Flow::Continue;
+                };
+                powah::set_wrench_mode(mode);
+                format!("Wrench mode set to {}.", mode.name())
             }
             _ => return Flow::Continue,
         };

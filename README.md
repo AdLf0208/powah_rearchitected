@@ -1,4 +1,4 @@
-# Powah for Horizon — slices 1–16
+# Powah for Horizon — slices 1–20
 
 A clean-room Rust rewrite of **Powah! (Rearchitected) 6.2.10** (`Technici4n/Powah`,
 **LGPL-3.0-only**) for Horizon 26.3, as one flat SDK package (`api = "0.2"`): the
@@ -152,8 +152,20 @@ receive → none → all` for a cell — the in-world equivalent of slice 16's G
 (`NextEnergyConfigPacket`). The pin's global `use_item_on_block` hook carries the clicked face
 (`click.hit.face`) and the held stack (`click.stack`), so no new hook, block, renderer or GUI is
 needed; the wrench registers no Part, buffer or block key. Stone keeps its item and its "no side
-config" reply, and no earlier `/powah info` line changes. The wrench's link and rotate modes and
+config" reply, and no earlier `/powah info` line changes. The wrench's link mode and
 the `c:tools/wrench` compatibility tag are not ported (no game effect in this port).
+
+Slice 20 adds the wrench's **ROTATE mode**. Upstream cycles wrench modes with shift-right-click,
+which the pin's `use_item_on_block` hook cannot see, so the operator-only
+`/powah wrench mode <config|link|rotate>` command is the GUI-button replacement. In ROTATE mode a
+right click steps the machine's own `facing` block state to the next `Direction.values()` entry —
+`down → up → north → south → west → east → down` — skipping values the block cannot hold and
+giving up cleanly after a full turn; a hopper's `facing=north` becomes `south`, a CONFIG-mode
+wrench leaves `facing` unchanged, a machine with no `facing` (a cell) refuses, and stone keeps its
+item. The mode is process-wide harness state rather than a per-stack component, and the pin has no
+`canSurvive` *query* (only a replacement hook) — but every machine the artefact rotates survives
+in all six facings, so the property's own acceptance check is the operative half. No earlier
+`/powah info` line changes.
 
 Every machine declares a real `Capabilities.Energy.BLOCK` buffer (the amount is the int
 `energy` in the block entity's saved compound), so other machines can fill and drain a
@@ -173,7 +185,7 @@ moves FE from the fuller store to the emptier one (a network never takes back wh
 
 ```text
 powah.hmod            the delivered package (horizon-mod.toml + Cargo.toml + src/ + assets/ + data/)
-horizon-mod.toml      the only manifest and identity: id, version 0.2.19, api 0.2, [native] pins
+horizon-mod.toml      the only manifest and identity: id, version 0.2.20, api 0.2, [native] pins
 Cargo.toml            one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 src/lib.rs            the one `#[mod_api::horizon_mod] impl Hooks`
 src/powah.rs          the glue: the block entity Parts, the queue, the tier tables, the buffers, the cable network, the command
@@ -182,6 +194,8 @@ assets/powah/         the carried blockstates, models, items, textures and lang
 data/powah/           the carried blocks, items, loot, recipes, tags, the creative tab
 tools/craft_check.py  the recipe leg: every material, machine, discharger, hopper, solar, ender and transmitter recipe in a real table
 tools/e2e.sh          the in-game scenario (needs a launcher-built game, see below)
+tools/e2e-wrench.sh   the bounded CONFIG-mode wrench leg (slice 19)
+tools/e2e-rotate.sh   the bounded ROTATE-mode leg (slice 20)
 ```
 
 ## Build and check
@@ -215,6 +229,8 @@ block's GUI channel buttons (`SetChannelPacket`):
 /powah redstone <ignore|on|off> <x> <y> <z>  # the GUI redstone button (slice 13)
 /powah side <x> <y> <z>            # the six face types, with their own t= clock (slice 16)
 /powah side <face> <type> <x> <y> <z>  # set one face to all|extract|receive|none (the wrench button)
+/powah wrench                          # read the wrench mode (slice 20)
+/powah wrench mode <config|link|rotate> # select the wrench mode (the shift-click replacement)
 ```
 
 Slice 19's wrench is real gameplay, not a command: hold `powah:wrench` and right-click a
@@ -244,6 +260,9 @@ SELFTEST=redstone GAME=<that game> tools/e2e.sh                    # the shut ga
 SELFTEST=comparator GAME=<that game> tools/e2e.sh                  # the comparator's reading
 SELFTEST=orb-comparator GAME=<that game> tools/e2e.sh              # the orb's stack count
 SELFTEST=side GAME=<that game> tools/e2e.sh                        # the none face stayed at 0 FE
+GAME=<that game> E2E_TMP=<scratch> tools/e2e-wrench.sh              # slice 19's bounded wrench leg
+GAME=<that game> E2E_TMP=<scratch> tools/e2e-rotate.sh              # slice 20's bounded rotate leg
+SELFTEST=rotate GAME=<that game> E2E_TMP=<scratch> tools/e2e-rotate.sh  # facing did NOT advance
 ```
 
 Give the port **its own launcher instance** (e.g. `--instance powah-e2e`, and the

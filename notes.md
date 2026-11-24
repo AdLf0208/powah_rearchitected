@@ -4753,7 +4753,7 @@ gains 0.2.19 at publish time — this port does not touch the registry entry. Ti
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
 
-## Next slice
+## Next slice (before slice 20)
 
 **Family:** the wrench's ROTATE mode — rotating a machine's `facing` block-state property. This
 slice's coverage row names it verbatim (*"WrenchMode cycle … and LINK/ROTATE actions — not ported"*)
@@ -4767,6 +4767,247 @@ the hook carries no shift-key state. **In-game assertion:** `/powah wrench mode 
 `ctl interact <hopper> north` with the wrench held, then `/powah info <pos>` must show `facing=`
 advanced to the jar's next direction with a fresh `t=`; a wrench in CONFIG mode must leave
 `facing` unchanged; `SELFTEST=rotate` must invert the changed-half and end `EXIT:1`.
+
+The generators (Magmator/Thermo) remain `blocked(mod-fluid-tank)`, the reactors
+`blocked(uraninite-worldgen)` and the GUIs out of the machines tier.
+
+## Slice 20 — the wrench's ROTATE mode (2026-11-24)
+
+### The slice, quoted from this port's own gaps
+
+The previous `## Next slice` (now `## Next slice (before slice 20)`) named it verbatim, and
+slice 19's coverage row carries it unchanged:
+
+> `WrenchMode` cycle (CONFIG→LINK→ROTATE) and LINK/ROTATE actions | **not ported** — the pin's
+> `use_item_on_block` carries no shift-key state and the port has no client→server key action
+> surface; only the default CONFIG action is ported
+
+**Chosen:** the ROTATE half — one block-state write on a machine that already declares `facing`.
+**Why it fits `machines`:** it reuses slice 19's item-use hook and adds a single named-property
+write; no new block, block entity, renderer, GUI or hook family. Class **content**, tier
+**machines** (ledger). LINK stays out of scope: it is a different behaviour (a rod↔orb link), and
+this slice's command only selects the mode.
+
+### First gate — the named-property write with an acceptance/survival check (PASSED before any edit)
+
+Read from the pin's extracted SDK (`api-source.tar.xz` → `/tmp/opencode/powah-sdk-api`, the
+read-only SDK itself untouched), confirmed against `surface.json`:
+
+- **`ServerHost::set_block_property(pos, key, value) -> bool`** is the named-property write —
+  `host/block_states.rs:60-69`, surface id `method:prelude::BlockStatesServerHost::set_block_property`
+  (wire id 82). Its contract: *"Sets property `key` of the block at `pos` to `value`, as a
+  furnace's tick sets its `lit` (`Level.setBlock` with `UPDATE_ALL` …); true when the block
+  changed, false when the block has no such property or value, or the property already has
+  `value`. The block entity stays."* `set_block_property_with(…, flags)` (wire id 83) is the
+  flags variant. This port already uses the same method on placement (`src/powah.rs`, hopper and
+  ender gate `facing`).
+- The **acceptance/survival guard** is `BlockState::with(metadata, name, value) -> Result<Self, …>`
+  (`block/block_state.rs:30-38`, over `host.block_states()`), the mod-facing form of the
+  `state_with_property` surface (`method:LevelHost::state_with_property`); it returns `Err` for a
+  value the block's property does not have — the "would this placement survive the write" half.
+- **What is absent:** a general `canSurvive(state, pos)` *query* a mod can call. The pin's only
+  `can_survive` surface is the replacement hook (`hook:can_survive`, signature
+  `method:BlockPart::can_survive`), where a mod *answers* for its own blocks. This is **not**
+  `blocked(...)`: upstream's skip loop is vacuous for the blocks it rotates (every
+  `AbstractEnergyBlock` and the orb survives in all six facings), so `BlockState::with` is the
+  operative check. Recorded as deviation 2 below. No `blocked(<gap>)` was needed.
+
+### The artefact — the rotate order, read before coding (tag `v6.2.10`, commit `a5a8f25`)
+
+`item/WrenchItem.java`:
+
+- `:38` `DIRECTIONS = Direction.values()`; `:114-116`
+  `nextDirection(dir) = DIRECTIONS[(dir.ordinal() + 1) % DIRECTIONS.length]`.
+  The order is **DOWN, UP, NORTH, SOUTH, WEST, EAST** → next wraps EAST → DOWN. The pin's
+  `mod_api::Direction` has the same six entries in the same order (`horizon-core/src/geometry/mod.rs:44-61`, `#[repr(u8)]`).
+- `:94-112` `rotateState`: find a property named `facing` that is a `DirectionProperty`, take its
+  current value, step with `nextDirection`; while the value is not in `getPossibleValues()` **or**
+  `state.setValue(dirProp, rotated).canSurvive(world, pos)` is false, step again; if the walk
+  arrives back at `current`, return the unchanged state.
+- `:79-88` ROTATE only runs for `AbstractEnergyBlock` / `EnergizingOrbBlock`, and only writes
+  (`setBlockAndUpdate`) and plays the place sound when the state actually changed.
+- `:145-167` the wrench mode lives on the stack and is cycled by shift-right-click — the pin's
+  hook carries no shift-key state, so the operator-only `/powah wrench mode <mode>` command is
+  the GUI-button replacement (as `/powah side` and `/powah redstone` are).
+
+### What it ships
+
+| File | Change |
+|---|---|
+| `src/runtime.rs` | `WrenchMode` (`CONFIG, LINK, ROTATE`, default CONFIG, `next`/`named`/`name`), `DIRECTION_COUNT`/`DIRECTION_NAMES`, `next_direction`, `rotate_facing` (the skip/give-up loop) and 3 tests |
+| `src/powah.rs` | process-global `WRENCH_MODE` + `set_wrench_mode`/`wrench_mode`; `on_wrench_rotate` (read `facing`, check `BlockState::with`, `set_block_property`); `on_wrench_use` now dispatches on the mode (CONFIG unchanged byte-for-byte) |
+| `src/lib.rs` | `use_item_on_block` doc updated; `run_mod_command` gains `powah wrench` and `powah wrench mode <mode>` arms; `declare_commands` gains their 4 operator-only usages |
+| `tools/e2e-rotate.sh` | the bounded verdict leg: mode command, face advance with a fresh clock, CONFIG differential, no-facing and stone differentials, control and two selftests |
+| `horizon-mod.toml`, `Cargo.toml`, `README.md` | version 0.2.20 and the slice's paragraph; finalised **before** the two builds |
+
+No content file changed: the wrench item, its recipe and its pack entry shipped in 0.2.19. No
+existing `/powah info` line changed, so every earlier e2e verdict stays byte-identical.
+
+### TDD: the red proof, quoted
+
+`WrenchMode`'s methods, `next_direction` and `rotate_facing` were declared with `todo!()` bodies
+and three tests written against them before any implementation; `cargo test --offline` printed
+(`evidence/powah/slice20-test-red.log`):
+
+```text
+---- runtime::tests::wrench_mode_defaults_to_config_and_cycles_in_the_jars_order stdout ----
+thread 'runtime::tests::wrench_mode_defaults_to_config_and_cycles_in_the_jars_order' (522450) panicked at src/runtime.rs:1252:9:
+not yet implemented: slice 20: the wrench mode cycle
+
+---- runtime::tests::wrench_rotate_skips_directions_the_block_cannot_have_and_gives_up_after_a_turn stdout ----
+thread 'runtime::tests::wrench_rotate_skips_directions_the_block_cannot_have_and_gives_up_after_a_turn' (522451) panicked at src/runtime.rs:1281:5:
+not yet implemented: slice 20: the wrench's facing rotation
+
+---- runtime::tests::wrench_rotate_steps_one_direction_in_the_jars_values_order stdout ----
+thread 'runtime::tests::wrench_rotate_steps_one_direction_in_the_jars_values_order' (522452) panicked at src/runtime.rs:1268:5:
+not yet implemented: slice 20: the wrench's next direction
+
+test result: FAILED. 116 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+```
+
+A first RED with the mode table already implemented was discarded (116 passed / 2 failed) and
+re-taken with all three rules stubbed; the log above is the one kept. After implementation the
+same command printed **119 passed, 0 failed** (`sdk-test.log`, regenerated for 0.2.20 after the
+forwarded runs). A fourth test, that the new mode usages are operator-only, was added with the
+command wiring: it RED at `left: 14, right: 10` on the old usage count and now passes with the
+four new level-2 usages.
+
+### Ladder (0.2.20, pin `0a875da`)
+
+Every compile step ran in `ports/powah`, `CARGO_INCREMENTAL=0`, through
+`ports/tools/build-slot.sh run --job W1-powah --port ports/powah --step …` (forwarded to AdLf-PC —
+no `BUILD_LOCAL=1`). Packed docs (manifest, Cargo.toml, README) were finalised **before** the two
+builds; only `tools/` changed afterwards. Game legs ran locally through the slot runner.
+
+| Check | Result |
+|---|---|
+| `cargo test --offline` | **119 passed, 0 failed** (`sdk-test.log`) |
+| `cargo clippy --all-targets --offline -- -D warnings` | `CLIPPY_EXIT:0`, 0 warnings (`slice20-clippy.log`) |
+| `cargo fmt --check` | `FMT_EXIT:0`, clean (`slice20-fmt.log`, `slice20-fmt-apply.log`) |
+| two builds, `rm -f Cargo.lock` before each | `BUILD1_OK`, `BUILD2_OK`, **`cmp`-identical**, 581,678 B (`slice20-build{,-second}.log`) |
+| `cargo horizon-mod check powah.hmod` | `powah 0.2.20 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)` · `581678 bytes, SHA-256 2490b1e7…683c1`, `CHECK_EXIT:0` |
+| `cargo horizon-mod fits powah.hmod --build 0a875da` | `Powah:` / `0a875da  made for`, `FITS_PIN_EXIT:0` |
+| `cargo horizon-mod fits powah.hmod --build 0b14f8a` | `Powah:` / `0b14f8a  fits`, `FITS_OTHER_EXIT:0` |
+| `python3 ports/tools/verify-sdk-package.py powah` | **1/1**, `package matches the tree`, `no packed Cargo.lock  915 entries`, `SDK-only dependencies (R9)`, `tests 119 passed`, `skills gate PASS` (`slice20-verify.log`) |
+
+The delivered `powah.hmod` is **581,678 B**, sha256
+`2490b1e79fb33b3e1bae5a17211bf1d0b09e0ef97e8890916b392198d99683c1`, **915 entries**, no packed
+`Cargo.lock`. Both fits lines are real: the pin prints `made for` (a tautology), the other pinned
+build prints `fits`. No local type or variant named `Block`/`Item` was introduced, so `fits` had
+no false failure.
+
+### In-game (parity rule)
+
+Launcher build `native-0a875da-5f008f020fa1`, instance `powah-e2e`, `Compiling powah (1 of 1)`
+(`launcher-build-0.2.20.log`); the one stale tag carrying 0.2.19
+(`native-0a875da-72336e5663ab`, which held only powah) was removed first so the launcher
+recompiled. The full ~20-minute replay of slices 1–19 was not repeated: this slice changed no
+earlier family, and all earlier verdict logs stay green under the strict gate (82/82 with the four
+new legs). The rotate scenario is its own bounded leg (`tools/e2e-rotate.sh`), as slices 16–19
+used their own bounded legs.
+
+| Leg | Command | Result |
+|---|---|---|
+| main | `build-slot.sh run --step e2e -- bash ports/powah/tools/e2e-rotate.sh` | **`PASS` + `EXIT:0`** (`e2e-rotate-0.2.20.log`) |
+| control (same Nightly, no package) | `LAUNCH_GAME=$CONTROL_GAME …` | `FAIL: expected powah:energy_hopper_starter at 6,100,60, got 'minecraft:air'` + `EXIT:1` (`e2e-rotate-control-0.2.20.log`) |
+| `SELFTEST=rotate` | `SELFTEST=rotate …` | `FAIL: SELFTEST flipped: the wrench left facing at south, as it should` + `EXIT:1` (`e2e-selftest-rotate-0.2.20.log`) |
+| `SELFTEST=1` (slice-1 flip) | `SELFTEST=1 …` | `FAIL: SELFTEST flipped: the unfuelled furnator made no FE, as it should` + `EXIT:1` (`e2e-selftest-1-0.2.20.log`) |
+| log gate | `check-e2e-logs.py powah-e2e --strict` | `logs=82 ok=82 missing-exit=0 bad-exit=0`, exit 0 |
+
+Quoted from `e2e-rotate-0.2.20.log` (`{"ok":true}` acknowledgements dropped):
+
+```text
+  before: Energy Hopper at 6,100,60: 0/1000000 FE (comparator 0, facing north, charging 500 FE/t, 1000 FE/t a side, t=98)
+  mode: Wrench mode: rotate.
+  interact: {"block":{"block":"powah:energy_hopper_starter",...},"block_before":"powah:energy_hopper_starter[facing=north]","changed":true,...}
+  after the rotate click: Energy Hopper at 6,100,60: 0/1000000 FE (comparator 0, facing south, charging 500 FE/t, 1000 FE/t a side, t=506)
+  config interact: {..."state":"powah:energy_hopper_starter[facing=north]","changed":false,...}
+  config after:  Energy Hopper at 6,100,60: ... facing north, ... t=866)
+  cell interact: {..."block":"powah:energy_cell_starter","changed":false,...}
+  cell after:  Energy Cell at 10,100,60: 0/1000000 FE (comparator 0, charge empty, empty, 1000 FE/t a side, t=915)
+  stone interact: {..."block":"minecraft:stone","changed":false,...}
+```
+
+The facing change is parsed from `/powah info`, not from an absence of error: `facing north` before,
+`facing south` after, with a fresh `t=` (98 → 506) and the other readout fields unchanged. The
+`ctl interact` reply independently names `state …[facing=south]` with `changed:true`. The CONFIG
+differential re-places the hopper facing north, selects `config`, clicks the same face and reads
+`facing north` back with a newer clock; the cell (no `facing`) and the stone both answer `changed:false`
+and keep their readouts and the item. `SELFTEST=rotate` demands `facing north` and fails on a
+correct package.
+
+### Coverage (parity rule, the family this slice adds)
+
+| Family (from the jar) | Status |
+|---|---|
+| `WrenchMode.CONFIG, LINK, ROTATE` and the default | **tested** — the three modes and their cycle are pinned by a unit test; CONFIG's byte-for-byte earlier behaviour and ROTATE's new one are exercised in game; LINK is `not ported` (below) |
+| `nextDirection` / `Direction.values()` order | **tested** — unit test pins DOWN→UP→NORTH→SOUTH→WEST→EAST→DOWN; the in-game north→south step is the same rule |
+| `rotateState` (skip invalid / non-surviving values, give up after a turn; write only when changed) | **tested** — the skip and give-up halves are unit-tested; the changed half is proven in game with a fresh clock and an independent `changed:true` reply; the no-facing cell proves the clean refusal |
+| the operator-only mode selector | **tested** — `/powah wrench mode rotate|config` replies with the new mode, the mode readout parses it, the 4 usages are level 2 (`the_harness_commands_are_operator_only`) |
+| the wrench item, its recipe and the `stacksTo(1)` item declaration | **tested** — unchanged from slice 19; `e2e-wrench-0.2.19.log` still green under `--strict`, and the item is given/selected/kept in this leg too |
+| LINK (rod↔orb link, `LINK_ORB_POS`/`LINK_ROD_POS`, range check) | **not ported** — a different behaviour; see `## Next slice` |
+| the place sound `playSound(...getPlaceSound...)` | **not ported** — a client effect, outside the machines tier and not observable headlessly |
+| the `c:tools/wrench` compatibility tag | **not ported** — no carried recipe or hook reads it (unchanged from slice 19) |
+
+### Deviations this slice records
+
+1. **The wrench mode is process-global harness state, not a per-stack component.** Upstream
+   stores `WrenchMode` in `PowahComponents.WRENCH_MODE` and cycles it with shift-right-click; the
+   pin's `use_item_on_block` carries no shift-key state and there is no client→server action path,
+   so the operator-only `/powah wrench mode <mode>` command selects it for all held wrenches. The
+   same substitution `/powah side` and `/powah redstone` make for GUI buttons.
+2. **No general `canSurvive` query.** The pin exposes it only as a replacement hook. The glue's
+   guard is `BlockState::with`'s acceptance check; this is the whole skip loop for the artefact's
+   target blocks (every Powah machine with `facing` survives in all six directions), so nothing
+   observable differs. A future block with direction-dependent survival would need an explicit
+   hook-side answer.
+3. **Rotation is restricted to a block this port knows** (`Kind::of(block).is_some()`), the glue's
+   form of upstream's `instanceof AbstractEnergyBlock || EnergizingOrbBlock`. A foreign hopper with
+   a `facing` state is deliberately left to vanilla.
+4. **A failed write leaves the click to vanilla.** `Flow::Cancel` is returned only when
+   `set_block_property` reports a real change; stone, a cell, an unnameable value and a full turn
+   keep the item and normal use, exactly as upstream's `PASS`/`sidedSuccess` split.
+
+**Upstream defects fixed: none.** `WrenchMode`'s order, `nextDirection`, the skip/give-up loop
+and the `stacksTo(1)` item are internally consistent in `WrenchItem.java`; no defect was found
+while measuring them.
+
+### Harness findings this slice measured (for the next port)
+
+1. `BlockState::property` returns `Result<Option<&str>, BlockStateError>`, not an `Option`; it
+   needs `.ok().flatten()` (as `facing_at` already did). `state_with_property` is an internal
+   `LevelHost` method, not callable on `ServerHost`; the mod-facing equivalent is
+   `BlockState::with(&host.block_states(), name, value)`.
+2. The operator-only mode command needs **four** usages (readout + three literal modes); the
+   `the_harness_commands_are_operator_only` test pins the exact count, so it must be updated
+   whenever a usage is added.
+3. `ctl interact` reports the resulting block state and `changed` in its own JSON reply — that is
+   the parsed assertion to quote beside the `/powah info` readout, not just the absence of an error.
+
+Version: **0.2.19 → 0.2.20** (one patch). The published `[[versions]]` record keeps 0.2.19 and
+gains 0.2.20 at publish time — this port does not touch the registry entry. Title:
+`Update powah 0.2.20` (the entry is ours on `main`; 0.2.19 is staged on PR #1850).
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+
+## Next slice
+
+**Family:** the wrench's LINK mode — a two-click rod↔orb link. Slice 20's coverage row names it
+verbatim (*"LINK (rod↔orb link, `LINK_ORB_POS`/`LINK_ROD_POS`, range check) — not ported"*) and the
+artefact's `EnergizingRodBlock.onWrench` / `EnergizingOrbBlock.onWrench` (`v6.2.10`) give the rule:
+in LINK mode, clicking a rod with no stored position writes `LINK_ROD_POS` onto the held wrench;
+clicking an orb with a rod position stored calls `rod.setOrbPos(orbPos)` if the Chebyshev-style
+distance is within `general.energizing_range` (default 4), otherwise sends `chat.powah.wrench.link.fail`.
+**Why it fits `machines`:** it reuses the item-use hook and one block-entity data write, with the
+rod and orb already ported; no new block, renderer, GUI or hook family. Mode selection already
+exists (`/powah wrench mode link`); the two click positions replace the stack components as
+process-global harness state (a deviation to record). **In-game assertion:** place an orb and a
+rod more than 4 blocks apart, select LINK, click the rod then the orb — `/powah info <rod>`'s
+`orb …` field must stay empty (the range refusal); move the orb within range, click both again,
+and the same readout must name that exact orb position with a fresh `t=`, after which the rod
+fills it. `SELFTEST=link` must invert the linked half and end `EXIT:1`. The first gate is a
+read-only one: confirm the rod's saved `orb` key is already written by `rod_tick`'s placement
+search, so the only new write is the explicit override.
 
 The generators (Magmator/Thermo) remain `blocked(mod-fluid-tank)`, the reactors
 `blocked(uraninite-worldgen)` and the GUIs out of the machines tier.

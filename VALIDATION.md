@@ -1,4 +1,34 @@
-# Validation — Powah slices 1 to 19
+# Validation — Powah slices 1 to 20
+
+> **0.2.20 (slice 20, the wrench's ROTATE mode)** is recorded in
+> [`notes.md`](notes.md#slice-20--the-wrenches-rotate-mode-2026-11-24): the slice and the gap line
+> it comes from (the previous `## Next slice`, named again by slice 19's coverage row —
+> *"WrenchMode cycle … and LINK/ROTATE actions — not ported"*), and the artefact read at tag
+> `v6.2.10` (`WrenchItem.DIRECTIONS = Direction.values()` = DOWN, UP, NORTH, SOUTH, WEST, EAST;
+> `nextDirection = DIRECTIONS[(ordinal+1) % 6]`; `rotateState` skips values not in
+> `possibleValues` or that cannot survive, giving up after a full turn; ROTATE applies only to
+> `AbstractEnergyBlock`/`EnergizingOrbBlock` and writes only on a change). **First gate passed
+> before any edit:** the pin's `ServerHost::set_block_property(pos, key, value) -> bool` writes a
+> named property (`Level.setBlock` UPDATE_ALL, false when the property/value is absent or
+> unchanged) and `BlockState::with(&host.block_states(), …) -> Result` is its mod-facing
+> acceptance/survival guard; a general `canSurvive(state,pos)` query is absent (only a replacement
+> hook) but vacuous for every machine the artefact rotates, recorded as a deviation, not
+> `blocked(...)`. The red proof (three `todo!()` rules, **116 passed / 3 failed**, quoted
+> verbatim), the ladder at pin `0a875da` (**119 tests**, clippy 0 warnings, `fmt --check` clean,
+> two `cmp`-identical builds of **581,678 B**, `check`, `fits` against the pin **and** `0b14f8a`,
+> gate **1/1** with `package matches the tree`, 915 entries, no packed `Cargo.lock`, R9,
+> `tests 119 passed`, `skills gate PASS`) and the in-game legs (main `PASS`+`EXIT:0` on the
+> delivered archive; the control game red at the first powah block; `SELFTEST=rotate` and
+> `SELFTEST=1` at `EXIT:1`; the log gate **82/82 `--strict`**). The full replay was not repeated:
+> this slice changed no earlier family. A bounded `tools/e2e-rotate.sh` leg proves the
+> operator-only `/powah wrench mode rotate`, a held wrench on a hopper's north face advancing
+> `facing=north → south` with a fresh `t=` and `changed:true`, a CONFIG-mode wrench leaving
+> `facing` north, a cell with no `facing` and a stone refusing cleanly, and that the item is kept.
+> Package: `powah.hmod`, 581,678 B, sha256
+> `2490b1e79fb33b3e1bae5a17211bf1d0b09e0ef97e8890916b392198d99683c1`. Launcher build:
+> `Compiling powah (1 of 1)`, `native-0a875da-5f008f020fa1`, instance `powah-e2e`. No `/powah
+> info` line changed; the CONFIG/readout/redstone/comparator families (slices 13–16, 19) were
+> not touched.
 
 > **0.2.19 (slice 19, the wrench and its side-config action)** is recorded in
 > [`notes.md`](notes.md#slice-19--the-wrench-and-its-side-config-action-2026-11-24): the slice and

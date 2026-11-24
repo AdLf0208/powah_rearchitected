@@ -12,6 +12,7 @@
 //! so the buffer's numbers have one home, [`battery_of`], which the cable's
 //! relay also reads when it plans a move.
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use mod_api::HostBlockStates;
@@ -34,7 +35,8 @@ use crate::runtime::{
     RedstoneMode, RodTier, SOLAR_TIER_COUNT, Sky, SolarTier, TRANSMITTER_TIER_COUNT, TransferType,
     battery_tier, cable_tier, cell_tier, check_redstone, clamp_energy, comparator_strength,
     creative_after_give, creative_cell_tier, default_sides, discharger_tier, ender_cell_tier,
-    ender_gate_tier, furnator_tier, network_moves, push_amount, rod_tier, wrench_next_face,
+    ender_gate_tier, furnator_tier, network_moves, push_amount, rod_tier, rotate_facing,
+    wrench_next_face, WrenchMode,
 };
 
 /// The energizing orb block and its item.
@@ -2574,6 +2576,17 @@ pub(crate) fn declare_commands(commands: &mut Vec<Command>) {
         "powah side <face:word> <type:word> <pos:block_pos>",
         2,
     ));
+    // The wrench's mode selector, replacing upstream's shift-right-click cycle (a
+    // client input path this pin does not stamp). One literal per mode, so the
+    // dispatcher refuses an unknown word before any listener runs; the no-arg form
+    // reads the current mode back for diagnostics.
+    commands.push(Command::op("powah wrench", 2));
+    for mode in WrenchMode::ALL {
+        commands.push(Command::op(
+            &format!("powah wrench mode {}", mode.command_word()),
+            2,
+        ));
+    }
 }
 
 /// What `/powah channel` did, so the command can answer honestly.
@@ -2704,15 +2717,80 @@ pub(crate) fn set_side_type(
     }
 }
 
-/// The wrench's CONFIG-mode action: a right click on a block with `powah:wrench`
-/// held advances the clicked face's transfer type by [`wrench_next_face`]. This is
-/// the in-world equivalent of slice 16's GUI-button replacement (the button sends
-/// `NextEnergyConfigPacket`; the item reads the hit face the pin's
-/// `use_item_on_block` hook carries). The pin's `use_item_on_block` fires once per
-/// hand on both sides, so only the server acts; a stone, a block with no side
-/// config, a face the pin cannot name, or an absent/failed write leave the click to
-/// vanilla and keep the item. A successful change cancels the click, as upstream's
-/// `onItemUseFirst` returning `SUCCESS` does.
+/// The held wrench's mode. Upstream keeps this on the stack as a component and cycles it
+/// with shift-right-click; that input is not stamped at this pin, so the operator-only
+/// `/powah wrench mode <mode>` command sets it instead (the GUI-button replacement). It is
+/// process-global for the harness, like `/powah set` — recorded as a deviation in `notes.md`.
+static WRENCH_MODE: AtomicU8 = AtomicU8::new(0);
+
+/// Remember the mode chosen by `/powah wrench mode <mode>`.
+pub(crate) fn set_wrench_mode(mode: WrenchMode) {
+    WRENCH_MODE.store(mode as u8, Ordering::SeqCst);
+}
+
+/// The mode the wrench will apply on its next right-click.
+pub(crate) fn wrench_mode() -> WrenchMode {
+    WrenchMode::ALL
+        .get(WRENCH_MODE.load(Ordering::SeqCst) as usize)
+        .copied()
+        .unwrap_or_default()
+}
+
+/// The ROTATE branch of `WrenchItem.onItemUseFirst` (`WrenchItem.rotateState`): advance the
+/// block's `facing` state to the next value the block can hold, writing it through the pin's
+/// named-property write. Upstream restricts rotation to its own machines
+/// (`AbstractEnergyBlock` / `EnergizingOrbBlock`), so a foreign block is left to vanilla even
+/// if it happens to have a `facing`; a Power machine with no `facing` (a cell, a cable) refuses
+/// cleanly because `state_with_property` has no such property. `true` means the write took
+/// effect, which is what cancels the click (upstream's `sidedSuccess`).
+pub(crate) fn on_wrench_rotate(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+    block: &str,
+) -> bool {
+    if Kind::of(block).is_none() {
+        return false;
+    }
+    let Some(state) = level.block_state(&*host, pos) else {
+        return false;
+    };
+    let current = {
+        let states = host.block_states();
+        let Some(name) = state.property(&states, "facing").ok().flatten() else {
+            return false;
+        };
+        let Some(current) = facing_of(name) else {
+            return false;
+        };
+        current
+    };
+    // The glue's "can survive" is the pin's acceptance check: `BlockState::with` refuses a
+    // value the block's `facing` property does not have. Every machine the artefact rotates
+    // survives in all six facings, so the replacement `can_survive` hook has nothing to add
+    // here (recorded as a deviation in `notes.md`).
+    let valid = |index: usize| {
+        Direction::ALL.get(index).is_some_and(|direction| {
+            state
+                .with(&host.block_states(), "facing", facing_name(*direction))
+                .is_ok()
+        })
+    };
+    let Some(next) = rotate_facing(current as usize, valid) else {
+        return false;
+    };
+    host.set_block_property(pos, "facing", facing_name(Direction::ALL[next]))
+}
+
+/// The held wrench's right-click action, dispatched by its mode (set with
+/// `/powah wrench mode <mode>`, since the hook carries no shift-key state):
+/// CONFIG advances the clicked face's transfer type by [`wrench_next_face`] (slice 19,
+/// the in-world equivalent of slice 16's GUI-button replacement); ROTATE steps the
+/// block's own `facing` state ([`on_wrench_rotate`], slice 20); LINK is out of scope.
+/// The pin's `use_item_on_block` fires once per hand on both sides, so only the server
+/// acts; a stone, a block with no side config, a face the pin cannot name, or an
+/// absent/failed write leave the click to vanilla and keep the item. A successful
+/// change cancels the click, as upstream's `onItemUseFirst` returning `SUCCESS` does.
 pub(crate) fn on_wrench_use(host: HostSide, event: &mut UseItemOnBlockEvent<'_>) -> Flow {
     let HostSide::Server(host) = host else {
         return Flow::Continue;
@@ -2724,32 +2802,48 @@ pub(crate) fn on_wrench_use(host: HostSide, event: &mut UseItemOnBlockEvent<'_>)
     if stack.item().id(&*host) != WRENCH {
         return Flow::Continue;
     }
-    // The face the pin reports is a normal vector; the machine's face index is
-    // `Direction`'s ordinal (`Direction.get3DDataValue()` in the jar).
-    let Some(face) = Direction::ALL
-        .into_iter()
-        .find(|direction| direction.normal() == click.hit.face)
-    else {
-        return Flow::Continue;
-    };
     let Some(level) = level_now(host) else {
         return Flow::Continue;
     };
     let Some(block) = block_at(&*host, level, click.pos) else {
         return Flow::Continue;
     };
-    if !has_side_config(&block) {
-        return Flow::Continue;
-    }
-    let default = Kind::of(&block).map_or(TransferType::None, default_transfer);
-    let current = host
-        .block_entity(level, click.pos)
-        .and_then(|entity| entity.data(&*host))
-        .map_or(default_sides(default), |saved| side_types(&block, &saved));
-    let next = wrench_next_face(current[face as usize], default);
-    match set_side_type(host, click.pos, face, next) {
-        SideOutcome::Set(..) => Flow::Cancel,
-        _ => Flow::Continue,
+    match wrench_mode() {
+        // Slice 20: the jar's ROTATE action. It ignores the clicked face and steps the
+        // block's own `facing` state, exactly as `WrenchItem.rotateState` does.
+        WrenchMode::Rotate => {
+            if on_wrench_rotate(host, level, click.pos, &block) {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
+        // LINK would link a machine to an ender network; no client→server action path
+        // exists here and no such surface is in scope (recorded in the coverage table).
+        WrenchMode::Link => Flow::Continue,
+        WrenchMode::Config => {
+            // The face the pin reports is a normal vector; the machine's face index is
+            // `Direction`'s ordinal (`Direction.get3DDataValue()` in the jar).
+            let Some(face) = Direction::ALL
+                .into_iter()
+                .find(|direction| direction.normal() == click.hit.face)
+            else {
+                return Flow::Continue;
+            };
+            if !has_side_config(&block) {
+                return Flow::Continue;
+            }
+            let default = Kind::of(&block).map_or(TransferType::None, default_transfer);
+            let current = host
+                .block_entity(level, click.pos)
+                .and_then(|entity| entity.data(&*host))
+                .map_or(default_sides(default), |saved| side_types(&block, &saved));
+            let next = wrench_next_face(current[face as usize], default);
+            match set_side_type(host, click.pos, face, next) {
+                SideOutcome::Set(..) => Flow::Cancel,
+                _ => Flow::Continue,
+            }
+        }
     }
 }
 
@@ -4854,9 +4948,10 @@ mod tests {
         declare_commands(&mut commands);
         assert_eq!(
             commands.len(),
-            10,
+            14,
             "every usage is declared: `info`, `set`, the item charge readout and control, the \
-             channel control, the three redstone modes and the side-config readout and setter"
+             channel control, the three redstone modes, the side-config readout and setter, and \
+             the wrench mode readout and its three modes"
         );
         let usages: Vec<&str> = commands
             .iter()
@@ -4889,6 +4984,17 @@ mod tests {
             usages.contains(&"powah side <face:word> <type:word> <pos:block_pos>"),
             "the wrench button's replacement sets one face: {usages:?}"
         );
+        assert!(
+            usages.contains(&"powah wrench"),
+            "the wrench's mode readout is opt-in: {usages:?}"
+        );
+        for mode in crate::runtime::WrenchMode::ALL {
+            let usage = format!("powah wrench mode {}", mode.command_word());
+            assert!(
+                usages.contains(&usage.as_str()),
+                "the {mode:?} wrench mode is a literal of its usage: {usages:?}"
+            );
+        }
         for command in &commands {
             assert!(
                 command.usage.starts_with("powah "),

@@ -1205,6 +1205,88 @@ pub fn wrench_next_face(current: TransferType, default: TransferType) -> Transfe
     current.next(default)
 }
 
+/// The mode a held wrench is in. Upstream stores this on the stack as the `WRENCH_MODE`
+/// component and cycles it with shift-right-click (`WrenchItem.use` → `nextWrenchMode`).
+/// That input path is not stamped at this pin, so the port sets the same three modes with
+/// the operator-only `/powah wrench mode <mode>` command (the GUI-button replacement). The
+/// order is upstream's `WrenchMode.java`: `CONFIG, LINK, ROTATE`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WrenchMode {
+    /// Cycle the clicked face's side-config type (upstream's default, and slice 19).
+    #[default]
+    Config,
+    /// Link a machine to an ender network — out of scope (no client→server action).
+    Link,
+    /// Rotate the block's `facing` state to its next direction (slice 20).
+    Rotate,
+}
+
+impl WrenchMode {
+    /// The three modes in `WrenchMode.values()` order.
+    pub const ALL: [Self; 3] = [Self::Config, Self::Link, Self::Rotate];
+
+    /// The lowercase name upstream's lang keys use (`info.powah.wrench.mode.<name>`).
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::Link => "link",
+            Self::Rotate => "rotate",
+        }
+    }
+
+    /// The word the `/powah wrench mode` usage uses for this mode.
+    #[must_use]
+    pub fn command_word(self) -> &'static str {
+        self.name()
+    }
+
+    /// The mode a command word names, `None` for anything else.
+    #[must_use]
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.name() == name)
+    }
+
+    /// The next mode, as upstream's shift-click `nextWrenchMode` cycles it.
+    #[must_use]
+    pub fn next(self) -> Self {
+        Self::ALL[(self as usize + 1) % Self::ALL.len()]
+    }
+}
+
+/// Upstream's `Direction.values()` order, read from `WrenchItem.DIRECTIONS` and the pin's
+/// `mod_api::Direction` (both `DOWN, UP, NORTH, SOUTH, WEST, EAST`). A `facing` value is
+/// named by the entry at its ordinal; the glue maps the two together.
+pub const DIRECTION_COUNT: usize = 6;
+pub const DIRECTION_NAMES: [&str; DIRECTION_COUNT] = [
+    "down", "up", "north", "south", "west", "east",
+];
+
+/// `WrenchItem.nextDirection`: the next `Direction.values()` entry, wrapping at the end.
+#[must_use]
+pub fn next_direction(current: usize) -> usize {
+    (current + 1) % DIRECTION_COUNT
+}
+
+/// `WrenchItem.rotateState`'s loop, free of game types: step forward one direction at a time
+/// until the glue's `valid` says that `facing` value exists and the rotated block would
+/// survive there, giving up with `None` (no change) after a full turn back to `current`.
+/// Upstream checks `possibleValues.contains(rotated) && state.setValue(...).canSurvive(...)`;
+/// the pin has no `canSurvive` *query*, only a replacement hook, but every machine the
+/// artefact rotates survives in all six facings, so the glue's `state_with_property`
+/// acceptance check is the operative half (recorded in `notes.md`).
+#[must_use]
+pub fn rotate_facing(current: usize, valid: impl Fn(usize) -> bool) -> Option<usize> {
+    let mut rotated = next_direction(current);
+    while !valid(rotated) {
+        rotated = next_direction(rotated);
+        if rotated == current {
+            return None;
+        }
+    }
+    Some(rotated)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2996,5 +3078,56 @@ mod tests {
             TransferType::None,
             "a storage whose own type is NONE never changes a face"
         );
+    }
+
+    #[test]
+    fn wrench_mode_defaults_to_config_and_cycles_in_the_jars_order() {
+        // `WrenchMode.java`: CONFIG, LINK, ROTATE (BY_ID = ordinal + 1). The default
+        // wrench is CONFIG, which is why slice 19's click cycled side config.
+        assert_eq!(WrenchMode::default(), WrenchMode::Config);
+        assert_eq!(
+            WrenchMode::ALL,
+            [WrenchMode::Config, WrenchMode::Link, WrenchMode::Rotate]
+        );
+        let mut mode = WrenchMode::Config;
+        for want in [WrenchMode::Link, WrenchMode::Rotate, WrenchMode::Config] {
+            mode = mode.next();
+            assert_eq!(mode, want, "shift-click advances the wrench mode in jar order");
+        }
+        assert_eq!(WrenchMode::Rotate.name(), "rotate");
+        assert_eq!(WrenchMode::named("rotate"), Some(WrenchMode::Rotate));
+        assert_eq!(WrenchMode::named("nope"), None);
+    }
+
+    #[test]
+    fn wrench_rotate_steps_one_direction_in_the_jars_values_order() {
+        // `Direction.values()` = DOWN, UP, NORTH, SOUTH, WEST, EAST and
+        // `nextDirection = DIRECTIONS[(ordinal + 1) % 6]` (WrenchItem.java:38,114-116).
+        for (i, name) in DIRECTION_NAMES.iter().enumerate() {
+            assert_eq!(
+                DIRECTION_NAMES[next_direction(i)],
+                DIRECTION_NAMES[(i + 1) % DIRECTION_COUNT],
+                "the step after {name} is the next values() entry"
+            );
+        }
+        assert_eq!(DIRECTION_NAMES[next_direction(2)], "south", "north -> south");
+        assert_eq!(DIRECTION_NAMES[next_direction(5)], "down", "east wraps to down");
+    }
+
+    #[test]
+    fn wrench_rotate_skips_directions_the_block_cannot_have_and_gives_up_after_a_turn() {
+        // `rotateState`: `while !possible.contains(rotated) || !canSurvive { next }`,
+        // returning the unchanged state if it walks all the way back to `current`.
+        let all = |_: usize| true;
+        assert_eq!(rotate_facing(2, all), Some(3), "north -> south when all survive");
+
+        // The furnace template has only the four horizontal facings (indices 2..=5):
+        // from east the loop skips down and up and lands on north.
+        let horizontal = |i: usize| (2..=5).contains(&i);
+        assert_eq!(rotate_facing(5, horizontal), Some(2), "east skips down/up to north");
+
+        // Nothing survives: a full turn reaches `current` again and the port leaves
+        // the block untouched, as upstream returns the original state.
+        assert_eq!(rotate_facing(3, |_: usize| false), None);
     }
 }
