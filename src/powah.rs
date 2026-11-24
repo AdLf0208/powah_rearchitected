@@ -31,12 +31,13 @@ use crate::runtime::{
     BATTERY_TIER_COUNT, BatteryTier, CABLE_TIER_COUNT, CELL_TIER_COUNT, CableTier, CellTier,
     Channel, CreativeCellTier, DISCHARGER_TIER_COUNT, DischargerTier, ENDER_TIER_COUNT, EnderTier,
     EnergizingRecipe, FURNATOR_TIER_COUNT, Furnator, FurnatorTier, HOPPER_TIER_COUNT, HopperTier,
-    MAX_CHANNELS, Neighbour, ORB_MAX_ENERGY, ORB_OUTPUT_SLOT, ORB_SLOTS, ROD_TIER_COUNT,
-    RedstoneMode, RodTier, SOLAR_TIER_COUNT, Sky, SolarTier, TRANSMITTER_TIER_COUNT, TransferType,
-    battery_tier, cable_tier, cell_tier, check_redstone, clamp_energy, comparator_strength,
-    creative_after_give, creative_cell_tier, default_sides, discharger_tier, ender_cell_tier,
-    ender_gate_tier, furnator_tier, network_moves, push_amount, rod_tier, rotate_facing,
-    wrench_next_face, WrenchMode,
+    LinkAction, MAX_CHANNELS, Neighbour, ORB_MAX_ENERGY, ORB_OUTPUT_SLOT, ORB_SLOTS,
+    ROD_TIER_COUNT, RedstoneMode, RodTier, SOLAR_TIER_COUNT, Sky, SolarTier,
+    TRANSMITTER_TIER_COUNT, TransferType, WrenchLink, WrenchMode, battery_tier, cable_tier,
+    cell_tier, check_redstone, clamp_energy, comparator_strength, creative_after_give,
+    creative_cell_tier, default_sides, discharger_tier, ender_cell_tier, ender_gate_tier,
+    furnator_tier, link_in_range, network_moves, push_amount, rod_tier, rotate_facing,
+    wrench_next_face,
 };
 
 /// The energizing orb block and its item.
@@ -2736,6 +2737,86 @@ pub(crate) fn wrench_mode() -> WrenchMode {
         .unwrap_or_default()
 }
 
+/// The two positions upstream keeps on the held wrench as `LINK_ORB_POS` / `LINK_ROD_POS`.
+/// The pin's `use_item_on_block` hands out an immutable stack, so this pair is process-global
+/// harness state for the same reason the mode is: a deviation recorded in `notes.md`.
+static LINK: Mutex<WrenchLink> = Mutex::new(WrenchLink::new());
+
+/// The opt-in `/powah wrench` readout. The mode line stays byte-identical in CONFIG and ROTATE
+/// (slices 19/20); only LINK adds the two stored positions and the level's clock, which is how
+/// the in-game leg reads the state machine without a client-side stack component and tells a
+/// fresh answer from a stale one.
+pub(crate) fn wrench_line(host: &mut dyn ServerHost) -> String {
+    let mode = wrench_mode();
+    if mode != WrenchMode::Link {
+        return format!("Wrench mode: {}.", mode.name());
+    }
+    let time = level_now(host)
+        .and_then(|level| level.game_time(host))
+        .unwrap_or(0);
+    let link = LINK
+        .lock()
+        .expect("the powah link cursor lock is held for one readout");
+    let pos = |stored: Option<[i32; 3]>| match stored {
+        Some([x, y, z]) => format!("{x},{y},{z}"),
+        None => "none".to_owned(),
+    };
+    format!(
+        "Wrench mode: {} (rod {}, orb {}, t={}).",
+        mode.name(),
+        pos(link.rod),
+        pos(link.orb),
+        time
+    )
+}
+
+/// The LINK branch of `WrenchItem.onItemUseFirst` — upstream's
+/// `EnergizingRodBlock.onWrench` / `EnergizingOrbBlock.onWrench`. The first click on either
+/// kind stores its position; the second click on the other kind checks the stored block is
+/// still that kind and within `general.energizing_range`, then writes the explicit orb
+/// override to the rod's saved `orb` key — the same key `rod_tick`'s placement search writes.
+/// A first or refused click changes no block data. `true` means the wrench handled the click
+/// (upstream returns true for the whole LINK branch, so vanilla use does not run).
+pub(crate) fn on_wrench_link(
+    host: &mut dyn ServerHost,
+    level: LevelRef,
+    pos: [i32; 3],
+    block: &str,
+) -> bool {
+    let mut cursor = LINK
+        .lock()
+        .expect("the powah link cursor lock is held for one click");
+    let action = match Kind::of(block) {
+        Some(Kind::Orb) => {
+            let in_range = cursor.rod.is_some_and(|rod| {
+                block_at(&*host, level, rod)
+                    .as_deref()
+                    .and_then(Kind::of)
+                    .is_some_and(|kind| matches!(kind, Kind::Rod(_)))
+                    && link_in_range(rod, pos, crate::runtime::ENERGIZING_RANGE)
+            });
+            cursor.click_orb(pos, in_range)
+        }
+        Some(Kind::Rod(_)) => {
+            let in_range = cursor.orb.is_some_and(|orb| {
+                block_at(&*host, level, orb).as_deref().and_then(Kind::of) == Some(Kind::Orb)
+                    && link_in_range(orb, pos, crate::runtime::ENERGIZING_RANGE)
+            });
+            cursor.click_rod(pos, in_range)
+        }
+        _ => return false,
+    };
+    drop(cursor);
+    if let LinkAction::Link(rod, orb) = action
+        && let Some(entity) = host.block_entity(level, rod)
+    {
+        let mut patch = Compound::new();
+        patch.insert(KEY_ORB.into(), Tag::IntArray(orb.to_vec()));
+        let _ = entity.merge_data(host, patch);
+    }
+    true
+}
+
 /// The ROTATE branch of `WrenchItem.onItemUseFirst` (`WrenchItem.rotateState`): advance the
 /// block's `facing` state to the next value the block can hold, writing it through the pin's
 /// named-property write. Upstream restricts rotation to its own machines
@@ -2786,7 +2867,8 @@ pub(crate) fn on_wrench_rotate(
 /// `/powah wrench mode <mode>`, since the hook carries no shift-key state):
 /// CONFIG advances the clicked face's transfer type by [`wrench_next_face`] (slice 19,
 /// the in-world equivalent of slice 16's GUI-button replacement); ROTATE steps the
-/// block's own `facing` state ([`on_wrench_rotate`], slice 20); LINK is out of scope.
+/// block's own `facing` state ([`on_wrench_rotate`], slice 20); LINK links a rod to an orb
+/// over its two clicks ([`on_wrench_link`], slice 21).
 /// The pin's `use_item_on_block` fires once per hand on both sides, so only the server
 /// acts; a stone, a block with no side config, a face the pin cannot name, or an
 /// absent/failed write leave the click to vanilla and keep the item. A successful
@@ -2818,9 +2900,16 @@ pub(crate) fn on_wrench_use(host: HostSide, event: &mut UseItemOnBlockEvent<'_>)
                 Flow::Continue
             }
         }
-        // LINK would link a machine to an ender network; no client→server action path
-        // exists here and no such surface is in scope (recorded in the coverage table).
-        WrenchMode::Link => Flow::Continue,
+        // LINK is the two-click rod↔orb link (slice 21). The stored positions replace
+        // upstream's stack components as process-global harness state; the write is the
+        // explicit override of the `orb` key the placement search already writes.
+        WrenchMode::Link => {
+            if on_wrench_link(host, level, click.pos, &block) {
+                Flow::Cancel
+            } else {
+                Flow::Continue
+            }
+        }
         WrenchMode::Config => {
             // The face the pin reports is a normal vector; the machine's face index is
             // `Direction`'s ordinal (`Direction.get3DDataValue()` in the jar).

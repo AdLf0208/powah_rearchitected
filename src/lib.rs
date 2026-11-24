@@ -364,10 +364,11 @@ impl Hooks for Mod {
     }
 
     /// The wrench's right-click action. CONFIG cycles the clicked face's transfer type
-    /// (slice 19); ROTATE steps the machine's own `facing` state (slice 20). The mode is
-    /// chosen with the operator-only `/powah wrench mode <mode>` command, since the hook
-    /// carries no shift-key state. Only a held `powah:wrench` on a Powah machine changes
-    /// anything; the item keeps its byte-for-byte earlier behaviour in CONFIG mode.
+    /// (slice 19), ROTATE steps the machine's own `facing` state (slice 20) and LINK is the
+    /// two-click rod↔orb link (slice 21). The mode is chosen with the operator-only
+    /// `/powah wrench mode <mode>` command, since the hook carries no shift-key state. Only
+    /// a held `powah:wrench` on a Powah machine changes anything; the item keeps its
+    /// byte-for-byte earlier behaviour in CONFIG mode.
     fn use_item_on_block(&self, host: HostSide, event: &mut UseItemOnBlockEvent<'_>) -> Flow {
         powah::on_wrench_use(host, event)
     }
@@ -511,9 +512,10 @@ impl Hooks for Mod {
             // `powah wrench mode <mode>` replaces the wrench's shift-right-click mode
             // cycle (the pin has no client→server input path for it). The mode is a
             // literal of the usage, so an unknown word is refused by the dispatcher.
-            (["powah", "wrench"], None) => {
-                format!("Wrench mode: {}.", powah::wrench_mode().name())
-            }
+            // The opt-in wrench readout. CONFIG/ROTATE print the byte-identical mode line
+            // slices 19/20 asserted; LINK adds the two stored click positions so the leg can
+            // read the two-click state machine without a stack component.
+            (["powah", "wrench"], None) => powah::wrench_line(host),
             (["powah", "wrench", "mode", mode], None) => {
                 let Some(mode) = runtime::WrenchMode::named(mode) else {
                     return Flow::Continue;

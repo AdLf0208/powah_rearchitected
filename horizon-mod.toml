@@ -5,7 +5,7 @@
 # until the maintainer approves publishing (ARCHITECTURE.md §8).
 id = "powah"
 name = "Powah"
-version = "0.2.20"
+version = "0.2.21"
 description = """A port of Powah! (Rearchitected) for Horizon, slice 1: the starter tier of the energy
 chain. The Furnator burns a furnace fuel into carbon and makes 20 FE/t into a 20,000 FE buffer
 (one coal is 48,000 FE); the Energy Cell is a 1,000,000 FE capacitor that takes and gives 1,000
@@ -102,8 +102,18 @@ with no `facing` refuses cleanly, and stone keeps its item. The mode is a harnes
 rather than a per-stack component, and the pin has no `canSurvive` *query* — but every machine the
 artefact rotates survives in all six facings, so the property's own acceptance check is the
 operative half. No earlier `/powah info` line changes.
+Slice 21 adds the wrench's LINK mode, the two-click rod↔orb link of `EnergizingRodBlock.onWrench`
+and `EnergizingOrbBlock.onWrench`: the first click on a rod or an orb stores its position
+(upstream's `LINK_ROD_POS`/`LINK_ORB_POS` stack components), and the second click on the other
+kind writes the clicked orb onto the rod's saved `orb` key when the stored block is still that
+kind and within `general.energizing_range` (default 4, checked with the artefact's truncated
+Euclidean `V3d.distance`, not the placement search's Chebyshev box). An out-of-range click
+consumes the stored position and leaves the rod unlinked. The two positions and the mode are
+process-global harness state (the pin cannot write a stack component), shown by the opt-in
+`/powah wrench` readout only in LINK mode; CONFIG and ROTATE are unchanged, and no `/powah info`
+line changes.
 Not yet ported: the magmator and thermo generators, the reactors, the Lens of Ender, the
-dimensional binding card, the wrench's link mode and the GUIs."""
+dimensional binding card and the GUIs."""
 authors = ["owmii", "Technici4n", "AdLf0208"]
 # A native mod: Rust in src/, compiled by the launcher against the game build [native] pins,
 # beside the carried assets/ and data/. The id is the resource namespace and the only identity.

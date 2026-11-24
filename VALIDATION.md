@@ -1,4 +1,32 @@
-# Validation — Powah slices 1 to 20
+# Validation — Powah slices 1 to 21
+
+> **0.2.21 (slice 21, the wrench's LINK mode)** is recorded in
+> [`notes.md`](notes.md#slice-21--the-wrenches-link-mode-2026-11-24): the slice and the gap line
+> it comes from (the previous `## Next slice`, named again by slice 20's coverage row —
+> *"LINK (rod↔orb link, `LINK_ORB_POS`/`LINK_ROD_POS`, range check) — not ported"*), and the
+> artefact read at tag `v6.2.10` (`EnergizingRodBlock.onWrench` / `EnergizingOrbBlock.onWrench`:
+> the first click stores `LINK_ROD_POS`/`LINK_ORB_POS` on the held stack, the second checks the
+> stored block's kind and `(int) V3d.distance <= general.energizing_range` (default 4) then
+> writes the rod's `orb` key, removing the stored position either way). **First gate passed
+> before any edit:** `rod_tick` already writes the rod's saved `orb` key from its placement
+> search (`find_orb`), so LINK needs only the explicit override — no change to the placement
+> chain. The brief's "Chebyshev-style" is corrected by the artefact's truncated Euclidean
+> `V3d.distance`. The red proof (four `todo!()` rules, **119 passed / 4 failed**, quoted
+> verbatim), the ladder at pin `0a875da` (**123 tests**, clippy 0 warnings, `fmt --check` clean,
+> two `cmp`-identical builds of **585,234 B**, `check`, `fits` against the pin **and** `0b14f8a`,
+> gate **1/1** with `package matches the tree`, 915 entries, no packed `Cargo.lock`, R9,
+> `tests 123 passed`, `skills gate PASS`) and the in-game legs (main `PASS`+`EXIT:0` on the
+> delivered archive; the control game red at the first powah block; `SELFTEST=link` and
+> `SELFTEST=1` at `EXIT:1`; the log gate **90/90 `--strict`**). The full replay was not repeated:
+> this slice changed no earlier family. A bounded `tools/e2e-link.sh` leg proves the
+> operator-only `/powah wrench mode link`, the out-of-range refusal with the first click
+> consumed, the wrench overriding the placement search's first orb with the exact clicked orb
+> which the rod then fills, a rod clicked twice storing its own position, an unmatched orb
+> click leaving the rod's link alone, and CONFIG/ROTATE still working. Package: `powah.hmod`,
+> 585,234 B, sha256
+> `d41312efeb6f09e338fbe665c2afb4da8d5a7ae3dafd95f99ee3e43b3d9e3cca`. Launcher build:
+> `Compiling powah (1 of 1)`, `native-0a875da-05b7bd636dd2`, instance `powah-e2e`. No `/powah
+> info` line changed; the CONFIG/ROTATE families (slices 19–20) were not touched.
 
 > **0.2.20 (slice 20, the wrench's ROTATE mode)** is recorded in
 > [`notes.md`](notes.md#slice-20--the-wrenches-rotate-mode-2026-11-24): the slice and the gap line

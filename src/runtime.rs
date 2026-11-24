@@ -1215,7 +1215,7 @@ pub enum WrenchMode {
     /// Cycle the clicked face's side-config type (upstream's default, and slice 19).
     #[default]
     Config,
-    /// Link a machine to an ender network — out of scope (no client→server action).
+    /// Link an energizing rod to an orb: the two-click rod↔orb link (slice 21).
     Link,
     /// Rotate the block's `facing` state to its next direction (slice 20).
     Rotate,
@@ -1258,9 +1258,8 @@ impl WrenchMode {
 /// `mod_api::Direction` (both `DOWN, UP, NORTH, SOUTH, WEST, EAST`). A `facing` value is
 /// named by the entry at its ordinal; the glue maps the two together.
 pub const DIRECTION_COUNT: usize = 6;
-pub const DIRECTION_NAMES: [&str; DIRECTION_COUNT] = [
-    "down", "up", "north", "south", "west", "east",
-];
+pub const DIRECTION_NAMES: [&str; DIRECTION_COUNT] =
+    ["down", "up", "north", "south", "west", "east"];
 
 /// `WrenchItem.nextDirection`: the next `Direction.values()` entry, wrapping at the end.
 #[must_use]
@@ -1285,6 +1284,79 @@ pub fn rotate_facing(current: usize, valid: impl Fn(usize) -> bool) -> Option<us
         }
     }
     Some(rotated)
+}
+
+/// The two positions the wrench's LINK mode keeps on the held stack upstream
+/// (`PowahComponents.LINK_ROD_POS` and `LINK_ORB_POS`). The pin's item-use hook cannot write a
+/// stack component, so the glue keeps this pair as process-global harness state instead (a
+/// deviation recorded in `notes.md`); the two-click state machine itself is the artefact's.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WrenchLink {
+    /// A rod awaiting an orb click (`LINK_ROD_POS`).
+    pub rod: Option<[i32; 3]>,
+    /// An orb awaiting a rod click (`LINK_ORB_POS`).
+    pub orb: Option<[i32; 3]>,
+}
+
+/// What one LINK click decides after the other side's stored position is consumed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkAction {
+    /// Nothing was stored: remember the clicked position, awaiting the other kind.
+    Start,
+    /// A stored position was consumed and the range check passed: link `rod` to `orb`.
+    Link([i32; 3], [i32; 3]),
+    /// A stored position was consumed but the range check failed: nothing is linked.
+    Refused,
+}
+
+impl WrenchLink {
+    /// An empty pair (no first click yet).
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            rod: None,
+            orb: None,
+        }
+    }
+
+    /// Click a rod: consume a stored orb position, or store this rod's own position.
+    /// `in_range` is the glue's answer for the stored position (kind and range checked).
+    pub fn click_rod(&mut self, pos: [i32; 3], in_range: bool) -> LinkAction {
+        match self.orb.take() {
+            // Upstream removes LINK_ORB_POS after either the done or the fail message.
+            Some(orb) if in_range => LinkAction::Link(pos, orb),
+            Some(_) => LinkAction::Refused,
+            None => {
+                self.rod = Some(pos);
+                LinkAction::Start
+            }
+        }
+    }
+
+    /// Click an orb: consume a stored rod position, or store this orb's own position.
+    /// `in_range` is the glue's answer for the stored position (kind and range checked).
+    pub fn click_orb(&mut self, pos: [i32; 3], in_range: bool) -> LinkAction {
+        match self.rod.take() {
+            // Upstream removes LINK_ROD_POS after either the done or the fail message.
+            Some(rod) if in_range => LinkAction::Link(rod, pos),
+            Some(_) => LinkAction::Refused,
+            None => {
+                self.orb = Some(pos);
+                LinkAction::Start
+            }
+        }
+    }
+}
+
+/// `V3d.from(a).distance(b)`: a Euclidean distance truncated to `int`, compared with
+/// `general.energizing_range` (default 4) in both of upstream's `onWrench` methods. This is
+/// deliberately not the Chebyshev box the rod's placement search uses.
+#[must_use]
+pub fn link_in_range(from: [i32; 3], to: [i32; 3], range: i32) -> bool {
+    let dx = (from[0] - to[0]) as f64;
+    let dy = (from[1] - to[1]) as f64;
+    let dz = (from[2] - to[2]) as f64;
+    ((dx * dx + dy * dy + dz * dz).sqrt() as i32) <= range
 }
 
 #[cfg(test)]
@@ -3092,7 +3164,10 @@ mod tests {
         let mut mode = WrenchMode::Config;
         for want in [WrenchMode::Link, WrenchMode::Rotate, WrenchMode::Config] {
             mode = mode.next();
-            assert_eq!(mode, want, "shift-click advances the wrench mode in jar order");
+            assert_eq!(
+                mode, want,
+                "shift-click advances the wrench mode in jar order"
+            );
         }
         assert_eq!(WrenchMode::Rotate.name(), "rotate");
         assert_eq!(WrenchMode::named("rotate"), Some(WrenchMode::Rotate));
@@ -3110,8 +3185,16 @@ mod tests {
                 "the step after {name} is the next values() entry"
             );
         }
-        assert_eq!(DIRECTION_NAMES[next_direction(2)], "south", "north -> south");
-        assert_eq!(DIRECTION_NAMES[next_direction(5)], "down", "east wraps to down");
+        assert_eq!(
+            DIRECTION_NAMES[next_direction(2)],
+            "south",
+            "north -> south"
+        );
+        assert_eq!(
+            DIRECTION_NAMES[next_direction(5)],
+            "down",
+            "east wraps to down"
+        );
     }
 
     #[test]
@@ -3119,15 +3202,87 @@ mod tests {
         // `rotateState`: `while !possible.contains(rotated) || !canSurvive { next }`,
         // returning the unchanged state if it walks all the way back to `current`.
         let all = |_: usize| true;
-        assert_eq!(rotate_facing(2, all), Some(3), "north -> south when all survive");
+        assert_eq!(
+            rotate_facing(2, all),
+            Some(3),
+            "north -> south when all survive"
+        );
 
         // The furnace template has only the four horizontal facings (indices 2..=5):
         // from east the loop skips down and up and lands on north.
         let horizontal = |i: usize| (2..=5).contains(&i);
-        assert_eq!(rotate_facing(5, horizontal), Some(2), "east skips down/up to north");
+        assert_eq!(
+            rotate_facing(5, horizontal),
+            Some(2),
+            "east skips down/up to north"
+        );
 
         // Nothing survives: a full turn reaches `current` again and the port leaves
         // the block untouched, as upstream returns the original state.
         assert_eq!(rotate_facing(3, |_: usize| false), None);
+    }
+
+    #[test]
+    fn link_range_is_truncated_euclidean_not_a_chebyshev_box() {
+        // `V3d.distance(BlockPos)` (V3d.java:50-55) is sqrt(dx²+dy²+dz²), and both
+        // onWrench methods cast it to `int` before comparing with energizing_range = 4.
+        assert!(
+            link_in_range([0, 0, 0], [4, 0, 0], 4),
+            "4 along an axis is in"
+        );
+        assert!(
+            !link_in_range([0, 0, 0], [5, 0, 0], 4),
+            "5 along an axis is out"
+        );
+        assert!(
+            link_in_range([0, 0, 0], [2, 2, 2], 4),
+            "sqrt(12) = 3.46 truncates to 3, in range"
+        );
+        assert!(
+            !link_in_range([0, 0, 0], [3, 3, 3], 4),
+            "Chebyshev 3 but Euclidean sqrt(27) = 5.19 truncates to 5: upstream refuses"
+        );
+    }
+
+    #[test]
+    fn link_clicks_a_rod_then_an_orb_and_returns_the_pair_to_link() {
+        let mut link = WrenchLink::new();
+        assert_eq!(link.rod, None, "a fresh wrench stores no first click");
+        assert_eq!(link.click_rod([1, 2, 3], false), LinkAction::Start);
+        assert_eq!(link.rod, Some([1, 2, 3]), "the rod position is remembered");
+        assert_eq!(
+            link.click_orb([1, 2, 7], true),
+            LinkAction::Link([1, 2, 3], [1, 2, 7])
+        );
+        assert_eq!(link.rod, None, "the consumed click is cleared");
+        assert_eq!(link.orb, None, "no second first-click was started");
+    }
+
+    #[test]
+    fn link_refuses_an_out_of_range_orb_and_consumes_the_click() {
+        let mut link = WrenchLink::new();
+        assert_eq!(link.click_rod([0, 100, 60], false), LinkAction::Start);
+        assert_eq!(link.click_orb([0, 100, 66], false), LinkAction::Refused);
+        assert_eq!(
+            link.rod, None,
+            "upstream removes LINK_ROD_POS after the fail message"
+        );
+        assert_eq!(
+            link.click_rod([0, 100, 60], false),
+            LinkAction::Start,
+            "the next rod click starts a fresh pair"
+        );
+    }
+
+    #[test]
+    fn link_clicks_an_orb_then_a_rod_and_returns_the_same_pair() {
+        let mut link = WrenchLink::new();
+        assert_eq!(link.click_orb([1, 2, 7], false), LinkAction::Start);
+        assert_eq!(link.orb, Some([1, 2, 7]), "the orb position is remembered");
+        assert_eq!(
+            link.click_rod([1, 2, 3], true),
+            LinkAction::Link([1, 2, 3], [1, 2, 7])
+        );
+        assert_eq!(link.orb, None, "the consumed click is cleared");
     }
 }

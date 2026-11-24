@@ -4990,7 +4990,7 @@ gains 0.2.20 at publish time — this port does not touch the registry entry. Ti
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
 
-## Next slice
+## Next slice (before slice 21)
 
 **Family:** the wrench's LINK mode — a two-click rod↔orb link. Slice 20's coverage row names it
 verbatim (*"LINK (rod↔orb link, `LINK_ORB_POS`/`LINK_ROD_POS`, range check) — not ported"*) and the
@@ -5011,4 +5011,226 @@ search, so the only new write is the explicit override.
 
 The generators (Magmator/Thermo) remain `blocked(mod-fluid-tank)`, the reactors
 `blocked(uraninite-worldgen)` and the GUIs out of the machines tier.
+
+## Slice 21 — the wrench's LINK mode (2026-11-24)
+
+### The slice, quoted from this port's own gaps
+
+The previous `## Next slice` (now `## Next slice (before slice 21)`) named it verbatim, and
+slice 20's coverage row carries it unchanged:
+
+> LINK (rod↔orb link, `LINK_ORB_POS`/`LINK_ROD_POS`, range check) | **not ported** — a different behaviour; see `## Next slice`
+
+**Chosen:** the LINK half — the two-click rod↔orb link. **Why it fits `machines`:** it reuses
+slice 19's item-use hook and one block-entity data write, on the rod and orb slice 5 already
+ported; no new block, renderer, GUI or hook family. Class **content**, tier **machines**
+(ledger). CONFIG and ROTATE are left byte-for-byte intact.
+
+### First gate — the `orb` key is already written by `rod_tick` (PASSED before any edit)
+
+Read `src/powah.rs:1939-1962` (`rod_tick`): it reads `KEY_ORB` = `"orb"` from the rod's saved
+compound (`read_pos`), keeps it when the stored orb is in range and still an orb, otherwise
+calls `find_orb` and writes the result back as `Tag::IntArray`. So the saved-key write path
+already exists and the placement search is the linkage's default; LINK needs only the
+**explicit override** of that same key. No change to the placement chain was made — no
+`blocked(...)` was needed.
+
+### The artefact — the two-click state machine and the real range (read before coding)
+
+At tag `v6.2.10` (commit `a5a8f25`):
+
+- `EnergizingRodBlock.onWrench:118-148` — in LINK mode, a rod click: with `LINK_ORB_POS`
+  stored and an orb there, `(int) V3d.distance(orbPos) <= general.energizing_range` →
+  `rod.setOrbPos(orbPos)` (the "done" message) else the "fail" message; `LINK_ORB_POS` is
+  **removed** either way. With nothing stored it writes `LINK_ROD_POS` = the rod's position
+  (the "start" message).
+- `EnergizingOrbBlock.onWrench:153-183` — the mirror: consumes `LINK_ROD_POS`, checks the
+  stored rod's kind and range, calls `rod.setOrbPos(orbPos)`; with nothing stored it writes
+  `LINK_ORB_POS`.
+- `V3d.distance(BlockPos)` (`util/math/V3d.java:50-55`) is **Euclidean, truncated to `int`**;
+  `PowahConfig.java:60` `general.energizing_range = 4`. The brief's "Chebyshev-style" is
+  corrected by the artefact: `runtime::link_in_range` uses `(int) sqrt(dx²+dy²+dz²) <= 4`,
+  while the placement search keeps its own Chebyshev box (`BlockPos.betweenClosed`). A
+  stored orb at `[3,3,3]` from a rod is Euclidean 5, so upstream refuses even though the
+  placement search would have found it — recorded as a deviation, not faked.
+
+### What it ships
+
+| File | Change |
+|---|---|
+| `src/runtime.rs` | `WrenchLink` (the two stack positions) + `LinkAction`, `click_rod`/`click_orb` (the consume-or-store state machine) and `link_in_range` (truncated Euclidean); 4 tests |
+| `src/powah.rs` | process-global `LINK` cursor, `wrench_line` (opt-in readout with a clock in LINK mode only), `on_wrench_link` (kind checks, range check, `merge_data` write of `KEY_ORB`); `on_wrench_use`'s Link arm now dispatches instead of `Flow::Continue` |
+| `src/lib.rs` | `use_item_on_block` doc updated; `/powah wrench` uses `wrench_line(host)`; CONFIG/ROTATE lines unchanged |
+| `tools/e2e-link.sh` | the bounded verdict leg: out-of-range refusal, override of the placement search, two-click first half, unmatched click, CONFIG/ROTATE regression, control, two selftests |
+| `horizon-mod.toml`, `Cargo.toml`, `README.md` | version 0.2.21 and the slice's paragraph; finalised **before** the two package builds |
+
+No content file changed: the wrench, the rod and the orb all shipped in earlier slices. No
+`/powah info` line changed, so every earlier e2e verdict stays byte-identical.
+
+### TDD: the red proof, quoted
+
+`WrenchLink::click_rod`/`click_orb` and `link_in_range` were declared with `todo!()` bodies
+and four tests written against them before any implementation; `cargo test --offline` printed
+(`evidence/powah/slice21-test-red.log`):
+
+```text
+---- runtime::tests::link_clicks_a_rod_then_an_orb_and_returns_the_pair_to_link stdout ----
+thread 'runtime::tests::link_clicks_a_rod_then_an_orb_and_returns_the_pair_to_link' (576759) panicked at src/runtime.rs:1323:9:
+not yet implemented: slice 21: the wrench's rod-side link click
+
+---- runtime::tests::link_clicks_an_orb_then_a_rod_and_returns_the_same_pair stdout ----
+thread 'runtime::tests::link_clicks_an_orb_then_a_rod_and_returns_the_same_pair' (576760) panicked at src/runtime.rs:1329:9:
+not yet implemented: slice 21: the wrench's orb-side link click
+
+---- runtime::tests::link_range_is_truncated_euclidean_not_a_chebyshev_box stdout ----
+thread 'runtime::tests::link_range_is_truncated_euclidean_not_a_chebyshev_box' (576761) panicked at src/runtime.rs:1338:5:
+not yet implemented: slice 21: the wrench link's truncated Euclidean range
+
+---- runtime::tests::link_refuses_an_out_of_range_orb_and_consumes_the_click stdout ----
+thread 'runtime::tests::link_refuses_an_out_of_range_orb_and_consumes_the_click' (576762) panicked at src/runtime.rs:1323:9:
+not yet implemented: slice 21: the wrench's rod-side link click
+
+test result: FAILED. 119 passed; 4 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+```
+
+After the implementation the same command printed **123 passed, 0 failed** (`sdk-test.log`,
+regenerated for 0.2.21 after the forwarded runs).
+
+### Ladder (0.2.21, pin `0a875da`)
+
+Every compile step ran in `ports/powah`, `CARGO_INCREMENTAL=0`, through
+`ports/tools/build-slot.sh run --job W1-powah --port ports/powah --step …` (forwarded to
+AdLf-PC — no `BUILD_LOCAL=1`). Packed docs were finalised **before** the two builds; only
+`tools/` changed afterwards. The `wrench_line` clock was added before the final build, so
+the ladder, builds and in-game legs all ran against the final source.
+
+| Check | Result |
+|---|---|
+| `cargo test --offline` | **123 passed, 0 failed** (`sdk-test.log`) |
+| `cargo clippy --all-targets --offline -- -D warnings` | exit 0, 0 warnings (`slice21-clippy.log`) |
+| `cargo fmt --check` | exit 0, clean (`slice21-fmt.log`) |
+| two builds, `rm -f Cargo.lock` before each | `BUILD1_OK`, `BUILD2_OK`, **`cmp`-identical**, 585,234 B (`slice21-build{,-second}.log`) |
+| `cargo horizon-mod check powah.hmod` | `powah 0.2.21 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)` · `585234 bytes, SHA-256 d41312ef…d9e3cca`, `CHECK_EXIT:0` |
+| `cargo horizon-mod fits powah.hmod --build 0a875da` | `Powah:` / `0a875da  made for`, `FITS_PIN_EXIT:0` |
+| `cargo horizon-mod fits powah.hmod --build 0b14f8a` | `Powah:` / `0b14f8a  fits`, `FITS_OTHER_EXIT:0` |
+| `python3 ports/tools/verify-sdk-package.py powah` | **1/1**, `package matches the tree`, `no packed Cargo.lock  915 entries`, `SDK-only dependencies (R9)`, `tests 123 passed`, `skills gate PASS` (`slice21-verify.log`, run locally — the forwarded copy cannot resolve `ports/ports/powah`) |
+
+The delivered `powah.hmod` is **585,234 B**, sha256
+`d41312efeb6f09e338fbe665c2afb4da8d5a7ae3dafd95f99ee3e43b3d9e3cca`, **915 entries**, no
+packed `Cargo.lock`. Both fits lines are real: the pin prints `made for` (a tautology), the
+other pinned build prints `fits`. No local type or variant named `Block`/`Item` was
+introduced, so `fits` had no false failure.
+
+### In-game (parity rule)
+
+Launcher build `native-0a875da-05b7bd636dd2`, instance `powah-e2e`, `Compiling powah (1 of 1)`
+(`launcher-build-0.2.21.log`); the one stale tag carrying 0.2.20
+(`native-0a875da-7a30c85a68bb`) was removed first so the launcher recompiled. The full
+~20-minute replay of slices 1–20 was not repeated: this slice changed no earlier family, and
+all earlier verdict logs stay green under the strict gate (90/90 with the five new legs). The
+link scenario is its own bounded leg (`tools/e2e-link.sh`), as slices 16–20 used their own
+bounded legs.
+
+| Leg | Command | Result |
+|---|---|---|
+| main | `build-slot.sh run --step e2e -- bash ports/powah/tools/e2e-link.sh` | **`PASS` + `EXIT:0`** (`e2e-link-0.2.21.log`) |
+| control (same Nightly, no package) | `LAUNCH_GAME=$CONTROL_GAME …` | `FAIL: expected powah:energizing_rod_starter at 0,100,60, got 'minecraft:air'` + `EXIT:1` (`e2e-link-control-0.2.21.log`) |
+| `SELFTEST=link` | `SELFTEST=link …` | `FAIL: SELFTEST flipped: the wrench left the rod on orb 1,100,60, as it should` + `EXIT:1` (`e2e-selftest-link-0.2.21.log`) |
+| `SELFTEST=1` (slice-1 flip) | `SELFTEST=1 …` | `FAIL: SELFTEST flipped: the unfuelled furnator made no FE, as it should` + `EXIT:1` (`e2e-selftest-1-0.2.21.log`) |
+| log gate | `check-e2e-logs.py powah-e2e --strict` | `logs=90 ok=90 missing-exit=0 bad-exit=0`, exit 0 |
+
+Quoted from `e2e-link-0.2.21.log` (`{"ok":true}` acknowledgements dropped):
+
+```text
+== slice 21: LINK mode, an out-of-range orb is refused ==
+  mode: Wrench mode: link (rod none, orb none, t=90).
+  rod before: Energizing Rod at 0,100,60: 0/10000 FE (100 FE/t a side, no orb, t=96)
+  cursor after the first click: Wrench mode: link (rod 0,100,60, orb none, t=134).
+  cursor after the refused click: Wrench mode: link (rod none, orb none, t=171).
+  rod after the refused link: Energizing Rod at 0,100,60: 0/10000 FE (100 FE/t a side, no orb, t=176)
+== slice 21: the placement search picks the first orb; LINK overrides it ==
+  placement-search link: Energizing Rod at 0,100,60: 0/10000 FE (100 FE/t a side, orb 0,100,61, t=195)
+  rod after the link: Energizing Rod at 0,100,60: 0/10000 FE (100 FE/t a side, orb 1,100,60, t=263)
+== slice 21: the rod then fills the orb it was linked to ==
+  linked orb after filling: Energizing Orb at 1,100,60: 0/0 FE (no recipe, t=414)
+== slice 21: a rod clicked twice still stores its own position ==
+  cursor after two rod clicks: Wrench mode: link (rod 0,100,60, orb none, t=484).
+== slice 21: an unmatched orb click changes nothing on the rod ==
+  cursor after the unmatched orb click: Wrench mode: link (rod none, orb 1,100,60, t=556).
+  rod before: Energizing Rod at 0,100,60: 0/10000 FE (100 FE/t a side, orb 1,100,60, t=519)
+  rod after:  Energizing Rod at 0,100,60: 0/10000 FE (100 FE/t a side, orb 1,100,60, t=562)
+== slice 21: CONFIG and ROTATE still work ==
+  cell north before/after: all -> extract
+  hopper facing before/after: north -> south
+```
+
+Every assertion is parsed, not an absence of error: the rod's `orb …` field and the wrench's
+stored positions come from `/powah info` and the opt-in `/powah wrench` readout, each with a
+strictly fresh `t=`. The override is the fail-capable half: 0.2.20 has no link write, so the
+rod would stay on the placement search's first orb (`0,100,61`); `SELFTEST=link` inverts it
+and fails at `EXIT:1`. The out-of-range orb (`0,100,66`, six blocks from the rod) is refused
+and the first click is consumed; an unmatched orb click (nothing stored) stores `orb` on the
+wrench and leaves the rod's link unchanged with a fresh clock.
+
+### Coverage (parity rule, the family this slice adds)
+
+| Family (from the jar) | Status |
+|---|---|
+| `EnergizingRodBlock.onWrench` / `EnergizingOrbBlock.onWrench` (LINK mode) | **tested** — the two-click state machine's rod-first and orb-first halves are unit-tested; the rod-first half, the consumed click and the unmatched click are exercised in game with fresh clocks |
+| `LINK_ROD_POS` / `LINK_ORB_POS` (the held stack's two positions) | **tested** — the opt-in `/powah wrench` readout names them only in LINK mode; the first click stores, the second consumes; process-global harness state (deviation 1) |
+| the explicit link write to the rod's saved `orb` key | **tested** — the wrench overrides the placement search's first orb with the clicked orb; the rod then fills that orb (spends FE, recipe completes) |
+| `general.energizing_range` and `(int) V3d.distance` | **tested** — an orb six blocks away is refused with the stored click consumed; a unit test pins the truncated-Euclidean rule (including the `[3,3,3]` case a Chebyshev box would wrongly accept) |
+| CONFIG / ROTATE modes | **tested** — unchanged: a CONFIG wrench still cycles `north all → extract` and a ROTATE wrench still advances `facing north → south`; their `/powah wrench` lines stay byte-identical |
+| the place sound (`playSound(...getPlaceSound...)`) | **not ported** — a client effect, outside the machines tier and not observable headlessly (unchanged from slice 20) |
+| the `c:tools/wrench` compatibility tag | **not ported** — no carried recipe or hook reads it (unchanged from slice 19) |
+
+### Deviations this slice records
+
+1. **The link cursor and mode are process-global harness state, not stack components.**
+   Upstream stores `WrenchMode`, `LINK_ROD_POS` and `LINK_ORB_POS` on the stack; the pin's
+   immutable `click.stack` cannot write a component and there is no client→server action
+   path, so the operator-only `/powah wrench mode <mode>` command selects the mode and a
+   single `LINK` mutex holds the two positions. Same substitution `/powah side` and
+   `/powah redstone` make for GUI buttons.
+2. **The range is truncated Euclidean, not the placement search's Chebyshev box.** This is
+   the artefact's own rule (`V3d.distance`), so the placement search and the explicit link
+   can disagree on a diagonal orb; both are carried exactly as upstream writes them.
+3. **Only this port's rod and orb link.** A foreign block with a rod-like name is left to
+   vanilla (`Kind::of` is the glue's `instanceof` check), as in slice 20's rotate arm.
+4. **A first or refused click does not cancel vanilla use.** `Flow::Cancel` is returned for
+   every handled LINK click (upstream's `onWrench` returns `true`), even when no block data
+   changed — the click's effect is the wrench's stored position, not a world write.
+
+**Upstream defects fixed: none.** The two-click consume rules, the `LINK_ORB_POS` removal
+after both the done and fail messages and the `(int)` range truncation are internally
+consistent in `EnergizingRodBlock.onWrench` / `EnergizingOrbBlock.onWrench`; no defect was
+found while measuring them.
+
+### Harness findings this slice measured (for the next port)
+
+1. `ctl messages` lists chat **newest first**; a freshness parser must take `head -1`, not
+   `tail -1`, or it reads a stale readout. The LINK wrench readout carries the level's clock
+   so the strict `t=` test works exactly as it does for `/powah info`.
+2. An orb that has just completed its recipe answers `0/0 FE (no recipe, …)` — poll until
+   that line, rather than guessing a fixed wait for a 100 FE/t rod's 10,000 FE fill.
+3. `verify-sdk-package.py` resolves `--notes ports/powah` relative to the campaign root, so
+   it must be run locally; a forwarded run's copy sees `ports/ports/powah` and reports a
+   false `skills gate` failure.
+
+Version: **0.2.20 → 0.2.21** (one patch). The published `[[versions]]` record keeps 0.2.20
+and gains 0.2.21 at publish time — this port does not touch the registry entry. Title:
+`Update powah 0.2.21` (the entry is ours on `main`; 0.2.20 is staged on PR #1850).
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+
+## Next slice
+
+**Family:** none in the wrench family remains — CONFIG (slice 19), ROTATE (slice 20) and LINK
+(this slice) are all ported, and the mode cycle is proven by the three modes' unit test. The
+remaining families in this port's gap list are all outside the `machines` tier or blocked:
+the **Magmator and Thermo Generator** stay `blocked(mod-fluid-tank)` (the pin cannot fill a
+mod block entity's fluid tank), the **reactors** `blocked(uraninite-worldgen)`, and the
+**GUIs**, client renderers, particles and the Lens of Ender are `client`/`deep` work the
+ledger's `machines` tier does not permit. The next slice should be chosen by the orchestrator
+from a different port in `port_queue.py`, not invented here.
 

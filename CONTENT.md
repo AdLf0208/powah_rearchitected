@@ -1,5 +1,8 @@
 # Powah — content (slices 1 and 2)
 
+**Slice 21 (the wrench's LINK mode, 0.2.21) changed no file here**: it is Rust only — the
+wrench, the rod and the orb all shipped in earlier slices (19 and 5).
+
 The carried content of the starter Furnator, Energy Cell and Energy Cable (slice 1) and of the
 dielectric/capacitor crafting family (slice 2). Since 0.2.0 the package root **is** the mod root
 (`horizon-mod.toml` + `assets/` + `data/` beside `src/`), and `powah.hmod` is the one built

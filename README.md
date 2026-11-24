@@ -1,4 +1,4 @@
-# Powah for Horizon — slices 1–20
+# Powah for Horizon — slices 1–21
 
 A clean-room Rust rewrite of **Powah! (Rearchitected) 6.2.10** (`Technici4n/Powah`,
 **LGPL-3.0-only**) for Horizon 26.3, as one flat SDK package (`api = "0.2"`): the
@@ -152,8 +152,8 @@ receive → none → all` for a cell — the in-world equivalent of slice 16's G
 (`NextEnergyConfigPacket`). The pin's global `use_item_on_block` hook carries the clicked face
 (`click.hit.face`) and the held stack (`click.stack`), so no new hook, block, renderer or GUI is
 needed; the wrench registers no Part, buffer or block key. Stone keeps its item and its "no side
-config" reply, and no earlier `/powah info` line changes. The wrench's link mode and
-the `c:tools/wrench` compatibility tag are not ported (no game effect in this port).
+config" reply, and no earlier `/powah info` line changes. The `c:tools/wrench` compatibility tag
+is not ported (no game effect in this port); the link mode is slice 21.
 
 Slice 20 adds the wrench's **ROTATE mode**. Upstream cycles wrench modes with shift-right-click,
 which the pin's `use_item_on_block` hook cannot see, so the operator-only
@@ -166,6 +166,18 @@ item. The mode is process-wide harness state rather than a per-stack component, 
 `canSurvive` *query* (only a replacement hook) — but every machine the artefact rotates survives
 in all six facings, so the property's own acceptance check is the operative half. No earlier
 `/powah info` line changes.
+
+Slice 21 adds the wrench's **LINK mode**: the two-click rod↔orb link of upstream's
+`EnergizingRodBlock.onWrench` / `EnergizingOrbBlock.onWrench`. In LINK mode the first click on
+either block stores its position (upstream's `LINK_ROD_POS` / `LINK_ORB_POS` stack components),
+and a second click on the other kind checks that the stored block is still that kind and within
+`general.energizing_range` (default 4) before writing the clicked orb's position onto the rod's
+saved `orb` key — the same key `rod_tick`'s placement search already writes. The range is the
+artefact's `(int) V3d.distance` (Euclidean, truncated), not the placement search's Chebyshev box.
+An out-of-range click sends the fail message and consumes the stored position; an unmatched click
+only starts a new pair. The pin cannot write a stack component, so the mode and both positions are
+operator-command/process-global harness state, and the opt-in `/powah wrench` readout shows them
+only in LINK mode. CONFIG and ROTATE are unchanged, and no `/powah info` line changed.
 
 Every machine declares a real `Capabilities.Energy.BLOCK` buffer (the amount is the int
 `energy` in the block entity's saved compound), so other machines can fill and drain a
@@ -185,7 +197,7 @@ moves FE from the fuller store to the emptier one (a network never takes back wh
 
 ```text
 powah.hmod            the delivered package (horizon-mod.toml + Cargo.toml + src/ + assets/ + data/)
-horizon-mod.toml      the only manifest and identity: id, version 0.2.20, api 0.2, [native] pins
+horizon-mod.toml      the only manifest and identity: id, version 0.2.21, api 0.2, [native] pins
 Cargo.toml            one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 src/lib.rs            the one `#[mod_api::horizon_mod] impl Hooks`
 src/powah.rs          the glue: the block entity Parts, the queue, the tier tables, the buffers, the cable network, the command
