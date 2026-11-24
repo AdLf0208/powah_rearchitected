@@ -27,13 +27,14 @@ use mod_api::{
 };
 
 use crate::runtime::{
-    CABLE_TIER_COUNT, CELL_TIER_COUNT, CableTier, CellTier, Channel, DISCHARGER_TIER_COUNT,
-    DischargerTier, ENDER_TIER_COUNT, EnderTier, EnergizingRecipe, FURNATOR_TIER_COUNT, Furnator,
-    FurnatorTier, HOPPER_TIER_COUNT, HopperTier, MAX_CHANNELS, Neighbour, ORB_MAX_ENERGY,
-    ORB_OUTPUT_SLOT, ORB_SLOTS, ROD_TIER_COUNT, RedstoneMode, RodTier, SOLAR_TIER_COUNT, Sky,
-    SolarTier, TRANSMITTER_TIER_COUNT, TransferType, cable_tier, cell_tier, check_redstone,
-    clamp_energy, comparator_strength, default_sides, discharger_tier, ender_cell_tier,
-    ender_gate_tier, furnator_tier, network_moves, push_amount, rod_tier,
+    CABLE_TIER_COUNT, CELL_TIER_COUNT, CableTier, CellTier, Channel, CreativeCellTier,
+    DISCHARGER_TIER_COUNT, DischargerTier, ENDER_TIER_COUNT, EnderTier, EnergizingRecipe,
+    FURNATOR_TIER_COUNT, Furnator, FurnatorTier, HOPPER_TIER_COUNT, HopperTier, MAX_CHANNELS,
+    Neighbour, ORB_MAX_ENERGY, ORB_OUTPUT_SLOT, ORB_SLOTS, ROD_TIER_COUNT, RedstoneMode, RodTier,
+    SOLAR_TIER_COUNT, Sky, SolarTier, TRANSMITTER_TIER_COUNT, TransferType, cable_tier, cell_tier,
+    check_redstone, clamp_energy, comparator_strength, creative_after_give, creative_cell_tier,
+    default_sides, discharger_tier, ender_cell_tier, ender_gate_tier, furnator_tier, network_moves,
+    push_amount, rod_tier,
 };
 
 /// The energizing orb block and its item.
@@ -57,6 +58,11 @@ pub(crate) const RODS: [(&str, &str); ROD_TIER_COUNT] = [
 pub(crate) const FURNATOR: &str = "powah:furnator_starter";
 /// The starter energy cell block and its item.
 pub(crate) const CELL: &str = "powah:energy_cell_starter";
+/// The creative energy cell block and its item: upstream's `EnergyCellTile` at
+/// `Tier.CREATIVE`, a source whose `getTransferType()` is `Transfer.EXTRACT`.
+pub(crate) const CREATIVE_CELL: &str = "powah:energy_cell_creative";
+/// The creative cell's block entity type path, in this mod's namespace.
+pub(crate) const CREATIVE_CELL_TYPE: &str = "energy_cell_creative";
 /// The starter energy cable block and its item.
 pub(crate) const CABLE: &str = "powah:energy_cable_starter";
 
@@ -307,7 +313,8 @@ pub(crate) fn item_buffer(block: &str) -> Option<ItemBuffer> {
             max_insert: tier.transfer,
             max_extract: tier.transfer,
         }),
-        Kind::Orb | Kind::Cable(_) => None,
+        // `keepEnergy()` is false for the creative cell, so its item carries no buffer.
+        Kind::CreativeCell(_) | Kind::Orb | Kind::Cable(_) => None,
     }
 }
 
@@ -318,7 +325,7 @@ pub(crate) fn item_buffer(block: &str) -> Option<ItemBuffer> {
 pub(crate) fn kind_item_slots(kind: Kind) -> usize {
     match kind {
         Kind::Furnator(_) => 1,
-        Kind::Cell(_) => CELL_SLOTS,
+        Kind::Cell(_) | Kind::CreativeCell(_) => CELL_SLOTS,
         Kind::Discharger(_) => DISCHARGER_SLOTS,
         // `EnergyHopperTile` has no slots of its own (`getSlotLimit` 0, `canInsert` and
         // `canExtract` false): it charges the container it faces, never one it holds.
@@ -348,6 +355,9 @@ pub(crate) fn keep_capacity(block: &str) -> Option<i32> {
     match Kind::of(block)? {
         Kind::Furnator(tier) => Some(tier.capacity),
         Kind::Cell(tier) | Kind::Discharger(tier) => Some(tier.capacity),
+        // Upstream's `EnergyCellTile.keepEnergy()` is `!isCreative()`: a creative
+        // cell's block item carries nothing back on break.
+        Kind::CreativeCell(_) => None,
         Kind::Hopper(tier) => Some(tier.capacity),
         Kind::Solar(tier) => Some(tier.capacity),
         Kind::Rod(tier) => Some(tier.capacity),
@@ -355,8 +365,7 @@ pub(crate) fn keep_capacity(block: &str) -> Option<i32> {
         Kind::Transmitter(tier) => Some(tier.capacity),
         // Upstream's `keepEnergy()` is false for both ender blocks: the FE is in the owner's
         // channel, not in the tile, so the item carries nothing and keeps nothing.
-        Kind::EnderCell(_) | Kind::EnderGate(_) => None,
-        Kind::Orb | Kind::Cable(_) => None,
+        Kind::EnderCell(_) | Kind::EnderGate(_) | Kind::Orb | Kind::Cable(_) => None,
     }
 }
 
@@ -532,6 +541,9 @@ pub(crate) enum Kind {
     Furnator(FurnatorTier),
     /// An energy cell, carrying its tier's capacity and transfer.
     Cell(CellTier),
+    /// The creative energy cell: a source with upstream's `Energy.MAX` clamped
+    /// into the SDK's `i32`, `Transfer.EXTRACT`, and a buffer that never drops.
+    CreativeCell(CreativeCellTier),
     /// An energy cable, carrying its tier's rate.
     Cable(CableTier),
     /// An energy discharger, carrying its tier's capacity and transfer.
@@ -557,6 +569,7 @@ impl Kind {
     pub(crate) fn of(block: &str) -> Option<Kind> {
         match block {
             ORB => Some(Kind::Orb),
+            CREATIVE_CELL => Some(Kind::CreativeCell(creative_cell_tier())),
             _ => furnator_of(block)
                 .map(Kind::Furnator)
                 .or_else(|| cell_of(block).map(Kind::Cell))
@@ -648,6 +661,7 @@ pub(crate) fn has_redstone_mode(block: &str) -> bool {
         Some(
             Kind::Furnator(_)
                 | Kind::Cell(_)
+                | Kind::CreativeCell(_)
                 | Kind::Cable(_)
                 | Kind::Discharger(_)
                 | Kind::Hopper(_)
@@ -668,6 +682,7 @@ pub(crate) fn has_comparator(kind: Kind) -> bool {
         kind,
         Kind::Furnator(_)
             | Kind::Cell(_)
+            | Kind::CreativeCell(_)
             | Kind::Discharger(_)
             | Kind::Hopper(_)
             | Kind::Solar(_)
@@ -781,7 +796,7 @@ pub(crate) fn gate_open_at(host: &mut dyn ServerHost, level: LevelRef, pos: [i32
 /// `postTick` does by running `extractFromSides` after the gate. A foreign block always answers.
 pub(crate) fn faces_open(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> bool {
     match block_at(&*host, level, pos).as_deref().and_then(Kind::of) {
-        Some(Kind::Cell(_) | Kind::EnderCell(_) | Kind::EnderGate(_)) => {
+        Some(Kind::Cell(_) | Kind::CreativeCell(_) | Kind::EnderCell(_) | Kind::EnderGate(_)) => {
             gate_open_at(host, level, pos)
         }
         _ => true,
@@ -804,6 +819,7 @@ pub(crate) fn has_side_config(block: &str) -> bool {
         Some(
             Kind::Furnator(_)
                 | Kind::Cell(_)
+                | Kind::CreativeCell(_)
                 | Kind::Discharger(_)
                 | Kind::Hopper(_)
                 | Kind::Solar(_)
@@ -822,7 +838,11 @@ pub(crate) fn has_side_config(block: &str) -> bool {
 /// a discharger default to `EXTRACT` (give only).
 pub(crate) fn default_transfer(kind: Kind) -> TransferType {
     match kind {
-        Kind::Furnator(_) | Kind::Solar(_) | Kind::Discharger(_) => TransferType::Extract,
+        // Upstream's `EnergyCellTile.getTransferType()` is
+        // `isCreative() ? Transfer.EXTRACT : super`: a creative cell gives only.
+        Kind::Furnator(_) | Kind::Solar(_) | Kind::Discharger(_) | Kind::CreativeCell(_) => {
+            TransferType::Extract
+        }
         _ => TransferType::All,
     }
 }
@@ -1023,6 +1043,21 @@ pub(crate) fn cell_battery(tier: CellTier) -> ModEnergyBuffer {
     }
 }
 
+/// The creative cell's buffer: upstream's `EnergyCellTile` at `Tier.CREATIVE`
+/// (`getTransferType()` = `Transfer.EXTRACT`) answers `Energy.MAX` for both rows,
+/// clamped to the SDK's `i32`. It takes nothing on any face and gives without a
+/// per-call limit — its `extractEnergy` is simulated, so the source never drains.
+pub(crate) fn creative_cell_battery() -> ModEnergyBuffer {
+    let tier = creative_cell_tier();
+    ModEnergyBuffer {
+        capacity: tier.capacity,
+        max_insert: 0,
+        max_extract: tier.transfer,
+        insert_faces: [false; 6],
+        extract_faces: [true; 6],
+    }
+}
+
 /// A discharger's buffer (`EnergyDischargerBlock` over `AbstractEnergyStorage` with
 /// `getTransferType()` = `Transfer.EXTRACT`): the tier's capacity, giving its transfer
 /// a side and taking nothing through any face — its FE comes from the items in its
@@ -1043,6 +1078,7 @@ pub(crate) fn battery_of(block: &str) -> Option<ModEnergyBuffer> {
     match Kind::of(block) {
         Some(Kind::Furnator(tier)) => Some(furnator_battery(tier)),
         Some(Kind::Cell(tier)) => Some(cell_battery(tier)),
+        Some(Kind::CreativeCell(_)) => Some(creative_cell_battery()),
         Some(Kind::Discharger(tier)) => Some(discharger_battery(tier)),
         Some(Kind::Hopper(tier)) => Some(hopper_battery(tier)),
         Some(Kind::Solar(tier)) => Some(solar_battery(tier)),
@@ -2011,6 +2047,9 @@ pub(crate) fn status_line(
             charge_text(charge),
             tier.transfer,
         ),
+        // The creative cell keeps the cell's formatting byte-for-byte; the new
+        // `creative` field sits behind it so every earlier assertion still matches.
+        Kind::CreativeCell(_) => creative_cell_line(pos, energy, charge, redstone, time),
         // A discharger is the cell's mirror: the same buffer, and its seven slots are
         // the ones it drains, so the readout names them in the same `charge` field.
         Kind::Discharger(tier) => format!(
@@ -2051,6 +2090,28 @@ pub(crate) fn status_line(
             transmitter_line(pos, energy, tier, CardReadout::Unknown, redstone, time)
         }
     }
+}
+
+/// The creative cell's readout: the cell's exact formatting with its `FE/t a side`
+/// naming the creative tier and a trailing `creative` field behind it. Upstream's
+/// `Energy.MAX` is clamped into the SDK's `i32`, so both numbers are 2,147,483,647.
+pub(crate) fn creative_cell_line(
+    pos: [i32; 3],
+    energy: i32,
+    charge: &[ChargeReadout<'_>],
+    redstone: &str,
+    time: i64,
+) -> String {
+    let [x, y, z] = pos;
+    let tier = creative_cell_tier();
+    format!(
+        "Energy Cell at {x},{y},{z}: {energy}/{} FE (comparator {}, charge {}, {} FE/t a \
+         side{redstone}, creative, t={time})",
+        tier.capacity,
+        comparator_strength(energy, tier.capacity),
+        charge_text(charge),
+        tier.transfer,
+    )
 }
 
 /// What a player transmitter's one slot holds, as its readout names it: the three states the tick
@@ -2672,6 +2733,19 @@ pub(crate) fn info_line(host: &mut dyn ServerHost, pos: [i32; 3]) -> Option<Stri
                 charge,
             )
         }
+        Kind::CreativeCell(_) => {
+            let entity = host.block_entity(level, pos)?;
+            let saved = Tag::Compound(entity.data(&*host)?);
+            let charge = charge_readout(host, entity, slots);
+            // Upstream's readout always shows the creative cell's full capacity:
+            // its `extractEnergy` is simulated, so giving FE never debits it.
+            (
+                clamp_energy(int(&saved, KEY_ENERGY), i32::MAX),
+                0,
+                None,
+                charge,
+            )
+        }
         Kind::Cable(_) => (0, 0, None, Vec::new()),
         Kind::Hopper(tier) => {
             let entity = host.block_entity(level, pos)?;
@@ -2838,6 +2912,7 @@ pub(crate) fn set_energy(host: &mut dyn ServerHost, pos: [i32; 3], amount: i32) 
     let capacity = match kind {
         Some(Kind::Furnator(tier)) => tier.capacity,
         Some(Kind::Cell(tier)) => tier.capacity,
+        Some(Kind::CreativeCell(_)) => i32::MAX,
         Some(Kind::Discharger(tier)) => tier.capacity,
         Some(Kind::Hopper(tier)) => tier.capacity,
         Some(Kind::Solar(tier)) => tier.capacity,
@@ -3048,6 +3123,68 @@ impl BlockEntityPart for IdlePart {
             event.entity.nbt = nbt;
         }
         if !changed {
+            *event.reply = BlockEntityTickReply::Unchanged;
+        }
+    }
+}
+
+/// The creative energy cell's block entity: upstream's `EnergyCellTile.onFirstTick`
+/// fills it to capacity, and because `extractEnergy` is simulated its buffer
+/// never drops. The port refills it on every tick (the observable result of both
+/// facts) and queues it so a neighbour can pull through a cable.
+pub(crate) struct CreativeCellPart {
+    queue: Arc<Mutex<Queue>>,
+}
+
+impl CreativeCellPart {
+    pub(crate) fn new(queue: Arc<Mutex<Queue>>) -> CreativeCellPart {
+        CreativeCellPart { queue }
+    }
+}
+
+#[mod_api::horizon_part]
+impl BlockPart for CreativeCellPart {
+    fn has_analog_output(&self, _level: &dyn LevelHost, event: &mut HasAnalogOutputEvent) {
+        event.output = true;
+    }
+
+    fn analog_output(&self, _level: &dyn LevelHost, event: &mut AnalogOutputEvent) {
+        event.output = cached_reading(event.dimension, [event.pos.x, event.pos.y, event.pos.z]);
+    }
+}
+
+#[mod_api::horizon_part]
+impl BlockEntityPart for CreativeCellPart {
+    fn block_entity_ticks(&self, _host: &dyn Host, event: &mut BlockEntityTicksEvent<'_>) {
+        event.ticks = true;
+    }
+
+    fn block_entity_tick(&self, host: &mut dyn ServerHost, event: &mut BlockEntityTickEvent<'_>) {
+        if let Some(level) = level_now(host) {
+            self.queue
+                .lock()
+                .expect("the powah queue lock is held for one insert")
+                .push(level, event.pos);
+        }
+        let tier = creative_cell_tier();
+        let mut saved = Tag::Compound(std::mem::take(&mut event.entity.nbt));
+        let before = int(&saved, KEY_ENERGY);
+        // Upstream charges its two slots out of the creative buffer first
+        // (`postTick` charges before it pushes); a simulated extraction leaves
+        // the buffer full, which `creative_after_give` records as the pure rule.
+        let charged = charge_items(
+            &*host,
+            CELL_SLOTS,
+            tier.capacity,
+            tier.transfer,
+            &mut event.entity.items,
+        );
+        let energy = creative_after_give(tier.capacity, charged);
+        write_int(&mut saved, KEY_ENERGY, energy);
+        if let Tag::Compound(nbt) = saved {
+            event.entity.nbt = nbt;
+        }
+        if before == energy && charged == 0 {
             *event.reply = BlockEntityTickReply::Unchanged;
         }
     }
@@ -3968,6 +4105,7 @@ fn strength_at(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) -> Opt
         Kind::Cell(tier) | Kind::Discharger(tier) => {
             (saved_energy(host, level, pos)?, tier.capacity, 0)
         }
+        Kind::CreativeCell(_) => (saved_energy(host, level, pos)?, i32::MAX, 0),
         Kind::Hopper(tier) => (saved_energy(host, level, pos)?, tier.capacity, 0),
         Kind::Solar(tier) => (saved_energy(host, level, pos)?, tier.capacity, 0),
         Kind::Transmitter(tier) => (saved_energy(host, level, pos)?, tier.capacity, 0),
@@ -4086,6 +4224,13 @@ pub(crate) fn on_level_tick_post(
                     push_out(host, level, pos, tier.transfer);
                 }
             }
+            // The creative cell is a source: it pushes on every face like a cell,
+            // but its `extractEnergy` is simulated, so its own buffer never drops.
+            Kind::CreativeCell(_) => {
+                if faces_open(host, level, pos) {
+                    push_out_creative(host, level, pos);
+                }
+            }
             // A discharger fills from its own slots first, then pushes: upstream's
             // `postTick` discharges and then runs `extractFromSides` — the drain is behind
             // `checkRedstone()`, the push is not.
@@ -4110,7 +4255,7 @@ pub(crate) fn on_level_tick_post(
             // A solar panel gives only on the face upstream's `isEnergyPresent` names, its own
             // bottom (`Direction.DOWN`).
             Kind::Solar(tier) => {
-                push_out_on(host, level, pos, tier.transfer, &[Direction::Down]);
+                push_out_on(host, level, pos, tier.transfer, &[Direction::Down], false);
             }
             Kind::Orb => {}
             // A transmitter never pushes on its own (`postTick` has no `extractFromSides`): its
@@ -4122,7 +4267,7 @@ pub(crate) fn on_level_tick_post(
             Kind::EnderCell(tier) => push_out(host, level, pos, tier.transfer),
             Kind::EnderGate(tier) => {
                 if let Some(facing) = facing_at(&*host, level, pos) {
-                    push_out_on(host, level, pos, tier.transfer, &[facing]);
+                    push_out_on(host, level, pos, tier.transfer, &[facing], false);
                 }
             }
             // `CableTile.receiveEnergy` is the one place a cable reads its gate: the door FE comes
@@ -4145,17 +4290,34 @@ pub(crate) fn on_level_tick_post(
 /// every side whose neighbour can take it. One transaction per side, so a refused
 /// insert creates no energy.
 fn push_out(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3], transfer: i32) {
-    push_out_on(host, level, pos, transfer, &Direction::ALL);
+    push_out_on(host, level, pos, transfer, &Direction::ALL, false);
+}
+
+/// The creative cell's push: the same six faces at the creative tier's transfer,
+/// except that a give credits the taker without debiting the source — upstream's
+/// `EnergyCellTile.extractEnergy(maxExtract, simulate || isCreative(), side)`.
+fn push_out_creative(host: &mut dyn ServerHost, level: LevelRef, pos: [i32; 3]) {
+    push_out_on(
+        host,
+        level,
+        pos,
+        creative_cell_tier().transfer,
+        &Direction::ALL,
+        true,
+    );
 }
 
 /// [`push_out`] on the faces a machine gives on: a solar panel's `isEnergyPresent` is its own
-/// bottom (`Direction.DOWN`) and nothing else, so the other five are never tried.
+/// bottom (`Direction.DOWN`) and nothing else, so the other five are never tried. When
+/// `infinite` is set (the creative cell), the taker is inserted into directly and the source's
+/// buffer is left alone.
 fn push_out_on(
     host: &mut dyn ServerHost,
     level: LevelRef,
     pos: [i32; 3],
     transfer: i32,
     faces: &[Direction],
+    infinite: bool,
 ) {
     // The buffer is read through a face the machine gives on: a solar panel extracts only on its
     // bottom, so reading through `Up` would answer no handler at all.
@@ -4210,12 +4372,16 @@ fn push_out_on(
             continue;
         }
         let _ = host.transaction(|host, tx| -> Result<u32, ()> {
-            let Some(own) = level.capability(&mut *host, &ENERGY, pos, Some(side)) else {
-                return Ok(0);
-            };
             let Some(target) =
                 level.capability(&mut *host, &ENERGY, neighbour, Some(side.opposite()))
             else {
+                return Ok(0);
+            };
+            if infinite {
+                // The creative source is simulated: credit the taker, keep our buffer.
+                return Ok(target.insert(host, tx, want));
+            }
+            let Some(own) = level.capability(&mut *host, &ENERGY, pos, Some(side)) else {
                 return Ok(0);
             };
             move_energy(host, &own, &target, want, tx).map_err(|_| ())
@@ -4451,18 +4617,29 @@ fn relay_network(
         let from = places[step.from];
         let to = places[step.to];
         let want = u32::try_from(step.amount).unwrap_or(0);
+        // A creative cell is a source: upstream's `extractEnergy` is simulated,
+        // so the cable credits the sink without taking anything out of it.
+        let creative = matches!(
+            block_at(&*host, level, from.pos)
+                .as_deref()
+                .and_then(Kind::of),
+            Some(Kind::CreativeCell(_))
+        );
         let _ = host.transaction(|host, tx| -> Result<u32, ()> {
+            let Some(target) =
+                level.capability(&mut *host, &ENERGY, to.pos, Some(to.cable_side.opposite()))
+            else {
+                return Ok(0);
+            };
+            if creative {
+                return Ok(target.insert(host, tx, want));
+            }
             let Some(source) = level.capability(
                 &mut *host,
                 &ENERGY,
                 from.pos,
                 Some(from.cable_side.opposite()),
             ) else {
-                return Ok(0);
-            };
-            let Some(target) =
-                level.capability(&mut *host, &ENERGY, to.pos, Some(to.cable_side.opposite()))
-            else {
                 return Ok(0);
             };
             move_energy(host, &source, &target, want, tx).map_err(|_| ())
@@ -5017,7 +5194,44 @@ mod tests {
                 "{block} declares tier {index}'s numbers"
             );
         }
-        assert_eq!(battery_of("powah:energy_cell_creative"), None);
+        // Slice 17: the creative cell is a source with its own extract-only
+        // buffer, not a tier on the ladder. It used to be `None` here.
+        assert_eq!(
+            battery_of(CREATIVE_CELL),
+            Some(creative_cell_battery()),
+            "the creative cell declares an extract-only source buffer"
+        );
+    }
+
+    #[test]
+    fn the_creative_cell_is_an_extract_only_source() {
+        let tier = creative_cell_tier();
+        assert_eq!(Kind::of(CREATIVE_CELL), Some(Kind::CreativeCell(tier)));
+        let buffer = battery_of(CREATIVE_CELL).expect("the creative source's buffer");
+        assert_eq!(buffer.capacity, 2_147_483_647, "upstream Energy.MAX as i32");
+        assert_eq!(buffer.max_insert, 0, "Transfer.EXTRACT takes nothing");
+        assert_eq!(buffer.max_extract, 2_147_483_647);
+        assert_eq!(buffer.insert_faces, [false; 6]);
+        assert_eq!(buffer.extract_faces, [true; 6]);
+        assert_eq!(
+            default_transfer(Kind::CreativeCell(tier)),
+            TransferType::Extract,
+            "EnergyCellTile.isCreative() returns Transfer.EXTRACT"
+        );
+        assert!(has_side_config(CREATIVE_CELL));
+        assert!(has_redstone_mode(CREATIVE_CELL));
+        assert_eq!(kind_item_slots(Kind::CreativeCell(tier)), CELL_SLOTS);
+        assert_eq!(
+            keep_capacity(CREATIVE_CELL),
+            None,
+            "keepEnergy() is !isCreative"
+        );
+        assert_eq!(item_buffer(CREATIVE_CELL), None);
+        let line = creative_cell_line([1, 2, 3], tier.capacity, &[None, None], "", 42);
+        assert_eq!(
+            line,
+            "Energy Cell at 1,2,3: 2147483647/2147483647 FE (comparator 15, charge empty, empty, 2147483647 FE/t a side, creative, t=42)"
+        );
     }
 
     #[test]

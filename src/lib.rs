@@ -132,6 +132,20 @@ impl Hooks for Mod {
             );
             declare_item(registrar, block);
         }
+        // The creative energy cell: upstream's `EnergyCellTile` at `Tier.CREATIVE`.
+        // `isCreative()` makes it a source — its transfer type is `EXTRACT`, its
+        // `onFirstTick` fills it, and its `extractEnergy` is simulated so it never
+        // drops. The SDK cannot express a per-instance simulated extract, so the
+        // port inserts straight into the taker (in `powah.rs`) and refills on tick.
+        let creative = registrar.block_key(powah::CREATIVE_CELL);
+        registrar.block_container(&creative, powah::cell_container());
+        registrar.block_energy(&creative, powah::creative_cell_battery());
+        let creative_kind = powah::declare(registrar, powah::CREATIVE_CELL_TYPE);
+        let creative_part = powah::CreativeCellPart::new(Arc::clone(&self.queue));
+        if let Err(error) = registrar.block_entity_part(&creative_kind, creative_part) {
+            context.refuse(&error.to_string());
+        }
+        declare_item(registrar, powah::CREATIVE_CELL);
         // Every energy discharger tier: seven slots whose items it drains, and one
         // extract-only buffer (upstream's `devices.dischargers` — the battery config —
         // over `AbstractEnergyBlock` with `getTransferType()` = `Transfer.EXTRACT`).

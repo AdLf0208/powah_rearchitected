@@ -4183,23 +4183,193 @@ gains 0.2.16 at publish time — this port does not touch the registry entry. Ti
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
 
-## Next slice
+## Slice 17 — the creative energy cell (2026-11-24)
 
-**Family:** the creative energy cell. `## Slice 4 — the energy cell ladder`'s coverage row is the
-gap line, verbatim:
+### The slice, quoted from this port's own gaps
+
+`## Slice 4 — the energy cell ladder`'s coverage row is the gap line, verbatim:
 
 > `energy_cell_creative` | **not ported** — a source, not a storage tier (gap 11)
 
-and `## Deviations and gaps (slice 1)`, item 11 names it: *"The other 6 tiers, the creative cell
-and ~15 machines are unported."* Slice 16 closed the last half of gap 6 and slices 13–15 the
-redstone/comparator families, so this is the next machine in the port's own list. **Why it fits
-`machines`:** one storage block with the cell's declared `block_energy` buffer and idle tick, a
-source whose `getTransferType()` is `EXTRACT` (upstream `EnergyCellTile.isCreative()`), carried
-content from the same jar, no renderer, GUI, entity or new hook. **In-game assertion:** place
-`powah:energy_cell_creative`, put an empty starter cell behind a cable, read the source's
-`/powah info` (its `FE/t a side` names the creative tier) at t1 and the sink at t2, and assert the
-sink gains exactly **500 × dt** while the source's readout still shows its full 2,147,483,647 FE
-and never drops — a `SELFTEST=creative` leg must invert the "never drops" half and end `EXIT:1`.
+and `## Deviations and gaps (slice 1)`, item 11 names it. Slice 16 closed the last half of gap 6;
+this is the next machine in the port's own list. **Why it fits `machines`:** one storage block with
+the cell's declared `block_energy` buffer and idle tick, carried content from the same jar, no
+renderer, GUI, entity or new hook — the machine shape the port already has seven times over.
+
+### The artefact (upstream tag `v6.2.10`, commit `a5a8f25`)
+
+Read from `ports/_shared/upstream/powah/src/main/java/owmii/powah/`:
+
+- `lib/logistics/energy/Energy.java:16` — `public static final long MAX = 9_000_000_000_000_000_000L`.
+- `config/v2/values/TieredEnergyValues.java:45` — `case CREATIVE -> Energy.MAX`: the creative
+  tier's **capacity and transfer are both `Energy.MAX`** (the config's two `TieredEnergyValues`
+  rows both answer it), not the nitro row's 2,000,000,000 / 2,000,000.
+- `block/energycell/EnergyCellTile.java` — `onFirstTick` calls
+  `energy.setStored(getEnergyCapacity())`; `extractEnergy(maxExtract, simulate, side)` passes
+  `simulate || isCreative()`, so a give is simulated and the buffer never drops;
+  `getTransferType()` answers `isCreative() ? Transfer.EXTRACT : super.getTransferType()`;
+  `keepEnergy()` answers `!isCreative()`; `isCreative()` is `getVariant() == Tier.CREATIVE`;
+  `postTick` charges its two slots then pushes.
+- `block/energycell/EnergyCellBlock.java` — the same block as the other cells, `stacksTo(1)`.
+
+**The brief's 2,147,483,647 is verified, with a deviation.** Upstream's number is 9e18, but the
+SDK's `ModEnergyBuffer` (`horizon-mod-vocab/src/item/containers.rs:241`) declares `capacity`,
+`max_insert` and `max_extract` as **`i32`**. The port therefore carries `i32::MAX` =
+**2,147,483,647 FE** for both rows — the largest value the API can express. Recorded as a
+deliberate deviation, not a guess from the smaller cells.
+
+### What it ships
+
+| File | Change |
+|---|---|
+| `src/runtime.rs` | `CreativeCellTier`, `creative_cell_tier()` (capacity and transfer `i32::MAX`), `creative_after_give()` (a source keeps its buffer) + 3 tests |
+| `src/powah.rs` | `CREATIVE_CELL` id/type consts, `Kind::CreativeCell`, `creative_cell_battery()` (extract-only, 2,147,483,647 both rows), `CreativeCellPart` (refill + queue + the two slots), the cell formatting with a trailing `creative` field, and the two mover paths (a creative source inserts straight into the taker without being debited), + 1 glue test |
+| `src/lib.rs` | two slots, the extract-only buffer, the block entity type + Part, the item |
+| `tools/e2e-creative.sh` | bounded verdict leg: full readout, exact `500 × dt`, never-drops, stone differential, `SELFTEST=creative`/`SELFTEST=1` |
+| content | 6 carried files + the written block definition, two vanilla tool tags and the creative tab (no recipe: the jar has none) |
+| `horizon-mod.toml`, `Cargo.toml`, `README.md` | version 0.2.17 and the slice's paragraph |
+
+No existing `/powah info` line changed: the creative cell is a new readout arm behind the cell's
+formatting, so all 66 earlier e2e logs stay byte-identical.
+
+### TDD: the red proof, quoted
+
+`creative_cell_tier()` and `creative_after_give()` were declared `todo!()` and three tests written
+against them; `cargo test` printed (`evidence/powah/slice17-test-red.log`):
+
+```text
+---- runtime::tests::a_creative_source_keeps_its_buffer_when_it_gives stdout ----
+
+thread 'runtime::tests::a_creative_source_keeps_its_buffer_when_it_gives' (258012) panicked at src/runtime.rs:161:5:
+not yet implemented: slice 17: a creative source is never debited by a give
+
+---- runtime::tests::the_creative_cell_holds_upstreams_max_in_the_sdks_i32 stdout ----
+
+thread 'runtime::tests::the_creative_cell_holds_upstreams_max_in_the_sdks_i32' (258052) panicked at src/runtime.rs:152:5:
+not yet implemented: slice 17: the creative cell's capacity and transfer
+
+test result: FAILED. 107 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+```
+
+After the implementation the same command printed **110 passed, 0 failed** (`sdk-test.log`,
+regenerated for 0.2.17). The first in-game green is quoted below.
+
+### Ladder (0.2.17, pin `0a875da`)
+
+Every compile step ran through `ports/tools/build-slot.sh run --job W1-powah --port ports/powah`
+(forwarded to AdLf-PC — no `BUILD_LOCAL=1`); logs in `ports/_shared/evidence/powah/`.
+
+| Check | Result |
+|---|---|
+| `cargo test --offline` | **110 passed, 0 failed** (`sdk-test.log`) |
+| `cargo clippy --all-targets --offline -- -D warnings` | `CLIPPY_EXIT:0`, 0 warnings (`slice17-clippy.log`) |
+| `cargo fmt --check` | `FMT_EXIT:0`, clean (`slice17-fmt.log`) |
+| two builds, `rm -f Cargo.lock` before each | `BUILD1_EXIT:0`, `BUILD2_EXIT:0`, **`cmp`-identical**, 554,105 B (`slice17-build{,-second}.log`) |
+| `cargo horizon-mod check powah.hmod` | `powah 0.2.17 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)` · `554105 bytes, SHA-256 767600b8…e92c`, `CHECK_EXIT:0` |
+| `cargo horizon-mod fits powah.hmod --build 0a875da` | `Powah:` / `0a875da  made for`, `FITS_PIN_EXIT:0` |
+| `cargo horizon-mod fits powah.hmod --build 0b14f8a` | `Powah:` / `0b14f8a  fits`, `FITS_OTHER_EXIT:0` |
+| `python3 ports/tools/verify-sdk-package.py powah` | **1/1**, `package matches the tree`, `no packed Cargo.lock  867 entries`, `SDK-only dependencies (R9)`, `tests 110 passed`, `skills gate PASS` |
+
+The delivered `powah.hmod` is **554,105 B**, sha256
+`767600b8a3cee804c85f88618b744371e22113a6d27188573db8c024ab21e92c`, **867 entries**, no packed
+`Cargo.lock`. Both fits lines are real: the pin prints `made for` (a tautology), the other pinned
+build prints `fits`. No local type or variant named `Block`/`Item` was introduced, so `fits` had no
+false failure.
+
+### In-game (parity rule)
+
+Launcher build `native-0a875da-dc83d34e7ff0`, instance `powah-e2e`, `Compiling powah (1 of 1)`
+(`launcher-build-0.2.17.log`); the one stale tag carrying 0.2.16
+(`native-0a875da-29829d6c3057`) was removed first. The full ~20-minute replay of slices 1–16 was
+**not** repeated: this slice changed no earlier family, and the 66 earlier verdict logs stay green
+under the strict gate (70/70 with the four new legs). The creative scenario is its own bounded leg
+(`tools/e2e-creative.sh`), exactly as slice 16's side scenario was.
+
+| Leg | Command | Result |
+|---|---|---|
+| main | `build-slot.sh run --step e2e -- bash tools/e2e-creative.sh` | **`PASS` + `EXIT:0`** (`e2e-creative-0.2.17.log`) |
+| control (same Nightly, no package) | `LAUNCH_GAME=$CONTROL_GAME …` | `FAIL: expected powah:energy_cell_creative at -8,100,60, got 'minecraft:air'` + `EXIT:1` (`e2e-creative-control-0.2.17.log`) |
+| `SELFTEST=creative` | `SELFTEST=creative …` | `FAIL: SELFTEST flipped: the creative source never dropped, as it should` + `EXIT:1` (`e2e-selftest-creative-0.2.17.log`) |
+| `SELFTEST=1` (slice-1 flip) | `SELFTEST=1 …` | `FAIL: SELFTEST flipped: the unfuelled furnator made no FE, as it should` + `EXIT:1` (`e2e-selftest-1-0.2.17.log`) |
+| log gate | `python3 ports/tools/check-e2e-logs.py powah-e2e --strict` | `logs=70 ok=70 missing-exit=0 bad-exit=0`, exit 0 |
+
+Quoted from `e2e-creative-0.2.17.log`:
+
+```text
+  source: Energy Cell at -8,100,60: 2147483647/2147483647 FE (comparator 15, charge empty, empty, 2147483647 FE/t a side, creative, t=72)
+  set(-6,100,60) reply: Energy set to 0 FE.
+  sink: 6000 FE at t=91 -> 15000 FE at t=109, gained 9000 over dt=18 (want 9000)
+  source after: Energy Cell at -8,100,60: 2147483647/2147483647 FE (comparator 15, charge empty, empty, 2147483647 FE/t a side, creative, t=118)
+  stone source, sink after 20 ticks: 0 FE
+```
+
+The **exact** rate assertion reads the two sink replies' own `t=` clocks (18 ticks) and requires
+exactly `500 × 18 = 9,000` FE — the cable's 500 FE/t, not the creative cell's 2,147,483,647 FE/t.
+The source reads its full capacity before and after, so its simulated extraction is proved; the
+stone differential proves the cell (not the cable or the game) supplied the FE. `SELFTEST=creative`
+inverts only the never-drops half and ends `EXIT:1`.
+
+### Deviations this slice records
+
+1. **Upstream's 9e18 becomes `i32::MAX` = 2,147,483,647.** The SDK's `ModEnergyBuffer` is `i32`;
+   the port carries the largest expressible value for both the capacity and the transfer. A
+   creative cell is still an unbounded source in every assertion this pack can make.
+2. **The buffer is refilled every tick, not only on the first.** Upstream sets it on `onFirstTick`
+   and then never debits it; the port's own movers insert straight into the taker (so nothing is
+   taken) and the Part rewrites the full value on each tick. A foreign mover that extracts from a
+   creative cell sees the value restored on the next tick rather than within the same one.
+3. **The GUI wrench/energy-bar is not ported.** The creative cell has the cell's two charge slots
+   and the same operator-only `/powah info` readout with a trailing `creative` field; its bar and
+   right-click behaviour are client-tier and out of range.
+
+**Upstream defects fixed: none.** The creative cell's numbers, its `EXTRACT` type and its
+simulated extraction are the artefact's own; no defect was found while measuring them.
+
+### Coverage (parity rule, the family this slice adds)
+
+| Family (from the jar) | Status |
+|---|---|
+| `energy_cell_creative` block + item | **tested** — placed, read back, full-capacity readout names its tier's transfer and `creative`; its self-drop loot table is carried and validated by `cargo horizon-mod check` (no mining leg in this bounded scenario) |
+| capacity / transfer (`Energy.MAX` clamped to `i32`) | **tested** — unit test pins 2,147,483,647 for both rows; in game the readout shows them |
+| `Transfer.EXTRACT` source (give only, never drops) | **tested** — exact `500 × dt` into an empty starter cell behind a cable over 18 ticks; the source stays at 2,147,483,647 before and after |
+| the stone differential | **tested** — a stone in the source position leaves the sink at 0 FE over 20 ticks |
+| the two charge slots / `keepEnergy() = false` | **tested** — unit tests pin two slots, no item buffer and no kept capacity |
+| the creative cell's recipe | **not carried** — the jar has none (a creative-only item) |
+| `powah:energy_cells` block/item tags | **not carried** — a pre-existing gap: the port never carried this family; the creative cell joins the two vanilla tool tags and the creative tab like the other cells |
+| the GUI bar / right-click, other unported machines | `not ported` — slice 1's gaps, unchanged |
+
+### Harness findings this slice measured (for the next port)
+
+1. A `case` pattern in a verdict script cannot contain an unquoted space: `*, creative,*)` is a
+   bash syntax error (the readout's fields are comma-and-space separated). Match `*creative*`
+   instead. This is a harness bug, not a readout failure — the readout itself was correct.
+2. The exact rate must be read from the two replies' own `t=` clocks: a shell `sleep` measures
+   chat round trips (~2 s, tens of ticks), not game ticks.
+3. A creative source must insert straight into the taker: routing its give through the ordinary
+   `move_energy` would debit the source and fail the never-drops half.
+
+Version: **0.2.16 → 0.2.17** (one patch). The published `[[versions]]` record keeps 0.2.16 and
+gains 0.2.17 at publish time — this port does not touch the registry entry. Title:
+`Update powah 0.2.17` (the entry is ours on `main`).
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+
+## Next slice
+
+**Family:** the energy battery ladder (`powah:battery_starter` … `powah:battery_nitro`).
+`## Deviations and gaps (slice 1)`, item 11 names it — *"The other 6 tiers, the creative cell and
+~15 machines are unported"* — and slice 2's planning note says item charging was deferred because
+*"Powah's batteries are unported, so nothing in the package can be charged"*. The creative cell is
+now closed, so the battery items are the next thing the port's existing item-energy family can act
+on. **Why it fits `machines`:** a battery is `BatteryItem extends EnergyItem` over
+`devices.batteries = new EnergyConfig(batteryCapacity(), batteryTransfer())` — the cell's 1M/1,000
+starter row — with an `ITEM_ENERGY` buffer (the item-energy family slice 7 already declared for
+machine items), seven carried recipes and no renderer, GUI or new hook. **In-game assertion:** put
+a charged starter battery (5,000 FE via `/powah item`) in a starter discharger beside an empty
+starter cell, read `/powah item` and `/powah info` at t1/t2, and assert the cell gains exactly
+**1,000 × Δt** while the battery loses exactly the same; a stone in the slot takes nothing and
+`SELFTEST=battery` must invert the loss half and end `EXIT:1`.
+
 The generators (Magmator/Thermo) remain `blocked(mod-fluid-tank)`, the reactors
 `blocked(uraninite-worldgen)` and the GUIs out of the machines tier.
 

@@ -127,6 +127,15 @@ can only declare face booleans, so the four-type config is carried as six saved 
 existing `/powah info` line changed) and `/powah side <face> <type> <pos>` replaces the wrench
 button: a face set to `none` takes nothing, and opening it again starts the transfer.
 
+Slice 17 adds the **creative energy cell** (`powah:energy_cell_creative`). Upstream's
+`EnergyCellTile.isCreative()` makes it a source: its first tick fills it, its transfer type is
+`EXTRACT` (give only), and its `extractEnergy` is simulated so giving FE never drops the buffer.
+Upstream's `Energy.MAX` (9,000,000,000,000,000,000) is clamped into the SDK's `i32` energy buffer,
+so the source holds and offers 2,147,483,647 FE. It has the cell's two charge slots, an idle tick
+that keeps it full, and a `/powah info` line that keeps the existing cell formatting byte-for-byte
+with a trailing `creative` field; a cable carries 500 FE/t out of it into an empty cell while the
+source's own readout never drops. A stone in its place transfers nothing.
+
 Every machine declares a real `Capabilities.Energy.BLOCK` buffer (the amount is the int
 `energy` in the block entity's saved compound), so other machines can fill and drain a
 furnator, a cell, a discharger, a hopper, a solar panel or a transmitter; an ender cell or
@@ -145,7 +154,7 @@ moves FE from the fuller store to the emptier one (a network never takes back wh
 
 ```text
 powah.hmod            the delivered package (horizon-mod.toml + Cargo.toml + src/ + assets/ + data/)
-horizon-mod.toml      the only manifest and identity: id, version 0.2.15, api 0.2, [native] pins
+horizon-mod.toml      the only manifest and identity: id, version 0.2.17, api 0.2, [native] pins
 Cargo.toml            one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 src/lib.rs            the one `#[mod_api::horizon_mod] impl Hooks`
 src/powah.rs          the glue: the block entity Parts, the queue, the tier tables, the buffers, the cable network, the command

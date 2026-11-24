@@ -133,6 +133,37 @@ pub fn cell_tier(index: usize) -> Option<CellTier> {
     })
 }
 
+/// The creative energy cell's storage numbers. Upstream's
+/// `TieredEnergyValues.get(Tier.CREATIVE)` answers `Energy.MAX`
+/// (9,000,000,000,000,000,000) for **both** the capacity and the transfer row.
+/// The SDK's `ModEnergyBuffer` is `i32`, so the port carries the largest value
+/// it can express — `i32::MAX` = 2,147,483,647 FE (recorded as a deviation).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CreativeCellTier {
+    pub capacity: i32,
+    pub transfer: i32,
+}
+
+/// The creative cell's numbers: upstream's `Energy.MAX`, clamped to the SDK's
+/// `i32` energy buffer. The cell is a source, not a seventh storage tier, so it
+/// has its own type rather than an entry in [`cell_tier`]'s ladder.
+#[must_use]
+pub fn creative_cell_tier() -> CreativeCellTier {
+    CreativeCellTier {
+        capacity: i32::MAX,
+        transfer: i32::MAX,
+    }
+}
+
+/// The buffer a creative cell keeps after giving `given` FE. Upstream's
+/// `EnergyCellTile.extractEnergy` passes `simulate || isCreative()` to its
+/// buffer, so an extraction from a creative cell never debits it: the source's
+/// own readout always shows its full capacity.
+#[must_use]
+pub fn creative_after_give(stored: i32, _given: i32) -> i32 {
+    stored
+}
+
 /// One energy discharger tier's storage numbers: upstream's `devices.dischargers` config is the
 /// battery config (`PowahConfig.EnergyDevices`), so a tier's numbers are its energy cell's —
 /// `batteryCapacity` and `batteryTransfer` at that tier.
@@ -1417,6 +1448,39 @@ mod tests {
         assert_eq!(
             (starter.capacity, starter.transfer),
             (CELL_CAPACITY, CELL_TRANSFER)
+        );
+    }
+
+    #[test]
+    fn the_creative_cell_holds_upstreams_max_in_the_sdks_i32() {
+        // Upstream `TieredEnergyValues.get(CREATIVE)` is `Energy.MAX` = 9e18 for
+        // both rows; the SDK's `ModEnergyBuffer` is i32, so the port carries i32::MAX.
+        let tier = creative_cell_tier();
+        assert_eq!(
+            (tier.capacity, tier.transfer),
+            (2_147_483_647, 2_147_483_647),
+            "upstream Energy.MAX clamped into the SDK's i32 buffer"
+        );
+        assert!(
+            cell_tier(CELL_TIER_COUNT).is_none(),
+            "the creative cell is not a storage tier"
+        );
+    }
+
+    #[test]
+    fn a_creative_source_keeps_its_buffer_when_it_gives() {
+        // `EnergyCellTile.extractEnergy` passes `simulate || isCreative()`, so a
+        // give never debits the creative cell's own buffer.
+        let full = i32::MAX;
+        assert_eq!(
+            creative_after_give(full, 500),
+            full,
+            "a creative source's readout never drops"
+        );
+        assert_eq!(
+            creative_after_give(full, 2_147_483_647),
+            full,
+            "even its whole capacity can be given without a drop"
         );
     }
 

@@ -1,4 +1,28 @@
-# Validation — Powah slices 1 to 16
+# Validation — Powah slices 1 to 17
+
+> **0.2.17 (slice 17, the creative energy cell)** is recorded in
+> [`notes.md`](notes.md#slice-17--the-creative-energy-cell-2026-11-24): the slice and the gap line it
+> comes from (slice 4's coverage row: `energy_cell_creative | not ported — a source, not a storage
+> tier (gap 11)`), the artefact read at tag `v6.2.10` (`Energy.MAX = 9e18` in `Energy.java:16`,
+> `TieredEnergyValues.get(CREATIVE) -> Energy.MAX` for both rows, `EnergyCellTile.onFirstTick` fills
+> it, `extractEnergy` passes `simulate || isCreative()` so it never drops, `getTransferType()` is
+> `EXTRACT`, `keepEnergy()` is `!isCreative()`), and the **verified deviation**: the SDK's
+> `ModEnergyBuffer` is `i32`, so the brief's 2,147,483,647 is the largest expressible value. The red
+> proof (two `todo!()` rules, **107 passed / 2 failed**, quoted verbatim), the ladder at pin
+> `0a875da` (**110 tests**, clippy 0 warnings, `fmt --check` clean, two `cmp`-identical builds of
+> **554,105 B**, `check`, `fits` against the pin **and** `0b14f8a`, gate **1/1** with
+> `package matches the tree`, 867 entries, no packed `Cargo.lock`, `tests 110 passed`,
+> `skills gate PASS`) and the in-game legs (main `PASS`+`EXIT:0` on the delivered archive; the
+> control game red at the first powah block; `SELFTEST=creative` and `SELFTEST=1` at `EXIT:1`; the
+> log gate **70/70 `--strict`**). The full 62-log replay was **not** repeated: this slice changed no
+> earlier family and all 66 earlier verdict logs remain green. This slice used a bounded
+> `tools/e2e-creative.sh` leg, as slice 16 used `e2e-side.sh`. Package: `powah.hmod`, 554,105 B,
+> sha256 `767600b8a3cee804c85f88618b744371e22113a6d27188573db8c024ab21e92c`. Launcher build:
+> `Compiling powah (1 of 1)`, `native-0a875da-dc83d34e7ff0`, instance `powah-e2e`. What it proves:
+> a fresh creative cell reads 2,147,483,647 FE with `2147483647 FE/t a side` and a `creative`
+> field; an empty starter cell behind a cable gained exactly **9,000 FE over 18 ticks** (`500 ×
+> dt` from the two replies' own clocks) while the source stayed full before and after; and a stone
+> in the source's place transferred 0 FE over 20 ticks. No existing `/powah info` line changed.
 
 > **0.2.16 (slice 16, the side config)** is recorded in
 > [`notes.md`](notes.md#slice-16--the-side-config-2026-11-24): the slice and the gap line it

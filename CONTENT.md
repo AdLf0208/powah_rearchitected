@@ -291,3 +291,28 @@ override is 26.3 item model property this slice does not register).
 The ten recipes are read from the jar's own files and their `{"item": …}` ingredients rewritten to
 the pin's id-string form (`recipe_from_jar`), because the carry's importer skipped this family; the
 jar's `player_tranmitter_*` spelling is kept, since renaming an upstream recipe changes its id.
+
+## Slice 17 — the creative energy cell (2026-11-24)
+
+Seven files for one block, reproduced by `tools/carry_slice17.py` (`--check` green). Six are
+carried **byte-for-byte** from the same raw carry as every earlier slice:
+
+| Path | What |
+|---|---|
+| `assets/powah/blockstates/energy_cell_creative.json` | the jar's single-variant blockstate |
+| `assets/powah/models/block/energy_cell_creative.json` | parent `powah:block/energy_cell` with the creative texture |
+| `assets/powah/models/item/energy_cell_creative.json` | the jar's item model |
+| `assets/powah/items/energy_cell_creative.json` | the 26.3 item definition |
+| `assets/powah/textures/block/energy_cell_creative.png` | the jar's 3,250 B texture |
+| `data/powah/loot_table/blocks/energy_cell_creative.json` | self-drop with `survives_explosion` |
+
+One is **written**, not carried:
+
+| Path | Patch |
+|---|---|
+| `data/powah/horizon/block/energy_cell_creative.json` | the carry guesses `minecraft:stone`; a cell is upstream's `AbstractEnergyBlock` — `minecraft:iron_block`, 2.0/20.0 metal, `requires_tool`, `occludes: false`, stack 1 — exactly the port's other seven cells |
+
+The id joins `minecraft:mineable/pickaxe`, `minecraft:needs_iron_tool` and the
+`powah:horizon/creative_tab/machines` list. **No recipe is carried:** the jar has no recipe for the creative tier (it is creative-only). The already-carried
+`assets/powah/lang/en_us.json` has `block.powah.energy_cell_creative` ("Energy Cell (Creative)").
+No asset or model is invented.
