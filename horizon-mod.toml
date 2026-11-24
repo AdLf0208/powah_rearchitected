@@ -1,11 +1,11 @@
-# Slices 1-17 of the Powah port, as one flat SDK package: the carried blocks, items, models,
+# Slices 1-19 of the Powah port, as one flat SDK package: the carried blocks, items, models,
 # textures, recipes, loot, tags and lang are the `assets/` and `data/` beside `src/`, and the
 # behaviour is the one `impl Hooks` there. Licence: LGPL-3.0-only (Technici4n/Powah); the full
 # text and its provenance are in LICENSE and LICENSE-NOTICE.md inside this package. Local-only
 # until the maintainer approves publishing (ARCHITECTURE.md §8).
 id = "powah"
 name = "Powah"
-version = "0.2.18"
+version = "0.2.19"
 description = """A port of Powah! (Rearchitected) for Horizon, slice 1: the starter tier of the energy
 chain. The Furnator burns a furnace fuel into carbon and makes 20 FE/t into a 20,000 FE buffer
 (one coal is 48,000 FE); the Energy Cell is a 1,000,000 FE capacitor that takes and gives 1,000
@@ -88,8 +88,13 @@ an ITEM_ENERGY buffer over the same `devices.batteries` config row as the cells,
 machine's slot and drained by a discharger through the item capability. The seven jar recipes craft.
 All seven rows fit the SDK's i32 energy type — upstream's 2,000,000,000 FE nitro capacity is below
 i32::MAX, so no clamp is needed (the creative cell's 9e18 was the case that needed one).
+Slice 19 adds the wrench as a plain item: a right click with it held on a machine's face advances
+that face's transfer type by the jar's own cycle (all -> extract -> receive -> none -> all for a
+cell), the in-world equivalent of slice 16's GUI-button replacement. The pin's `use_item_on_block`
+hook carries the clicked face and the held stack; stone keeps its item and no side config. No
+earlier `/powah info` line changes.
 Not yet ported: the magmator and thermo generators, the reactors, the Lens of Ender, the
-dimensional binding card and the GUIs."""
+dimensional binding card, the wrench's link/rotate modes and the GUIs."""
 authors = ["owmii", "Technici4n", "AdLf0208"]
 # A native mod: Rust in src/, compiled by the launcher against the game build [native] pins,
 # beside the carried assets/ and data/. The id is the resource namespace and the only identity.

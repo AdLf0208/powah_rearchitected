@@ -36,7 +36,7 @@ use std::sync::{Arc, Mutex};
 use mod_api::{
     self, BlockDropsEvent, ComponentTypesEvent, Flow, Hooks, HostSide, LevelHost,
     LevelTickPostEvent, RegisterCommandsEvent, Registrar, RegistrationContext, RunModCommandEvent,
-    ServerHost, Text, WorldLifecycleEvent,
+    ServerHost, Text, UseItemOnBlockEvent, WorldLifecycleEvent,
 };
 
 use crate::powah::{Queue, SetOutcome};
@@ -344,6 +344,9 @@ impl Hooks for Mod {
                 .unwrap_or_else(|| panic!("{item} is a battery with a buffer"));
             declare_battery(registrar, item, buffer);
         }
+        // The wrench is a plain item: the global `use_item_on_block` hook reads the
+        // held stack and the clicked face, so it needs no Part, buffer or block key.
+        registrar.item_key(powah::WRENCH);
     }
 
     /// The components this mod registers: a binding card's bound player (`powah:bound_player`,
@@ -358,6 +361,14 @@ impl Hooks for Mod {
     /// placing the item puts the FE back.
     fn block_drops(&self, level: &dyn LevelHost, event: &mut BlockDropsEvent<'_>) -> Flow {
         powah::on_block_drops(level, event)
+    }
+
+    /// Slice 19: the wrench's CONFIG-mode right-click cycles the clicked face's
+    /// transfer type (`wrench_next_face`), the in-world equivalent of slice 16's
+    /// GUI-button replacement. Only a held `powah:wrench` on a machine with a side
+    /// config changes anything; the item keeps its byte-for-byte earlier behaviour.
+    fn use_item_on_block(&self, host: HostSide, event: &mut UseItemOnBlockEvent<'_>) -> Flow {
+        powah::on_wrench_use(host, event)
     }
 
     /// After the level's tick: run the queued moves, where every block entity is

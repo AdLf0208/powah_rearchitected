@@ -23,7 +23,7 @@ use mod_api::{
     Holder, Host, HostSide, HostTransaction, Identifier, InteractionResult, ItemComponentHandler,
     ItemInteractMobEvent, ItemKey, ItemPart, ItemPlace, LevelDimension, LevelHost, LevelKey,
     LevelRef, ModContainer, ModEnergyBuffer, NeighbourUpdate, OnBlockPlacedByEvent, PlayerRef,
-    Registrar, ServerHost, Tag, Transaction, UseItemEvent, move_energy,
+    Registrar, ServerHost, Tag, Transaction, UseItemEvent, UseItemOnBlockEvent, move_energy,
 };
 
 use crate::runtime::{
@@ -34,7 +34,7 @@ use crate::runtime::{
     RedstoneMode, RodTier, SOLAR_TIER_COUNT, Sky, SolarTier, TRANSMITTER_TIER_COUNT, TransferType,
     battery_tier, cable_tier, cell_tier, check_redstone, clamp_energy, comparator_strength,
     creative_after_give, creative_cell_tier, default_sides, discharger_tier, ender_cell_tier,
-    ender_gate_tier, furnator_tier, network_moves, push_amount, rod_tier,
+    ender_gate_tier, furnator_tier, network_moves, push_amount, rod_tier, wrench_next_face,
 };
 
 /// The energizing orb block and its item.
@@ -65,6 +65,9 @@ pub(crate) const CREATIVE_CELL: &str = "powah:energy_cell_creative";
 pub(crate) const CREATIVE_CELL_TYPE: &str = "energy_cell_creative";
 /// The starter energy cable block and its item.
 pub(crate) const CABLE: &str = "powah:energy_cable_starter";
+/// The wrench: a plain item whose CONFIG-mode right-click cycles the clicked face's
+/// transfer type, upstream's `WrenchItem` (slice 19). It has no block, buffer or Part.
+pub(crate) const WRENCH: &str = "powah:wrench";
 
 /// The block entity type paths, in this mod's namespace.
 pub(crate) const FURNATOR_TYPE: &str = "furnator_starter";
@@ -2698,6 +2701,55 @@ pub(crate) fn set_side_type(
     match entity.merge_data(host, patch) {
         Ok(_) => SideOutcome::Set(face, kind),
         Err(_) => SideOutcome::NoBlock,
+    }
+}
+
+/// The wrench's CONFIG-mode action: a right click on a block with `powah:wrench`
+/// held advances the clicked face's transfer type by [`wrench_next_face`]. This is
+/// the in-world equivalent of slice 16's GUI-button replacement (the button sends
+/// `NextEnergyConfigPacket`; the item reads the hit face the pin's
+/// `use_item_on_block` hook carries). The pin's `use_item_on_block` fires once per
+/// hand on both sides, so only the server acts; a stone, a block with no side
+/// config, a face the pin cannot name, or an absent/failed write leave the click to
+/// vanilla and keep the item. A successful change cancels the click, as upstream's
+/// `onItemUseFirst` returning `SUCCESS` does.
+pub(crate) fn on_wrench_use(host: HostSide, event: &mut UseItemOnBlockEvent<'_>) -> Flow {
+    let HostSide::Server(host) = host else {
+        return Flow::Continue;
+    };
+    let click = event.click;
+    let Some(stack) = click.stack else {
+        return Flow::Continue;
+    };
+    if stack.item().id(&*host) != WRENCH {
+        return Flow::Continue;
+    }
+    // The face the pin reports is a normal vector; the machine's face index is
+    // `Direction`'s ordinal (`Direction.get3DDataValue()` in the jar).
+    let Some(face) = Direction::ALL
+        .into_iter()
+        .find(|direction| direction.normal() == click.hit.face)
+    else {
+        return Flow::Continue;
+    };
+    let Some(level) = level_now(host) else {
+        return Flow::Continue;
+    };
+    let Some(block) = block_at(&*host, level, click.pos) else {
+        return Flow::Continue;
+    };
+    if !has_side_config(&block) {
+        return Flow::Continue;
+    }
+    let default = Kind::of(&block).map_or(TransferType::None, default_transfer);
+    let current = host
+        .block_entity(level, click.pos)
+        .and_then(|entity| entity.data(&*host))
+        .map_or(default_sides(default), |saved| side_types(&block, &saved));
+    let next = wrench_next_face(current[face as usize], default);
+    match set_side_type(host, click.pos, face, next) {
+        SideOutcome::Set(..) => Flow::Cancel,
+        _ => Flow::Continue,
     }
 }
 

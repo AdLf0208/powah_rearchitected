@@ -6,10 +6,10 @@
 #
 # Cargo's name and version are not the mod's identity: horizon-mod.toml is.
 name = "powah"
-version = "0.2.18"
+version = "0.2.19"
 edition = "2024"
 license = "LGPL-3.0-only"
-description = "Powah for Horizon: the seven-tier Furnator, Energy Cell, Energy Cable, Energy Discharger and Solar Panel ladders with their cable network, the dielectric/capacitor family, the Energizing Orb with its rod ladder and materials, the seven-tier Energy Hopper that charges the container it faces, the seven-tier Ender Cell and Ender Gate channel network, the item-energy family (a broken machine's item carries its buffer, machines charge the items in their slots and a discharger drains them), the seven-tier Player Transmitter that charges the inventory of the player its binding card names, the redstone mode every machine reads in its own tick, the comparator reading the buffered machines answer, and the orb's stack-count and the rod's own-buffer comparator readings, the six per-face transfer types every machine saves and enforces, and the creative energy cell, an extract-only source that gives 500 FE/t through a cable without its buffer ever dropping, and the seven energy battery items (start 1M/1,000 to nitro 2G/2,000,000 FE) as ITEM_ENERGY buffers over the devices.batteries config row"
+description = "Powah for Horizon: the seven-tier Furnator, Energy Cell, Energy Cable, Energy Discharger and Solar Panel ladders with their cable network, the dielectric/capacitor family, the Energizing Orb with its rod ladder and materials, the seven-tier Energy Hopper that charges the container it faces, the seven-tier Ender Cell and Ender Gate channel network, the item-energy family (a broken machine's item carries its buffer, machines charge the items in their slots and a discharger drains them), the seven-tier Player Transmitter that charges the inventory of the player its binding card names, the redstone mode every machine reads in its own tick, the comparator reading the buffered machines answer, and the orb's stack-count and the rod's own-buffer comparator readings, the six per-face transfer types every machine saves and enforces, and the creative energy cell, an extract-only source that gives 500 FE/t through a cable without its buffer ever dropping, and the seven energy battery items (start 1M/1,000 to nitro 2G/2,000,000 FE) as ITEM_ENERGY buffers over the devices.batteries config row, and the wrench, a plain item whose right-click advances the clicked machine face through the jar's transfer-type cycle"
 publish = false
 
 [dependencies]

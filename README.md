@@ -146,6 +146,15 @@ port's single `minecraft:block_entity_data` store are one value, and every tier 
 `/powah item <pos>` is an opt-in readout of the item's charge, capacity and transfer with the level's
 own clock — no existing `/powah info` line changed.
 
+Slice 19 adds the **wrench** (`powah:wrench`) as a plain item. A right click with it held on a
+machine's face advances that face's transfer type by the jar's own cycle — `all → extract →
+receive → none → all` for a cell — the in-world equivalent of slice 16's GUI-button replacement
+(`NextEnergyConfigPacket`). The pin's global `use_item_on_block` hook carries the clicked face
+(`click.hit.face`) and the held stack (`click.stack`), so no new hook, block, renderer or GUI is
+needed; the wrench registers no Part, buffer or block key. Stone keeps its item and its "no side
+config" reply, and no earlier `/powah info` line changes. The wrench's link and rotate modes and
+the `c:tools/wrench` compatibility tag are not ported (no game effect in this port).
+
 Every machine declares a real `Capabilities.Energy.BLOCK` buffer (the amount is the int
 `energy` in the block entity's saved compound), so other machines can fill and drain a
 furnator, a cell, a discharger, a hopper, a solar panel or a transmitter; an ender cell or
@@ -164,7 +173,7 @@ moves FE from the fuller store to the emptier one (a network never takes back wh
 
 ```text
 powah.hmod            the delivered package (horizon-mod.toml + Cargo.toml + src/ + assets/ + data/)
-horizon-mod.toml      the only manifest and identity: id, version 0.2.18, api 0.2, [native] pins
+horizon-mod.toml      the only manifest and identity: id, version 0.2.19, api 0.2, [native] pins
 Cargo.toml            one crate; its only dependency is horizon-mod-api from .horizon/sdk/
 src/lib.rs            the one `#[mod_api::horizon_mod] impl Hooks`
 src/powah.rs          the glue: the block entity Parts, the queue, the tier tables, the buffers, the cable network, the command
@@ -207,6 +216,10 @@ block's GUI channel buttons (`SetChannelPacket`):
 /powah side <x> <y> <z>            # the six face types, with their own t= clock (slice 16)
 /powah side <face> <type> <x> <y> <z>  # set one face to all|extract|receive|none (the wrench button)
 ```
+
+Slice 19's wrench is real gameplay, not a command: hold `powah:wrench` and right-click a
+machine's face (e.g. `horizon-ctl interact 6 100 60 north`) to advance that face. `/powah side
+<x> <y> <z>` is the opt-in readout that proves the change.
 
 ## Running the in-game check
 

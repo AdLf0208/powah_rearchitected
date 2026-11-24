@@ -4568,19 +4568,205 @@ gains 0.2.18 at publish time — this port does not touch the registry entry. Ti
 
 Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
 
+## Slice 19 — the wrench and its side-config action (2026-11-24)
+
+### The slice, quoted from this port's own gaps
+
+The previous `## Next slice` named the family verbatim: the wrench (`powah:wrench`) and its
+side-config action, from `## Deviations and gaps (slice 1)`, item 11 (*"…wrench, book, upgrades,
+GUIs, side config…"*) and slice 16's deviation 1 (*"the GUI's wrench button is a command"*).
+**Why it fits `machines`:** one plain item plus a right-click rule that calls the existing
+`set_side_type`; no new block, block entity, renderer, GUI or hook family. Class **content**, tier
+**machines** (ledger).
+
+### First gate — the clicked face reaches a plain item (PASSED before any edit)
+
+`Hooks::use_item_on_block` (`UseItemOnBlockEvent`) is a global cancellable hook in the pin's surface
+(`ports/_shared/sdk/0a875da/api-source/crates/horizon-mod-vocab/src/hooks/use_item_on_block.rs`),
+listened by implementing the method. Its `click: &BlockClick` exposes `hit.face: [i32;3]` (the face
+normal), `stack: Option<&ItemStack>` (the held item, read with `stack.item().id(host)`) and
+`pos: [i32;3]`. `UseItemOnEvent` (the BlockPart variant) also exposes `hit.face` but dispatches by
+**block state**, so a plain item cannot receive it; the global hook is the route. The item needs no
+Part, buffer or block key. Evidence: `block/types.rs:418-440` (`BlockClick`) and `:311-334`
+(`BlockHit.face`) of the extracted SDK. No `blocked(...)` was needed.
+
+### The artefact — the real cycle, read before coding (tag `v6.2.10`, commit `a5a8f25`)
+
+- `item/WrenchItem.java:30-33` — `DEFAULT_WRENCH_MODE = WrenchMode.values()[0]` = `CONFIG`.
+- `api/wrench/WrenchMode.java` — `CONFIG, LINK, ROTATE`, wrapped by `BY_ID(ordinal + 1)`.
+- `WrenchItem.onItemUseFirst` — in CONFIG mode it cycles the hit face's `SideConfig`
+  (`config.nextType(direction); sync()`) and returns `SUCCESS`. At this tag the generic machine
+  branch (`TileBase.EnergyStorage`) is **commented out**; only a `CableTile` is cycled. This port
+  has no cable side config (`has_side_config` excludes cables), so the CONFIG action is applied to
+  any machine with a `SideConfig` — the same `set_side_type` slice 16's GUI-button replacement
+  uses. Recorded as deviation 1.
+- `lib/logistics/SideConfig.java:nextType` → `Transfer.next(storage.getTransferType())`.
+- `lib/logistics/Transfer.java:next` — with default `ALL` (a cell) the four types cycle
+  **`all → extract → receive → none → all`**; with `EXTRACT`/`RECEIVE` it toggles that type and
+  `none`; with `NONE` always `none`. The port already encoded this exactly as
+  `TransferType::next(default)` (slice 16); the wrench's pure rule `runtime::wrench_next_face`
+  reuses it. A fresh wrench is in CONFIG mode, so the very first click on a cell leaves `extract`
+  — not an assumed `receive`.
+
+### What it ships
+
+| File | Change |
+|---|---|
+| `src/runtime.rs` | `wrench_next_face(current, default)` (the artefact's `Transfer.next` rule) and 2 tests — the cell's four-step cycle and the give/take-only toggle |
+| `src/powah.rs` | `WRENCH` id; `on_wrench_use` (server-only: read `click.stack` id, map `click.hit.face` to `Direction`, read the face's current type, call `wrench_next_face` then `set_side_type`; cancel only on a real change so stone keeps its item and normal use) |
+| `src/lib.rs` | `registrar.item_key(WRENCH)` in `register`; `Hooks::use_item_on_block` forwarding to `on_wrench_use` |
+| `tools/carry_slice19.py` | 5 carried files (texture, model, 26.3 item def, shaped recipe, recipe advancement) + the written horizon item decl (`max_stack_size: 1`, upstream's `stacksTo(1)`) + the creative tab id; `--check` reproducible |
+| `tools/craft_check.py` | the jar's wrench-shaped recipe as a `CRAFT_ONLY=wrench` case |
+| `tools/e2e-wrench.sh` | the bounded verdict leg: face change with a fresh clock, stone differential, the recipe, control and two selftests |
+| `horizon-mod.toml`, `Cargo.toml`, `README.md` | version 0.2.19 and the slice's paragraph |
+
+No existing `/powah info` line changed and the new side readout stays opt-in: all 74 earlier e2e
+logs keep their verdicts. The redstone mode and comparator families (slices 13–15) were not touched.
+
+### TDD: the red proof, quoted
+
+`wrench_next_face` was declared with `todo!()` and two tests written against it before any
+implementation; `cargo test --offline` printed (`evidence/powah/slice19-test-red.log`):
+
+```text
+---- runtime::tests::wrench_cycles_a_cell_face_in_upstreams_real_order stdout ----
+
+thread 'runtime::tests::wrench_cycles_a_cell_face_in_upstreams_real_order' (466150) panicked at src/runtime.rs:1205:5:
+not yet implemented: slice 19: the wrench's side-config cycle
+
+---- runtime::tests::wrench_toggles_a_give_or_take_only_face_and_never_a_none_storage stdout ----
+
+thread 'runtime::tests::wrench_toggles_a_give_or_take_only_face_and_never_a_none_storage' (466151) panicked at src/runtime.rs:1205:5:
+not yet implemented: slice 19: the wrench's side-config cycle
+
+test result: FAILED. 114 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+```
+
+After the implementation the same command printed **116 passed, 0 failed**
+(`evidence/powah/sdk-test.log`, regenerated for 0.2.19).
+
+### Ladder (0.2.19, pin `0a875da`)
+
+Every compile step ran in `ports/powah`, `CARGO_INCREMENTAL=0`, through
+`ports/tools/build-slot.sh run --job W1-powah --port ports/powah --step …` (forwarded to AdLf-PC —
+no `BUILD_LOCAL=1`). Packed docs (manifest, Cargo.toml, README) were finalised **before** the two
+builds; the later harness fixes touch only `tools/`, which is not packed.
+
+| Check | Result |
+|---|---|
+| `cargo test --offline` | **116 passed, 0 failed** (`sdk-test.log`) |
+| `cargo clippy --all-targets --offline -- -D warnings` | `CLIPPY_EXIT:0`, 0 warnings (`slice19-ladder.log`) |
+| `cargo fmt --check` | `FMT_EXIT:0`, clean (`slice19-ladder.log`, `slice19-fmt-apply.log`) |
+| two builds, `rm -f Cargo.lock` before each | `BUILD1_OK`, `BUILD2_OK`, **`cmp`-identical**, 577,327 B (`slice19-build{,-second}.log`) |
+| `cargo horizon-mod check powah.hmod` | `powah 0.2.19 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)` · `577327 bytes, SHA-256 837eade1…3fd7`, `CHECK_EXIT:0` |
+| `cargo horizon-mod fits powah.hmod --build 0a875da` | `Powah:` / `0a875da  made for`, `FITS_PIN_EXIT:0` |
+| `cargo horizon-mod fits powah.hmod --build 0b14f8a` | `Powah:` / `0b14f8a  fits`, `FITS_OTHER_EXIT:0` |
+| `python3 ports/tools/verify-sdk-package.py powah` | **1/1**, `package matches the tree`, `no packed Cargo.lock  915 entries`, `SDK-only dependencies (R9)`, `tests 116 passed`, `skills gate PASS` (`slice19-verify.log`) |
+| `python3 ports/tools/check_261_dialect.py powah.hmod` | exit 0: 283 recipe/loot files in the 26.3 dialect, including `wrench.json` |
+
+The delivered `powah.hmod` is **577,327 B**, sha256
+`837eade1f4f76de8aa14a268905dda57b145ef3067de7840e4cde64f3d923fd7`, **915 entries**, no packed
+`Cargo.lock`. Both fits lines are real: the pin prints `made for` (a tautology), the other pinned
+build prints `fits`. No local type or variant named `Block`/`Item` was introduced, so `fits` had no
+false failure.
+
+### In-game (parity rule)
+
+Launcher build `native-0a875da-72336e5663ab`, instance `powah-e2e`, `Compiling powah (1 of 1)`
+(`launcher-build-0.2.19.log`); the one stale tag carrying 0.2.18
+(`native-0a875da-e176cccc4898`) was removed first so the launcher recompiled. The full ~20-minute
+replay of slices 1–18 was not repeated: this slice changed no earlier family, and all earlier
+verdict logs stay green under the strict gate (78/78 with the four new legs). The wrench scenario
+is its own bounded leg (`tools/e2e-wrench.sh`), as slices 16–18 used their own bounded legs.
+
+| Leg | Command | Result |
+|---|---|---|
+| main | `build-slot.sh run --step e2e -- bash ports/powah/tools/e2e-wrench.sh` | **`PASS` + `EXIT:0`** (`e2e-wrench-0.2.19.log`) |
+| control (same Nightly, no package) | `LAUNCH_GAME=$CONTROL_GAME …` | `FAIL: expected powah:energy_cell_starter at 6,100,60, got 'minecraft:air'` + `EXIT:1` (`e2e-wrench-control-0.2.19.log`) |
+| `SELFTEST=wrench` | `SELFTEST=wrench …` | `FAIL: SELFTEST flipped: the wrench left the north face at extract, as it should` + `EXIT:1` (`e2e-selftest-wrench-0.2.19.log`) |
+| `SELFTEST=1` (slice-1 flip) | `SELFTEST=1 …` | `FAIL: SELFTEST flipped: the unfuelled furnator made no FE, as it should` + `EXIT:1` (`e2e-selftest-1-0.2.19.log`) |
+| log gate | `check-e2e-logs.py powah-e2e --strict` | `logs=78 ok=78 missing-exit=0 bad-exit=0`, exit 0 |
+
+Quoted from `e2e-wrench-0.2.19.log`:
+
+```text
+  fresh cell: Machine at 6,100,60 (side down=all,up=all,north=all,south=all,west=all,east=all, t=106)
+  interact: {"block":{"block":"powah:energy_cell_starter",...},"changed":false,...,"ok":true,...}
+  after the wrench click: Machine at 6,100,60 (side down=all,up=all,north=extract,south=all,west=all,east=all, t=165)
+  stone interact: {"block":{"block":"minecraft:stone",...},"changed":false,...,"ok":true,...}
+  stone before: That block has no side config.
+  stone after:  That block has no side config.
+  iron + dielectric paste -> a wrench -> {"count": 1, "item": "powah:wrench", "slot": 200}
+  recipe PASS: all 1 wrench recipes craft their declared output id and count, and every ingredient is consumed
+```
+
+The face change is parsed from the `/powah side` reply, not from an absence of error: `north=all`
+before, `north=extract` after, with a fresh `t=` and the other five faces untouched. The stone
+replies are byte-identical before and after, and `ctl inventory` still counts one wrench. The
+`SELFTEST=wrench` counterfactual demands the face stayed `all` and so fails on a correct package.
+
+### Coverage (parity rule, the family this slice adds)
+
+| Family (from the jar) | Status |
+|---|---|
+| `powah:wrench` (plain item, `stacksTo(1)`) | **tested** — given and selected in game; the held stack reaches `use_item_on_block` and the stone differential proves the item is kept |
+| CONFIG-mode side-config action (`SideConfig.nextType`) | **tested** — right-clicking the north face of a fresh cell advances `north=all → extract`, the artefact's real first step, with a fresh clock; the other five faces stay `all` |
+| the four-step cycle for a cell and the give/take-only toggle | **tested** — unit tests pin `all→extract→receive→none→all` and the `EXTRACT`/`RECEIVE`/`NONE` rules; the in-game half proves the first step |
+| the jar's wrench-shaped recipe | **tested** — `craft_check.py` (`CRAFT_ONLY=wrench`) crafts `powah:wrench` ×1 in a real table and consumes both iron ingots and all three dielectric paste |
+| `WrenchMode` cycle (CONFIG→LINK→ROTATE) and LINK/ROTATE actions | **not ported** — the pin's `use_item_on_block` carries no shift-key state and the port has no client→server key action surface; only the default CONFIG action is ported |
+| `c:tools/wrench` item tag | **not ported** — a mod-compatibility tag with no effect in this port (no carried recipe or hook reads it) |
+| the GUI wrench button | `not ported` — slice 1's GUI gap; `/powah side` (slice 16) and now the wrench item are its replacements |
+
+### Deviations this slice records
+
+1. **The machine branch is commented out upstream.** At `v6.2.10` `WrenchItem.onItemUseFirst`
+   cycles only a `CableTile`'s face; the `TileBase.EnergyStorage` branch is commented out. This
+   port has no cable side config, so the CONFIG action is applied to any machine with a
+   `SideConfig` — the same `set_side_type` the GUI-button replacement uses. This is the artefact's
+   intended behaviour, not an invented mechanic.
+2. **Server-only, cancel on change.** The global hook fires on both sides; only the server acts.
+   A click that changes nothing (stone, a machine with no side config, an unnameable face, a failed
+   write) returns `Flow::Continue`, so vanilla use still runs and the item is never consumed.
+3. **Wrench modes and the tool tag are not ported** (coverage table); they would need a
+   client→server action surface this pin does not have.
+
+**Upstream defects fixed: none.** The `CONFIG` default, the four-type cycle and the
+`stacksTo(1)` are internally consistent with `Itms`/`Transfer`/`SideConfig`; no defect was found
+while measuring them.
+
+### Harness findings this slice measured (for the next port)
+
+1. `ctl interact X Y Z north` aims from the player's eye and refuses a face the ray cannot reach:
+   the player must stand NORTH of the block (z < target z). Standing south made the click hit no
+   face and the side readout stayed unchanged — the first verdict leg failed for that reason.
+   Do not discard the `ctl interact` reply: it names the block and whether it changed.
+2. The jar's wrench pattern is `" ip"/" pi"/"p  "`: the middle row is space-paste-iron, so the
+   grid cells are iron 101/105 and paste 102/104/106. Reading it as paste-iron-space made an
+   exactly-looking grid fail the recipe. Always print `repr` of each pattern row, not the bare line.
+3. A forwarded build/e2e's `pull_port` restores the far box's `evidence/<mod>/` over the local
+   one, so a canonical regenerated log (`sdk-test.log`) must be written **after** the last
+   forwarded run; a unique `slice19-*.log` tee'd locally survives.
+
+Version: **0.2.18 → 0.2.19** (one patch). The published `[[versions]]` record keeps 0.2.18 and
+gains 0.2.19 at publish time — this port does not touch the registry entry. Title:
+`Update powah 0.2.19` (the entry is ours on `main`; 0.2.18 is staged on PR #1850).
+
+Skills: superpowers/using-superpowers, brainstorming, writing-plans, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
+
 ## Next slice
 
-**Family:** the wrench (`powah:wrench`) and its side-config action. `## Deviations and gaps (slice
-1)`, item 11 names it verbatim in the unported list (notes.md's slice-2 coverage row: *"…wrench,
-book, upgrades, GUIs, side config…"*), and slice 16's deviation 1 says the GUI's wrench button is
-currently `/powah side`. **Why it fits `machines`:** the wrench is one plain item plus a
-right-click-on-block rule that calls the side-config `set_side_type` the port already has; no new
-block, renderer, GUI or hook family beyond the pin's item-use hook (the first step is to confirm
-`UseItemOnEvent` exposes the clicked face — stop and report `blocked(<gap>)` if it does not).
-**In-game assertion:** right-click the north face of a fresh starter cell at 6,100,60 with
-`powah:wrench`, then read `/powah side 6 100 60` and assert its `north=` field changed from `all`
-to the wrench cycle's next value with a fresh `t=`; right-click a stone at 8,100,60 and assert the
-same readout is unchanged; `SELFTEST=wrench` must invert the changed-face half and end `EXIT:1`.
+**Family:** the wrench's ROTATE mode — rotating a machine's `facing` block-state property. This
+slice's coverage row names it verbatim (*"WrenchMode cycle … and LINK/ROTATE actions — not ported"*)
+and the artefact's `WrenchItem.rotateState` (`nextDirection` over `Direction.values()`, skipping a
+placement that cannot survive) is the rule. **Why it fits `machines`:** it reuses the item-use
+hook and adds one block-state write to a machine that already declares `facing`; no new block,
+renderer or GUI. **First gate:** confirm the pin's `ServerHost` exposes a block-state write for a
+named property with a survival check; if not, stop with `blocked(<gap>)` — do not fake a rotation.
+Mode selection needs the GUI-button replacement (`/powah wrench mode <mode>`, operator-only), since
+the hook carries no shift-key state. **In-game assertion:** `/powah wrench mode rotate`, then
+`ctl interact <hopper> north` with the wrench held, then `/powah info <pos>` must show `facing=`
+advanced to the jar's next direction with a fresh `t=`; a wrench in CONFIG mode must leave
+`facing` unchanged; `SELFTEST=rotate` must invert the changed-half and end `EXIT:1`.
 
 The generators (Magmator/Thermo) remain `blocked(mod-fluid-tank)`, the reactors
 `blocked(uraninite-worldgen)` and the GUIs out of the machines tier.

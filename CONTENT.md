@@ -340,3 +340,28 @@ The seven ids join `powah:horizon/creative_tab/machines`. The already-carried
 `assets/powah/lang/en_us.json` names every `item.powah.battery_<tier>`. No tool tags: a battery is
 an item, not a block. No asset, model, number or recipe is invented; `craft_check.py` crafts all
 seven in game.
+
+## Slice 19 — the wrench (2026-11-24)
+
+Six files, reproduced by `tools/carry_slice19.py` (`--check` green). Five are carried
+**byte-for-byte** from the raw carry:
+
+| Path | What |
+|---|---|
+| `assets/powah/textures/item/wrench.png` | the jar's wrench texture (368 B) |
+| `assets/powah/models/item/wrench.json` | `item/generated` with that texture as `layer0` |
+| `assets/powah/items/wrench.json` | the 26.3 item definition |
+| `data/powah/recipe/crafting/wrench.json` | the jar's shaped recipe (`" ip"/" pi"/"p  "`: iron 101/105, paste 102/104/106) |
+| `data/powah/advancement/recipes/misc/crafting/wrench.json` | the jar's unlock file |
+
+One is **written**, not carried:
+
+| Path | Patch |
+|---|---|
+| `data/powah/horizon/item/wrench.json` | the carry guesses a 64-stack `{"template": "minecraft:stick"}`; `Itms.WRENCH = new WrenchItem(new Item.Properties().stacksTo(1))`, so the declaration carries `max_stack_size: 1` |
+
+The id joins `powah:horizon/creative_tab/machines`. The already-carried
+`assets/powah/lang/en_us.json` names `item.powah.wrench` and its three mode strings. The
+`c:tools/wrench` item tag is deliberately not carried: it is a mod-compatibility tag with no
+effect in this port (no carried recipe or hook reads it). No asset, model, number or recipe is
+invented; `craft_check.py` crafts the wrench in game.

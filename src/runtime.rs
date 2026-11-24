@@ -1193,6 +1193,18 @@ pub fn default_sides(default: TransferType) -> [TransferType; 6] {
     [default; 6]
 }
 
+/// The face type the wrench's CONFIG-mode click leaves on a machine. Upstream's
+/// `Transfer.next(storage.getTransferType())` is the whole rule: for a cell (an
+/// energy *storage*, default `ALL`) the four types cycle
+/// `all → extract → receive → none → all`; a give-only/take-only machine toggles its
+/// own type and `none`; a machine whose storage type is `NONE` never changes. The
+/// wrench's shift-click mode cycle is a separate client/player-inventory concern
+/// (not ported); by default a fresh wrench is in `WrenchMode.CONFIG`.
+#[must_use]
+pub fn wrench_next_face(current: TransferType, default: TransferType) -> TransferType {
+    current.next(default)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2945,6 +2957,44 @@ mod tests {
             solar_production(0, nitro, day, false),
             2_000,
             "the nitro panel makes its 2,000 FE a tick"
+        );
+    }
+
+    #[test]
+    fn wrench_cycles_a_cell_face_in_upstreams_real_order() {
+        // `Transfer.java:next(ALL)`: the ordinal advances through
+        // ALL, EXTRACT, RECEIVE, NONE and wraps back to ALL. A fresh cell's face is
+        // ALL, so the first wrench click must leave EXTRACT (not an assumed RECEIVE).
+        let cell = TransferType::All;
+        let mut face = TransferType::All;
+        for want in [
+            TransferType::Extract,
+            TransferType::Receive,
+            TransferType::None,
+            TransferType::All,
+        ] {
+            face = wrench_next_face(face, cell);
+            assert_eq!(face, want, "one click advances the cell face in jar order");
+        }
+    }
+
+    #[test]
+    fn wrench_toggles_a_give_or_take_only_face_and_never_a_none_storage() {
+        // `Transfer.java:next(EXTRACT)` / `next(RECEIVE)`: a face of the storage's own
+        // type goes to NONE, and a NONE face goes back to that type. A storage whose
+        // own type is NONE (the orb, a cable) never changes.
+        for default in [TransferType::Extract, TransferType::Receive] {
+            assert_eq!(wrench_next_face(default, default), TransferType::None);
+            assert_eq!(wrench_next_face(TransferType::None, default), default);
+            assert_eq!(
+                wrench_next_face(TransferType::All, default),
+                TransferType::None
+            );
+        }
+        assert_eq!(
+            wrench_next_face(TransferType::All, TransferType::None),
+            TransferType::None,
+            "a storage whose own type is NONE never changes a face"
         );
     }
 }

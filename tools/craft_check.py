@@ -540,6 +540,15 @@ CASES = [
     shaped("nitro crystal + nitro capacitor + spirited battery -> a nitro battery",
            battery("powah:crystal_nitro", "powah:capacitor_nitro",
                    "powah:battery_spirited"), "powah:battery_nitro", 1),
+
+    # --- slice 19: the wrench (the jar's `wrench.json` shaped pattern) ----------
+    # `" ip"/" pi"/"p  "`: two iron ingots and three dielectric paste. The item is
+    # `stacksTo(1)` upstream, so the craft yields one wrench. The middle row is
+    # `" pi"` (space, paste, iron), so its two cells are 104 and 105 — not 103.
+    shaped("iron + dielectric paste -> a wrench",
+           {"minecraft:iron_ingot": [101, 105],
+            "powah:dielectric_paste": [102, 104, 106]},
+           "powah:wrench", 1),
 ]
 
 

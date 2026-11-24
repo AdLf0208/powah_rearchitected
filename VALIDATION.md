@@ -1,4 +1,29 @@
-# Validation — Powah slices 1 to 18
+# Validation — Powah slices 1 to 19
+
+> **0.2.19 (slice 19, the wrench and its side-config action)** is recorded in
+> [`notes.md`](notes.md#slice-19--the-wrench-and-its-side-config-action-2026-11-24): the slice and
+> the gap line it comes from (`## Next slice`, from slice 1's gap 11 — *"…wrench, book, upgrades,
+> GUIs, side config…"* — and slice 16's GUI-button replacement), and the artefact read at tag
+> `v6.2.10` (`WrenchItem`'s default `WrenchMode.CONFIG`, `SideConfig.nextType` →
+> `Transfer.next(getTransferType())`: for a cell **all → extract → receive → none → all**; the
+> generic machine branch is commented out upstream, so this port applies the CONFIG action to any
+> machine with a `SideConfig`). **First gate passed before any edit:** the pin's global
+> `use_item_on_block` carries `click.hit.face` and `click.stack`, so a plain item can receive the
+> clicked face (`UseItemOnEvent`, the BlockPart variant, dispatches by block state and cannot).
+> The red proof (two `todo!()` rules, **114 passed / 2 failed**, quoted verbatim), the ladder at
+> pin `0a875da` (**116 tests**, clippy 0 warnings, `fmt --check` clean, two `cmp`-identical builds
+> of **577,327 B**, `check`, `fits` against the pin **and** `0b14f8a`, gate **1/1** with `package
+> matches the tree`, 915 entries, no packed `Cargo.lock`, R9, `tests 116 passed`, `skills gate
+> PASS`) and the in-game legs (main `PASS`+`EXIT:0` on the delivered archive; the control game red
+> at the first `setblock`; `SELFTEST=wrench` and `SELFTEST=1` at `EXIT:1`; the log gate **78/78
+> `--strict`**). The full replay was not repeated: this slice changed no earlier family. A bounded
+> `tools/e2e-wrench.sh` leg proves a right-click with `powah:wrench` on a fresh cell's north face
+> advances `north=all → extract` with a fresh `t=` and leaves the other five faces alone, a stone
+> keeps its "no side config" reply and the item, and the jar's wrench recipe crafts its id and
+> count with every ingredient consumed. Package: `powah.hmod`, 577,327 B, sha256
+> `837eade1f4f76de8aa14a268905dda57b145ef3067de7840e4cde64f3d923fd7`. Launcher build: `Compiling
+> powah (1 of 1)`, `native-0a875da-72336e5663ab`, instance `powah-e2e`. No `/powah info` line
+> changed; the redstone/comparator families (slices 13–15) were not touched.
 
 > **0.2.18 (slice 18, the energy battery ladder)** is recorded in
 > [`notes.md`](notes.md#slice-18--the-energy-battery-ladder-2026-11-24): the slice and the gap line it
